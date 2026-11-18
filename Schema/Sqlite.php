@@ -5,13 +5,14 @@ const VERSION = 1;
 
 // Binary values are base64 TEXT; timestamps are Unix seconds.
 // Ownership references to users(id) cascade; provenance columns (created_by, granted_by, audit actor/target) are SET NULL.
+// Surrogate ids are AUTOINCREMENT so a deleted object's id is never reused (grants and key rows name objects by type and id).
 function version_1($pdo)
 {
     $pdo->exec('CREATE TABLE IF NOT EXISTS vault_meta (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         schema_note TEXT
     )');
-    $pdo->exec("INSERT INTO vault_meta (id, schema_note) VALUES (1, 'Vault schema v1')");
+    $pdo->exec("INSERT INTO vault_meta (id, schema_note) SELECT 1, 'Vault schema v1' WHERE NOT EXISTS (SELECT 1 FROM vault_meta WHERE id = 1)");
 
     $pdo->exec("CREATE TABLE IF NOT EXISTS vault_principals (
         user_id INTEGER PRIMARY KEY,
@@ -35,7 +36,7 @@ function version_1($pdo)
     )");
 
     $pdo->exec("CREATE TABLE IF NOT EXISTS vault_wraps (
-        id INTEGER PRIMARY KEY,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
         method TEXT NOT NULL,
         credential_id TEXT,
@@ -52,7 +53,7 @@ function version_1($pdo)
     )");
 
     $pdo->exec('CREATE TABLE IF NOT EXISTS vault_webauthn (
-        id INTEGER PRIMARY KEY,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
         credential_id TEXT NOT NULL,
         cose_public_key TEXT NOT NULL,
@@ -67,7 +68,7 @@ function version_1($pdo)
     )');
 
     $pdo->exec('CREATE TABLE IF NOT EXISTS vault_challenges (
-        id INTEGER PRIMARY KEY,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
         purpose TEXT NOT NULL,
         challenge_hash TEXT NOT NULL,
@@ -76,7 +77,7 @@ function version_1($pdo)
     )');
 
     $pdo->exec("CREATE TABLE IF NOT EXISTS vault_groups (
-        id INTEGER PRIMARY KEY,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         owner_id INTEGER NOT NULL,
         parent_id INTEGER,
         kind TEXT NOT NULL DEFAULT 'normal' CHECK (kind IN ('normal', 'agent_created', 'import')),
@@ -92,7 +93,7 @@ function version_1($pdo)
     )");
 
     $pdo->exec('CREATE TABLE IF NOT EXISTS vault_entries (
-        id INTEGER PRIMARY KEY,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         group_id INTEGER NOT NULL,
         owner_id INTEGER NOT NULL,
         created_by INTEGER,
@@ -109,7 +110,7 @@ function version_1($pdo)
     )');
 
     $pdo->exec('CREATE TABLE IF NOT EXISTS vault_grants (
-        id INTEGER PRIMARY KEY,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         subject_type TEXT NOT NULL,
         subject_id INTEGER NOT NULL,
         grantee_id INTEGER NOT NULL,
@@ -134,7 +135,7 @@ function version_1($pdo)
     )');
 
     $pdo->exec('CREATE TABLE IF NOT EXISTS vault_rekey_queue (
-        id INTEGER PRIMARY KEY,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         object_type TEXT NOT NULL,
         object_id INTEGER NOT NULL,
         expected_key_epoch INTEGER NOT NULL,
@@ -179,7 +180,7 @@ function version_1($pdo)
     )');
 
     $pdo->exec("CREATE TABLE IF NOT EXISTS vault_audit (
-        id INTEGER PRIMARY KEY,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         created_at INTEGER NOT NULL,
         actor_user_id INTEGER,
         actor_kind TEXT NOT NULL CHECK (actor_kind IN ('human', 'agent', 'public', 'cli')),

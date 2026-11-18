@@ -5,13 +5,15 @@ const VERSION = 1;
 
 // Binary values are base64 TEXT (entry and group ciphertext LONGTEXT); timestamps are Unix seconds.
 // Ownership references to users(id) cascade; provenance columns (created_by, granted_by, audit actor/target) are SET NULL.
+// Surrogate ids must never be reused (grants and key rows name objects by type and id): AUTO_INCREMENT
+// keeps a persistent InnoDB counter only on MySQL 8.0+ / MariaDB 10.2.4+.
 function version_1($pdo)
 {
     $pdo->exec('CREATE TABLE IF NOT EXISTS vault_meta (
         id INT NOT NULL PRIMARY KEY CHECK (id = 1),
         schema_note TEXT
     ) ENGINE=InnoDB CHARSET=utf8mb4');
-    $pdo->exec("INSERT INTO vault_meta (id, schema_note) VALUES (1, 'Vault schema v1')");
+    $pdo->exec("INSERT INTO vault_meta (id, schema_note) SELECT 1, 'Vault schema v1' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM vault_meta WHERE id = 1)");
 
     $pdo->exec("CREATE TABLE IF NOT EXISTS vault_principals (
         user_id INT NOT NULL PRIMARY KEY,

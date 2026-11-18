@@ -11,7 +11,7 @@ function version_1($pdo)
         id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
         schema_note TEXT
     )');
-    $pdo->exec("INSERT INTO vault_meta (id, schema_note) VALUES (1, 'Vault schema v1')");
+    $pdo->exec("INSERT INTO vault_meta (id, schema_note) SELECT 1, 'Vault schema v1' WHERE NOT EXISTS (SELECT 1 FROM vault_meta WHERE id = 1)");
 
     $pdo->exec("CREATE TABLE IF NOT EXISTS vault_principals (
         user_id INTEGER NOT NULL PRIMARY KEY,

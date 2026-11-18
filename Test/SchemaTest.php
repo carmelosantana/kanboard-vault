@@ -56,6 +56,42 @@ class SchemaTest extends Base
         $this->assertFalse(@$this->container['db']->table('vault_meta')->insert(['id' => 2, 'schema_note' => 'x']));
     }
 
+    public function testVaultMetaSeedIsIdempotent(): void
+    {
+        $this->migrate();
+        \Kanboard\Plugin\Vault\Schema\version_1($this->container['db']->getConnection());
+        $rows = $this->container['db']->table('vault_meta')->findAll();
+        $this->assertCount(1, $rows);
+        $this->assertSame(1, (int) $rows[0]['id']);
+        foreach (['Sqlite', 'Mysql', 'Postgres'] as $d) {
+            $src = file_get_contents(__DIR__."/../Schema/$d.php");
+            $this->assertStringContainsString('WHERE NOT EXISTS (SELECT 1 FROM vault_meta WHERE id = 1)', $src, $d);
+        }
+    }
+
+    // A freed id must never be handed out again: grants and key rows name objects by (type, id) with no FK.
+    public function testDeletedObjectIdsAreNeverReused(): void
+    {
+        $this->migrate();
+        $db = $this->container['db'];
+        foreach (['vault_groups', 'vault_entries'] as $table) {
+            if ($table === 'vault_entries') {
+                $db->table('vault_groups')->insert(self::ROWS['vault_groups']);
+            }
+            $db->table($table)->insert(self::ROWS[$table]);
+            $db->table($table)->insert(self::ROWS[$table]);
+            $deleted = (int) $db->table($table)->desc('id')->findOneColumn('id');
+            $this->assertTrue($db->table($table)->eq('id', $deleted)->remove(), $table);
+            $db->table($table)->insert(self::ROWS[$table]);
+            $newId = (int) $db->getLastId();
+            $this->assertGreaterThan($deleted, $newId, $table);
+        }
+
+        $src = file_get_contents(__DIR__.'/../Schema/Sqlite.php');
+        $this->assertSame(0, preg_match('/\bid INTEGER PRIMARY KEY,/', $src), 'every SQLite surrogate key is AUTOINCREMENT');
+        $this->assertSame(8, substr_count($src, 'id INTEGER PRIMARY KEY AUTOINCREMENT'));
+    }
+
     public function testCascadeOnUserDelete(): void
     {
         $this->migrate();
