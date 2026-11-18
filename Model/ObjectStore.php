@@ -23,8 +23,12 @@ use ValueError;
 //
 // Authorisation has one gate: effectivePermission() ('owner'|'edit'|'read'|null). Reads need any permission,
 // updateEntry and creating an entry in a group need edit or owner, and everything else (sub-groups, delete,
-// and in Task 7 grant, move and revoke) needs owner. effectiveRecipients() only builds the recipient set that
-// DEKs are sealed to. Owner only for now: Task 7 extends both with grants.
+// and GrantModel's grant, move and revoke) needs owner. effectiveRecipients() only builds the recipient set
+// that DEKs are sealed to. Both delegate to RecipientResolver (owner plus live direct and ancestor grants).
+//
+// Payload writes call beforeWrite() under the lock first: expired grants on the object and its ancestors are
+// removed (GrantModel::removeSource, whole subtree), then a queued object is re-keyed inline by the writer
+// (the write barrier), so nothing is written under a DEK a removed principal could still hold.
 class ObjectStore extends Base
 {
     public const TYPES = ['entry', 'group'];
@@ -37,7 +41,7 @@ class ObjectStore extends Base
     public const CRYPTO_V = 1;
     public const LIST_LIMIT = 200;
     private const CHUNK = 500;
-    private const TABLES = ['entry' => 'vault_entries', 'group' => 'vault_groups'];
+    private const TABLES = RecipientResolver::TABLES;
 
     private Closure $clock;
 
@@ -61,6 +65,7 @@ class ObjectStore extends Base
                 $this->requirePrincipal($db, $actorId);
                 if ($parentId !== null) {
                     $this->requirePermission('group', $parentId, $actorId, self::OWNER_ONLY);
+                    $this->grants()->reconcileExpired('group', $parentId);
                 }
                 $now = $this->now();
                 $id = $db->insert('vault_groups', [
@@ -92,6 +97,7 @@ class ObjectStore extends Base
                 $db = $this->vdb();
                 $this->requirePrincipal($db, $actorId);
                 $this->requirePermission('group', $groupId, $actorId, self::CAN_EDIT);
+                $this->grants()->reconcileExpired('group', $groupId);
                 $group = $this->fetchObject($db, 'group', $groupId) ?? throw new VaultException('not_found');
                 $ownerId = (int) $group['owner_id'];
                 $now = $this->now();
@@ -170,6 +176,7 @@ class ObjectStore extends Base
             return $this->lock()->exclusive(function () use ($actorId, $entryId, $expectedVersion, $json, $sk): int {
                 $db = $this->vdb();
                 $this->requirePermission('entry', $entryId, $actorId, self::CAN_EDIT);
+                $this->beforeWrite('entry', $entryId, $actorId, $sk);
                 $row = $this->fetchObject($db, 'entry', $entryId);
                 $dek = $this->dekFor($db, 'entry', $row, $actorId, $sk);
                 try {
@@ -211,9 +218,18 @@ class ObjectStore extends Base
             );
             $out = [];
             foreach ($rows as $row) {
-                // A readable group with an unreadable entry is an integrity failure: fail closed.
-                $p = $this->decryptFor($db, 'entry', $row, $actorId, $sk);
+                // R23: only entries the caller is entitled to (live grants) are listed. An entitled entry that
+                // fails to decrypt is shown as integrity_error, with no data, rather than failing the page.
+                if ($this->effectivePermission('entry', (int) $row['id'], $actorId, $row) === null) {
+                    continue;
+                }
                 $meta = $this->entryMeta($row);
+                try {
+                    $p = $this->decryptFor($db, 'entry', $row, $actorId, $sk);
+                } catch (VaultException) {
+                    $out[] = ['id' => $meta['id'], 'group_id' => $meta['group_id'], 'integrity_error' => true];
+                    continue;
+                }
                 $out[] = [
                     'id' => $meta['id'],
                     'group_id' => $meta['group_id'],
@@ -249,50 +265,57 @@ class ObjectStore extends Base
                 $db->execute('DELETE FROM vault_entries WHERE id = ?', [$id]);
                 return;
             }
-            $levels = $this->subtreeLevels($db, $id);
+            $levels = $this->resolver()->subtreeLevels($id);
             $groupIds = array_merge(...$levels);
-            $entryIds = [];
-            foreach (array_chunk($groupIds, self::CHUNK) as $chunk) {
-                foreach ($db->fetchAll('SELECT id FROM vault_entries WHERE group_id IN ('.self::marks($chunk).')', $chunk) as $e) {
-                    $entryIds[] = (int) $e['id'];
-                }
-            }
+            $entryIds = $this->resolver()->entriesIn($groupIds);
             $this->purgeRefs($db, 'entry', $entryIds);
             $this->purgeRefs($db, 'group', $groupIds);
             foreach (array_chunk($entryIds, self::CHUNK) as $chunk) {
-                $db->execute('DELETE FROM vault_entries WHERE id IN ('.self::marks($chunk).')', $chunk);
+                $db->execute('DELETE FROM vault_entries WHERE id IN ('.RecipientResolver::marks($chunk).')', $chunk);
             }
             foreach (array_reverse($levels) as $level) {
                 foreach (array_chunk($level, self::CHUNK) as $chunk) {
-                    $db->execute('DELETE FROM vault_groups WHERE id IN ('.self::marks($chunk).')', $chunk);
+                    $db->execute('DELETE FROM vault_groups WHERE id IN ('.RecipientResolver::marks($chunk).')', $chunk);
                 }
             }
         });
     }
 
-    // The actor's permission on an object: 'owner', 'edit', 'read' or null. The single authorisation gate:
-    // Task 7 adds the highest permission among live direct and ancestor grants here. A missing object gives
-    // null (R8). Protected so tests can stand in a grantee.
-    protected function effectivePermission(string $type, int $id, int $actorId): ?string
+    // Spec "Expiry reconciliation on write" and "Write barrier", for a payload write of an existing object.
+    // Runs inside the caller's exclusive lock (or its own): expired sources on the object and its ancestors
+    // are removed for their whole subtrees, then, if the object is queued, the writer re-keys it inline. A
+    // writer who can't re-key it gets not_found and nothing is written.
+    public function beforeWrite(string $type, int $id, int $actorId, #[\SensitiveParameter] string $sk): void
     {
-        $row = $this->fetchObject($this->vdb(), $type, $id);
-        return $row !== null && (int) $row['owner_id'] === $actorId ? self::OWNER : null;
+        $this->lock()->exclusive(function () use ($type, $id, $actorId, $sk): void {
+            $this->grants()->reconcileExpired($type, $id);
+            if (! $this->rekeyer()->processQueued($this->vdb(), $type, $id, $actorId, $sk)) {
+                throw new VaultException('not_found');
+            }
+        });
     }
 
-    private function requirePermission(string $type, int $id, int $actorId, array $allowed): void
+    // The actor's permission on an object: 'owner', 'edit', 'read' or null. The single authorisation gate,
+    // from RecipientResolver: the highest among ownership and live direct and ancestor grants. A missing
+    // object gives null (R8). $row saves a fetch when the caller has it. Protected so tests can override it.
+    protected function effectivePermission(string $type, int $id, int $actorId, ?array $row = null): ?string
     {
-        if (! in_array($this->effectivePermission($type, $id, $actorId), $allowed, true)) {
+        return $this->resolver()->effective($type, $id, $this->now(), $row)[$actorId] ?? null;
+    }
+
+    private function requirePermission(string $type, int $id, int $actorId, array $allowed, ?array $row = null): void
+    {
+        if (! in_array($this->effectivePermission($type, $id, $actorId, $row), $allowed, true)) {
             throw new VaultException('not_found');
         }
     }
 
-    // The recipient set DEKs are sealed to (never an authorisation decision): today only the owner. Task 7
-    // adds the grantees of live direct and ancestor grants. A missing object has no recipients (R8).
+    // The recipient set DEKs are sealed to (never an authorisation decision on its own): the owner plus the
+    // grantees of live direct and ancestor grants. A missing object has no recipients (R8).
     /** @return list<int> */
-    protected function effectiveRecipients(string $type, int $id): array
+    protected function effectiveRecipients(string $type, int $id, ?array $row = null): array
     {
-        $row = $this->fetchObject($this->vdb(), $type, $id);
-        return $row === null ? [] : [(int) $row['owner_id']];
+        return array_keys($this->resolver()->effective($type, $id, $this->now(), $row));
     }
 
     // Fresh DEK, payload sealed under it, DEK sealed to every effective recipient at their current key_gen.
@@ -306,17 +329,7 @@ class ObjectStore extends Base
                 'UPDATE '.self::TABLES[$type].' SET nonce = ?, ciphertext = ? WHERE id = ?',
                 [base64_encode($box['nonce']), base64_encode($box['ct']), $id]
             );
-            foreach (array_unique($this->effectiveRecipients($type, $id)) as $principalId) {
-                $principal = $this->requirePrincipal($db, $principalId);
-                $db->insert('vault_keys', [
-                    'object_type' => $type,
-                    'object_id' => $id,
-                    'principal_id' => $principalId,
-                    'principal_key_gen' => $principal['key_gen'],
-                    'key_epoch' => 1,
-                    'sealed_dek' => base64_encode(Sealer::sealDek($dek, $type, $id, 1, $principalId, $principal['public_key'])),
-                ], null);
-            }
+            $this->rekeyer()->sealTo($db, $type, $id, 1, $dek, $this->effectiveRecipients($type, $id));
         } finally {
             sodium_memzero($dek);
         }
@@ -354,69 +367,23 @@ class ObjectStore extends Base
             throw new VaultException('not_found');
         }
         $id = (int) $row['id'];
-        $epoch = (int) $row['key_epoch'];
-        $this->requirePermission($type, $id, $actorId, self::CAN_READ);
-        if (! in_array($actorId, $this->effectiveRecipients($type, $id), true)) {
+        $this->requirePermission($type, $id, $actorId, self::CAN_READ, $row);
+        if (! in_array($actorId, $this->effectiveRecipients($type, $id, $row), true)) {
             throw new VaultException('not_found');
         }
-        $principal = $this->requireCurrentKey($db, $actorId, $sk);
-        $pk = $principal['public_key'];
-        $keypair = '';
-        try {
-            $key = $db->fetchOne(
-                'SELECT key_epoch, sealed_dek FROM vault_keys WHERE object_type = ? AND object_id = ? AND principal_id = ? AND principal_key_gen = ?',
-                [$type, $id, $actorId, $principal['key_gen']]
-            );
-            if ($key === null || (int) $key['key_epoch'] !== $epoch) {
-                throw new CryptoException('object: no current key row');
-            }
-            $sealed = base64_decode((string) $key['sealed_dek'], true);
-            if ($sealed === false) {
-                throw new CryptoException('object: malformed key row');
-            }
-            $keypair = sodium_crypto_box_keypair_from_secretkey_and_publickey($sk, $pk);
-            return Sealer::openDek($sealed, $keypair, $type, $id, $epoch, $actorId);
-        } catch (CryptoException|SodiumException|ValueError) {
-            throw new VaultException('not_found');
-        } finally {
-            sodium_memzero($keypair);
-        }
+        return $this->rekeyer()->openDek($db, $type, $id, (int) $row['key_epoch'], $actorId, $sk)
+            ?? throw new VaultException('not_found');
     }
 
-    /** @return array{public_key:string,key_gen:int}|null  public_key as raw bytes */
-    private function principal(VaultDb $db, int $userId): ?array
-    {
-        $row = $db->fetchOne('SELECT public_key, key_gen FROM vault_principals WHERE user_id = ?', [$userId]);
-        if ($row === null) {
-            return null;
-        }
-        $pk = base64_decode((string) $row['public_key'], true);
-        if ($pk === false || strlen($pk) !== SODIUM_CRYPTO_BOX_PUBLICKEYBYTES) {
-            return null;
-        }
-        return ['public_key' => $pk, 'key_gen' => (int) $row['key_gen']];
-    }
-
-    // The actor's principal, provided $sk is its current secret key (pk(sk) equals the stored pk). Any
-    // mismatch or malformed key is not_found.
-    /** @return array{public_key:string,key_gen:int} */
+    // The actor's principal, provided $sk is its current secret key; any mismatch is not_found.
     private function requireCurrentKey(VaultDb $db, int $actorId, #[\SensitiveParameter] string $sk): array
     {
-        $principal = $this->principal($db, $actorId);
-        try {
-            $pk = sodium_crypto_box_publickey_from_secretkey($sk);
-        } catch (SodiumException|ValueError) {
-            throw new VaultException('not_found');
-        }
-        if ($principal === null || ! hash_equals($principal['public_key'], $pk)) {
-            throw new VaultException('not_found');
-        }
-        return $principal;
+        return $this->rekeyer()->currentPrincipal($db, $actorId, $sk) ?? throw new VaultException('not_found');
     }
 
     private function requirePrincipal(VaultDb $db, int $userId): array
     {
-        return $this->principal($db, $userId) ?? throw new VaultException('not_enrolled');
+        return $this->rekeyer()->principal($db, $userId) ?? throw new VaultException('not_enrolled');
     }
 
     private function fetchObject(VaultDb $db, string $type, int $id): ?array
@@ -437,37 +404,11 @@ class ObjectStore extends Base
         ];
     }
 
-    // Group ids of the subtree rooted at $rootId, one list per depth (root first). Guards against cycles.
-    /** @return list<list<int>> */
-    private function subtreeLevels(VaultDb $db, int $rootId): array
-    {
-        $levels = [[$rootId]];
-        $seen = [$rootId => true];
-        $current = [$rootId];
-        while ($current !== []) {
-            $next = [];
-            foreach (array_chunk($current, self::CHUNK) as $chunk) {
-                foreach ($db->fetchAll('SELECT id FROM vault_groups WHERE parent_id IN ('.self::marks($chunk).')', $chunk) as $r) {
-                    $child = (int) $r['id'];
-                    if (! isset($seen[$child])) {
-                        $seen[$child] = true;
-                        $next[] = $child;
-                    }
-                }
-            }
-            if ($next !== []) {
-                $levels[] = $next;
-            }
-            $current = $next;
-        }
-        return $levels;
-    }
-
     /** @param list<int> $ids */
     private function purgeRefs(VaultDb $db, string $type, array $ids): void
     {
         foreach (array_chunk($ids, self::CHUNK) as $chunk) {
-            $in = self::marks($chunk);
+            $in = RecipientResolver::marks($chunk);
             $params = array_merge([$type], $chunk);
             $db->execute('DELETE FROM vault_keys WHERE object_type = ? AND object_id IN ('.$in.')', $params);
             $db->execute('DELETE FROM vault_grants WHERE subject_type = ? AND subject_id IN ('.$in.')', $params);
@@ -475,9 +416,19 @@ class ObjectStore extends Base
         }
     }
 
-    private static function marks(array $ids): string
+    private function resolver(): RecipientResolver
     {
-        return implode(', ', array_fill(0, count($ids), '?'));
+        return new RecipientResolver($this->container);
+    }
+
+    private function rekeyer(): Rekeyer
+    {
+        return new Rekeyer($this->container, $this->clock);
+    }
+
+    private function grants(): GrantModel
+    {
+        return new GrantModel($this->container, $this->clock);
     }
 
     private function vdb(): VaultDb

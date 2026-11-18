@@ -18,15 +18,15 @@ class GranteeObjectStore extends ObjectStore
         parent::__construct($container, $clock);
     }
 
-    protected function effectivePermission(string $type, int $id, int $actorId): ?string
+    protected function effectivePermission(string $type, int $id, int $actorId, ?array $row = null): ?string
     {
-        $owner = parent::effectivePermission($type, $id, $actorId);
+        $owner = parent::effectivePermission($type, $id, $actorId, $row);
         return $owner === null && $actorId === $this->grantee && $this->exists($type, $id) ? $this->perm : $owner;
     }
 
-    protected function effectiveRecipients(string $type, int $id): array
+    protected function effectiveRecipients(string $type, int $id, ?array $row = null): array
     {
-        $r = parent::effectiveRecipients($type, $id);
+        $r = parent::effectiveRecipients($type, $id, $row);
         return $r !== [] && ($this->perm !== null || $this->recipient) ? array_merge($r, [$this->grantee]) : $r;
     }
 
@@ -296,7 +296,8 @@ class ObjectStoreTest extends Base
         $this->pdo()->prepare('UPDATE vault_entries SET nonce = ?, ciphertext = ? WHERE id = ?')->execute([$src['nonce'], $src['ciphertext'], $e2]);
         $this->assertSame('one', json_decode(Aead::open(base64_decode($src['nonce']), base64_decode($src['ciphertext']), $dek1, Encoding::enc('entry', 1, $e1, $this->alice, 1)), true)['title']);
         $this->assertVaultError('not_found', fn () => $s->readEntry($this->alice, $e2, $this->aliceSk));
-        $this->assertVaultError('not_found', fn () => $s->listEntries($this->alice, $g, $this->aliceSk));
+        // R23: the list shows the copied row as integrity_error instead of its (entry 1) data.
+        $this->assertSame(['id' => $e2, 'group_id' => $g, 'integrity_error' => true], $s->listEntries($this->alice, $g, $this->aliceSk)[1]);
 
         // key_epoch: entry 1 moved to epoch 2 with the same DEK sealed for epoch 2.
         $this->pdo()->prepare('DELETE FROM vault_entries WHERE id = ?')->execute([$e2]);
