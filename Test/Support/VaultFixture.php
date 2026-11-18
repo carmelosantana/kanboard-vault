@@ -15,7 +15,7 @@ class VaultRecordingCookieJar extends CookieJar
 {
     public array $sets = [];
 
-    public function set(string $name, string $value, array $options): void
+    public function set(string $name, #[\SensitiveParameter] string $value, array $options): void
     {
         $this->sets[] = ['name' => $name, 'value' => $value, 'options' => $options];
     }

@@ -202,7 +202,7 @@ class VaultSession extends Base
         return strlen($key) === self::KEY_BYTES ? $key : null;
     }
 
-    private function setCookie(string $value): void
+    private function setCookie(#[\SensitiveParameter] string $value): void
     {
         $this->jar->set($this->cookieName(), $value, $this->cookieOptions(0));
     }

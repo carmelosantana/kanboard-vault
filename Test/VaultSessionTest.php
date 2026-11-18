@@ -43,6 +43,21 @@ class VaultSessionTest extends Base
         return $this->countRows('SELECT COUNT(*) FROM vault_sessions');
     }
 
+    // R21: deleting a Kanboard user removes that user's vault sessions through the FK cascade, and only theirs.
+    // Kills: a vault_sessions.user_id without ON DELETE CASCADE (the delete would fail or leave the row).
+    public function testUserDeleteCascadesVaultSessions(): void
+    {
+        $this->unlocked();
+        $this->sid = 'php-session-B';
+        $this->loginAs($this->bob);
+        $this->unlocked($this->bob);
+        $this->assertSame(1, $this->countRows('SELECT COUNT(*) FROM vault_sessions WHERE user_id = ?', [$this->alice]));
+        $this->assertSame(1, $this->countRows('PRAGMA foreign_keys'));
+        $this->assertTrue($this->container['userModel']->remove($this->alice));
+        $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_sessions WHERE user_id = ?', [$this->alice]));
+        $this->assertSame(1, $this->countRows('SELECT COUNT(*) FROM vault_sessions WHERE user_id = ?', [$this->bob]));
+    }
+
     public function testRoundTrip(): void
     {
         $this->unlocked();
