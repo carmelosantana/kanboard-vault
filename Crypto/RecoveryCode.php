@@ -24,7 +24,7 @@ final class RecoveryCode
     }
 
     /** Returns the 20-byte secret, or throws on a bad character, length or checksum. */
-    public static function parse(string $input): string
+    public static function parse(#[\SensitiveParameter] string $input): string
     {
         $chars = strtr(strtoupper(preg_replace('/[\s\-_.]+/', '', $input)), ['I' => '1', 'L' => '1', 'O' => '0']);
         if (strlen($chars) !== self::DATA_CHARS + 2) {
@@ -42,14 +42,14 @@ final class RecoveryCode
     }
 
     /** The 2 check characters for a 20-byte secret. */
-    public static function check(string $secret): string
+    public static function check(#[\SensitiveParameter] string $secret): string
     {
         $c = self::crc16($secret) >> 6;
         return self::ALPHABET[$c >> 5].self::ALPHABET[$c & 31];
     }
 
     /** CRC-16/T10-DIF: poly 0x8BB7, init 0, no reflection, no final xor. */
-    public static function crc16(string $data): int
+    public static function crc16(#[\SensitiveParameter] string $data): int
     {
         $crc = 0;
         for ($i = 0, $n = strlen($data); $i < $n; $i++) {
@@ -61,7 +61,7 @@ final class RecoveryCode
         return $crc;
     }
 
-    private static function encode(string $bytes): string
+    private static function encode(#[\SensitiveParameter] string $bytes): string
     {
         $out = '';
         $buffer = 0;
@@ -78,7 +78,7 @@ final class RecoveryCode
         return $out;
     }
 
-    private static function decode(string $chars): string
+    private static function decode(#[\SensitiveParameter] string $chars): string
     {
         $out = '';
         $buffer = 0;

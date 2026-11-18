@@ -10,7 +10,7 @@ final class Sealer
 {
     public const DEK_BYTES = 32;
 
-    public static function sealDek(string $dek, string $objectType, int $objectId, int $keyEpoch, int $principalId, string $pk): string
+    public static function sealDek(#[\SensitiveParameter] string $dek, string $objectType, int $objectId, int $keyEpoch, int $principalId, string $pk): string
     {
         if (strlen($dek) !== self::DEK_BYTES) {
             throw new CryptoException('dek: bad length');
@@ -25,7 +25,7 @@ final class Sealer
         }
     }
 
-    public static function openDek(string $sealed, string $keypair, string $objectType, int $objectId, int $keyEpoch, int $principalId): string
+    public static function openDek(string $sealed, #[\SensitiveParameter] string $keypair, string $objectType, int $objectId, int $keyEpoch, int $principalId): string
     {
         $plain = Wraps::sealOpen($sealed, $keypair, 'dek');
         try {

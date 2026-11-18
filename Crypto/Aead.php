@@ -5,7 +5,7 @@ namespace Kanboard\Plugin\Vault\Crypto;
 /** XChaCha20-Poly1305-IETF with a fresh random 24-byte nonce per seal. */
 final class Aead
 {
-    public static function seal(string $plaintext, string $key, string $ad): array
+    public static function seal(#[\SensitiveParameter] string $plaintext, #[\SensitiveParameter] string $key, string $ad): array
     {
         self::checkKey($key);
         $nonce = random_bytes(SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_NPUBBYTES);
@@ -13,7 +13,7 @@ final class Aead
         return ['nonce' => $nonce, 'ct' => $ct];
     }
 
-    public static function open(string $nonce, string $ct, string $key, string $ad): string
+    public static function open(string $nonce, string $ct, #[\SensitiveParameter] string $key, string $ad): string
     {
         self::checkKey($key);
         if (strlen($nonce) !== SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_NPUBBYTES) {
@@ -30,7 +30,7 @@ final class Aead
         return $plain;
     }
 
-    private static function checkKey(string $key): void
+    private static function checkKey(#[\SensitiveParameter] string $key): void
     {
         if (strlen($key) !== SODIUM_CRYPTO_AEAD_XCHACHA20POLY1305_IETF_KEYBYTES) {
             throw new CryptoException('aead: bad key length');

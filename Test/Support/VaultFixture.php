@@ -43,6 +43,7 @@ trait VaultFixture
 
     protected function setUpVault(): void
     {
+        putenv('VAULT_DEV_INSECURE_LOCALHOST'); // the localhost dev exception is off unless a test opts in
         require_once __DIR__.'/../../Schema/Sqlite.php';
         \Kanboard\Plugin\Vault\Schema\version_1($this->container['db']->getConnection());
         $this->jar = new VaultRecordingCookieJar();
@@ -55,6 +56,7 @@ trait VaultFixture
 
     protected function tearDownVault(): void
     {
+        putenv('VAULT_DEV_INSECURE_LOCALHOST');
         foreach (glob($this->slotDir.'/*.lock') ?: [] as $f) {
             unlink($f);
         }

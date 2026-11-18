@@ -44,7 +44,7 @@ class UnlockService extends Base
     }
 
     // Returns the raw 32-byte session_key (also sent as the vault cookie).
-    public function unlock(int $userId, string $passphrase, string $ip, ?array $prf = null): string
+    public function unlock(int $userId, #[\SensitiveParameter] string $passphrase, string $ip, #[\SensitiveParameter] ?array $prf = null): string
     {
         if (! $this->session->transportAllowed()) {
             throw new VaultException('https_required');
@@ -111,7 +111,7 @@ class UnlockService extends Base
     }
 
     // sk, or null for any failure. Crypto error labels never leave this method (R12).
-    private function open(?array $wrap, string $passphrase): ?string
+    private function open(?array $wrap, #[\SensitiveParameter] string $passphrase): ?string
     {
         $ikm = $kek = '';
         try {
@@ -151,7 +151,7 @@ class UnlockService extends Base
     }
 
     // Re-derives a wrap below the default KDF parameters, in place: same row id (so the same AD), new salt.
-    private function upgradeKdf(array $wrap, string $sk, string $passphrase): void
+    private function upgradeKdf(array $wrap, #[\SensitiveParameter] string $sk, #[\SensitiveParameter] string $passphrase): void
     {
         $ops = (int) $wrap['kdf_ops'];
         $mem = (int) $wrap['kdf_mem'];

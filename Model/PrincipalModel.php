@@ -49,7 +49,7 @@ class PrincipalModel extends Base
         ];
     }
 
-    public function enrolHuman(int $userId, string $passphrase): void
+    public function enrolHuman(int $userId, #[\SensitiveParameter] string $passphrase): void
     {
         $user = (new VaultDb($this->container))->fetchOne('SELECT username, password, is_active FROM users WHERE id = ?', [$userId]);
         if ($user === null || (int) $user['is_active'] !== 1) {
@@ -127,7 +127,7 @@ class PrincipalModel extends Base
         return 'unlock:notice:'.$userId;
     }
 
-    private function checkPassphrase(string $passphrase, string $username, string $loginHash): void
+    private function checkPassphrase(#[\SensitiveParameter] string $passphrase, string $username, #[\SensitiveParameter] string $loginHash): void
     {
         if (mb_strlen($passphrase, 'UTF-8') < self::MIN_PASSPHRASE_CHARS) {
             throw new VaultException('passphrase_weak');

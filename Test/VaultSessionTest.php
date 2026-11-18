@@ -249,8 +249,14 @@ class VaultSessionTest extends Base
     public function testCookieNames(): void
     {
         $this->assertSame('__Host-kb_vault', $this->session()->cookieName());
+        // R20: without the opt-in, Host: localhost over plain HTTP gets the __Host- name and no unlock.
         $this->request(['HTTP_HOST' => 'localhost']);
+        $this->assertSame('__Host-kb_vault', $this->session()->cookieName());
+        $this->assertFalse($this->session()->transportAllowed());
+        $this->assertVaultError('https_required', fn () => $this->session()->create($this->alice, $this->sk));
+        putenv('VAULT_DEV_INSECURE_LOCALHOST=1');
         $this->assertSame('kb_vault_dev', $this->session()->cookieName());
+        $this->assertTrue($this->session()->transportAllowed());
         $this->request(['HTTP_HOST' => 'localhost:8081', 'HTTPS' => 'on']);
         $this->assertSame('__Host-kb_vault', $this->session()->cookieName());
         $this->request(['HTTP_HOST' => 'kb.example']);

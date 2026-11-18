@@ -211,6 +211,19 @@ class EnrolUnlockTest extends Base
         $this->assertVaultError('https_required', fn () => $this->unlocker()->unlock($this->alice, $this->alicePassphrase, self::IP));
         $this->assertSame(0, $this->argonCalls);
 
+        // R20: Host: localhost alone (a reverse proxy without proxy_set_header Host, or a tunnel whose origin is
+        // localhost) is not enough. Without the explicit dev opt-in, plain HTTP is refused.
+        $this->request(['HTTP_HOST' => 'localhost:8081']);
+        $this->assertVaultError('https_required', fn () => $this->unlocker()->unlock($this->alice, $this->alicePassphrase, self::IP));
+        putenv('VAULT_DEV_INSECURE_LOCALHOST=true');
+        $this->assertVaultError('https_required', fn () => $this->unlocker()->unlock($this->alice, $this->alicePassphrase, self::IP));
+        $this->assertSame(0, $this->argonCalls);
+        // The opt-in alone doesn't open other hosts either.
+        putenv('VAULT_DEV_INSECURE_LOCALHOST=1');
+        $this->request(['HTTP_HOST' => 'kb.example']);
+        $this->assertVaultError('https_required', fn () => $this->unlocker()->unlock($this->alice, $this->alicePassphrase, self::IP));
+        $this->assertSame(0, $this->argonCalls);
+
         $this->request(['HTTP_HOST' => 'localhost:8081']);
         $this->unlocker()->unlock($this->alice, $this->alicePassphrase, self::IP);
         $cookie = $this->jar->last();

@@ -17,6 +17,7 @@ class VaultSession extends Base
 {
     public const COOKIE = '__Host-kb_vault';
     public const DEV_COOKIE = 'kb_vault_dev';
+    public const DEV_OPT_IN = 'VAULT_DEV_INSECURE_LOCALHOST';
     public const IDLE_TIMEOUT = 900;
     public const ABSOLUTE_TIMEOUT = 28800;
     public const CRYPTO_V = 1;
@@ -34,15 +35,15 @@ class VaultSession extends Base
         $this->clock = $clock !== null ? Closure::fromCallable($clock) : static fn (): int => time();
     }
 
-    // HTTPS, or plain HTTP on localhost (the dev stack). Anything else must not unlock.
+    // HTTPS, or plain HTTP in the opted-in dev stack. Anything else must not unlock.
     public function transportAllowed(): bool
     {
-        return $this->request->isHTTPS() || $this->isLocalhost();
+        return $this->request->isHTTPS() || $this->isInsecureDev();
     }
 
     public function cookieName(): string
     {
-        return ! $this->request->isHTTPS() && $this->isLocalhost() ? self::DEV_COOKIE : self::COOKIE;
+        return ! $this->request->isHTTPS() && $this->isInsecureDev() ? self::DEV_COOKIE : self::COOKIE;
     }
 
     // A JSON-RPC request. Kanboard's API middleware marks the session scope 'API' before it authenticates
@@ -79,7 +80,7 @@ class VaultSession extends Base
 
     // Stores sk for this UI session and sets the cookie. Returns the raw 32-byte session_key.
     // The caller keeps (and wipes) its own copy of sk.
-    public function create(int $userId, string $sk): string
+    public function create(int $userId, #[\SensitiveParameter] string $sk): string
     {
         if (! $this->transportAllowed()) {
             throw new VaultException('https_required');
@@ -221,6 +222,13 @@ class VaultSession extends Base
             'httponly' => true,
             'samesite' => 'Strict',
         ];
+    }
+
+    // R20: the plain-HTTP dev exception needs BOTH the explicit opt-in VAULT_DEV_INSECURE_LOCALHOST=1 and an
+    // exact localhost Host. Host alone fails open behind a reverse proxy or tunnel whose origin is localhost.
+    private function isInsecureDev(): bool
+    {
+        return getenv(self::DEV_OPT_IN) === '1' && $this->isLocalhost();
     }
 
     private function isLocalhost(): bool

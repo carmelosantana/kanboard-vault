@@ -15,7 +15,7 @@ final class Wraps
     public const CRYPTO_V = 1;
     public const METHODS = ['passphrase', 'passphrase+prf', 'recovery', 'agent'];
 
-    public static function wrap(string $sk, string $kek, int $principalId, string $method, string $credentialId, int $wrapId): array
+    public static function wrap(#[\SensitiveParameter] string $sk, #[\SensitiveParameter] string $kek, int $principalId, string $method, string $credentialId, int $wrapId): array
     {
         self::checkMethod($method, $credentialId);
         $box = Aead::seal($sk, $kek, self::ad($principalId, $method, $credentialId, $wrapId));
@@ -30,7 +30,7 @@ final class Wraps
         ];
     }
 
-    public static function unwrap(array $row, string $kek, string $expectedPk): string
+    public static function unwrap(array $row, #[\SensitiveParameter] string $kek, string $expectedPk): string
     {
         if ((int) ($row['crypto_v'] ?? 0) !== self::CRYPTO_V) {
             throw new CryptoException('wrap: unsupported crypto version');
@@ -52,7 +52,7 @@ final class Wraps
     }
 
     /** The org wrap: crypto_box_seal(enc("orgwrap", principal_id, sk), org_pk). Raw bytes. */
-    public static function sealOrg(string $sk, int $principalId, string $orgPk): string
+    public static function sealOrg(#[\SensitiveParameter] string $sk, int $principalId, string $orgPk): string
     {
         if (strlen($sk) !== SODIUM_CRYPTO_BOX_SECRETKEYBYTES) {
             throw new CryptoException('orgwrap: bad secret key length');
@@ -67,7 +67,7 @@ final class Wraps
         }
     }
 
-    public static function openOrg(string $sealed, string $orgKeypair, int $principalId, string $expectedPk): string
+    public static function openOrg(string $sealed, #[\SensitiveParameter] string $orgKeypair, int $principalId, string $expectedPk): string
     {
         $plain = self::sealOpen($sealed, $orgKeypair, 'orgwrap');
         try {
@@ -86,7 +86,7 @@ final class Wraps
      * Opens a crypto_box_seal blob. Shared with Sealer.
      * @internal
      */
-    public static function sealOpen(string $sealed, string $keypair, string $label): string
+    public static function sealOpen(string $sealed, #[\SensitiveParameter] string $keypair, string $label): string
     {
         try {
             $plain = sodium_crypto_box_seal_open($sealed, $keypair);
@@ -104,7 +104,7 @@ final class Wraps
      * i.e. enc(...prefix fields, value) with a value of exactly $len bytes. Throws otherwise.
      * @internal
      */
-    public static function field(string $plain, string $prefix, int $len, string $label): string
+    public static function field(#[\SensitiveParameter] string $plain, string $prefix, int $len, string $label): string
     {
         $head = $prefix.pack('N', $len);
         if (strlen($plain) !== strlen($head) + $len || !hash_equals($head, substr($plain, 0, strlen($head)))) {
@@ -129,7 +129,7 @@ final class Wraps
     }
 
     /** The spec's post-unwrap check: sodium_crypto_box_publickey_from_secretkey(sk) equals the stored pk. */
-    private static function publicKeyMatches(string $sk, string $expectedPk): bool
+    private static function publicKeyMatches(#[\SensitiveParameter] string $sk, string $expectedPk): bool
     {
         try {
             return strlen($sk) === SODIUM_CRYPTO_BOX_SECRETKEYBYTES

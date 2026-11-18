@@ -11,7 +11,7 @@ final class Encoding
 {
     public const TAG = 'vault/v1';
 
-    public static function enc(string|int ...$fields): string
+    public static function enc(#[\SensitiveParameter] string|int ...$fields): string
     {
         $out = self::TAG;
         foreach ($fields as $field) {
