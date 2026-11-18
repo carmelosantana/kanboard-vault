@@ -4,13 +4,11 @@ namespace Kanboard\Plugin\Vault\Model;
 use Closure;
 use InvalidArgumentException;
 use Kanboard\Core\Base;
-use PDO;
 
 // Atomic rate state in vault_rate (bucket, tokens, updated_at). Every check and its update run inside
 // VaultLock::exclusive, so a read and its write are never separate transactions.
 // Bucket keys are opaque; callers keep token buckets and failure counters on distinct keys.
-// Statements go straight to PDO: PicoDb's statement handler cancels the connection's transaction on an error
-// and turns a duplicate key into a silent false, and neither may happen under the vault lock.
+// Statements go through VaultDb (raw PDO), never PicoDb, inside the lock.
 class RateLimiter extends Base
 {
     public const FREE_FAILURES = 5;
@@ -19,12 +17,14 @@ class RateLimiter extends Base
     private const MAX_BUCKET_BYTES = 191; // the MySQL VARCHAR(191) key
 
     private VaultLock $lock;
+    private VaultDb $vaultDb;
     private Closure $clock;
 
     public function __construct($container, ?VaultLock $lock = null, ?callable $clock = null)
     {
         parent::__construct($container);
         $this->lock = $lock ?? new VaultLock($container);
+        $this->vaultDb = new VaultDb($container);
         $this->clock = $clock !== null ? Closure::fromCallable($clock) : static fn (): int => time();
     }
 
@@ -87,7 +87,7 @@ class RateLimiter extends Base
     {
         $this->checkBucket($bucket);
         $this->lock->exclusive(function () use ($bucket): void {
-            $this->run('DELETE FROM vault_rate WHERE bucket = ?', [$bucket]);
+            $this->vaultDb->execute('DELETE FROM vault_rate WHERE bucket = ?', [$bucket]);
         });
     }
 
@@ -106,11 +106,6 @@ class RateLimiter extends Base
         return (int) ($this->clock)();
     }
 
-    private function pdo(): PDO
-    {
-        return $this->db->getConnection();
-    }
-
     private function checkBucket(string $bucket): void
     {
         if ($bucket === '' || strlen($bucket) > self::MAX_BUCKET_BYTES) {
@@ -121,27 +116,16 @@ class RateLimiter extends Base
     /** @return array{tokens: float, updated_at: int}|null */
     private function read(string $bucket): ?array
     {
-        $stmt = $this->run('SELECT tokens, updated_at FROM vault_rate WHERE bucket = ?', [$bucket]);
-        $row = $stmt->fetch(PDO::FETCH_ASSOC);
-        $stmt->closeCursor();
-        return $row === false ? null : ['tokens' => (float) $row['tokens'], 'updated_at' => (int) $row['updated_at']];
+        $row = $this->vaultDb->fetchOne('SELECT tokens, updated_at FROM vault_rate WHERE bucket = ?', [$bucket]);
+        return $row === null ? null : ['tokens' => (float) $row['tokens'], 'updated_at' => (int) $row['updated_at']];
     }
 
     private function write(string $bucket, float $tokens, int $updatedAt, bool $exists): void
     {
-        $sql = $exists
-            ? 'UPDATE vault_rate SET tokens = ?, updated_at = ? WHERE bucket = ?'
-            : 'INSERT INTO vault_rate (tokens, updated_at, bucket) VALUES (?, ?, ?)';
-        $this->run($sql, [$tokens, $updatedAt, $bucket]);
-    }
-
-    // Fails loudly whatever the connection's error mode, so a failed write can't be committed as a success.
-    private function run(string $sql, array $params): \PDOStatement
-    {
-        $stmt = $this->pdo()->prepare($sql);
-        if ($stmt === false || ! $stmt->execute($params)) {
-            throw new \RuntimeException('Rate limit: query failed');
+        if ($exists) {
+            $this->vaultDb->execute('UPDATE vault_rate SET tokens = ?, updated_at = ? WHERE bucket = ?', [$tokens, $updatedAt, $bucket]);
+        } else {
+            $this->vaultDb->insert('vault_rate', ['bucket' => $bucket, 'tokens' => $tokens, 'updated_at' => $updatedAt], null);
         }
-        return $stmt;
     }
 }

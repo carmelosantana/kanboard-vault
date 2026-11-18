@@ -10,7 +10,8 @@ use WeakMap;
 
 // The install-wide vault lock: one serialisation domain for every authorisation or ciphertext change.
 // SQLite: raw BEGIN IMMEDIATE (exclusive) or deferred BEGIN (shared), never PicoDb's beginTransaction().
-// MySQL/Postgres: a transaction that row-locks the vault_meta singleton FOR UPDATE or FOR SHARE.
+// MySQL/Postgres: a transaction that row-locks the vault_meta singleton FOR UPDATE, or for sharing
+// (FOR SHARE on Postgres, LOCK IN SHARE MODE on MySQL/MariaDB).
 // Nesting is tracked per PDO connection, so separate VaultLock instances on one connection share it.
 class VaultLock extends Base
 {
@@ -96,7 +97,9 @@ class VaultLock extends Base
         if ($driver === 'sqlite') {
             return;
         }
-        $sql = 'SELECT id FROM vault_meta WHERE id = 1 '.($mode === self::EXCLUSIVE ? 'FOR UPDATE' : 'FOR SHARE');
+        // MariaDB has no FOR SHARE; LOCK IN SHARE MODE works on MariaDB and MySQL 8.
+        $share = $driver === 'mysql' ? 'LOCK IN SHARE MODE' : 'FOR SHARE';
+        $sql = 'SELECT id FROM vault_meta WHERE id = 1 '.($mode === self::EXCLUSIVE ? 'FOR UPDATE' : $share);
         $stmt = $pdo->query($sql);
         // Without the singleton row nothing is locked, so nothing may run.
         if ($stmt === false || (int) $stmt->fetchColumn() !== 1) {

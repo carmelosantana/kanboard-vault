@@ -193,7 +193,7 @@ class VaultLockTest extends Base
     {
         return [
             'mysql exclusive' => ['mysql', 'exclusive', 'SELECT id FROM vault_meta WHERE id = 1 FOR UPDATE'],
-            'mysql shared' => ['mysql', 'shared', 'SELECT id FROM vault_meta WHERE id = 1 FOR SHARE'],
+            'mysql shared' => ['mysql', 'shared', 'SELECT id FROM vault_meta WHERE id = 1 LOCK IN SHARE MODE'],
             'pgsql exclusive' => ['pgsql', 'exclusive', 'SELECT id FROM vault_meta WHERE id = 1 FOR UPDATE'],
             'pgsql shared' => ['pgsql', 'shared', 'SELECT id FROM vault_meta WHERE id = 1 FOR SHARE'],
         ];
