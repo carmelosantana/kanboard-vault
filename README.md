@@ -20,8 +20,9 @@ The `vault_*` tables are created on first load.
 
 ## Deleting users
 
-Every Vault table that references a user cascades on user deletion: deleting a user removes their
-keys, sessions, grants and the vault objects they own.
+Deleting a user removes their keys, sessions, grants and the vault objects they own. Records that
+only name them as a contributor survive: entries they added to someone else's group, grants they
+made and audit rows keep their data with that user reference set to empty (NULL).
 
 ## License
 

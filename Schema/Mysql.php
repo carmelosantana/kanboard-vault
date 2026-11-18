@@ -4,7 +4,7 @@ namespace Kanboard\Plugin\Vault\Schema;
 const VERSION = 1;
 
 // Binary values are base64 TEXT (entry and group ciphertext LONGTEXT); timestamps are Unix seconds.
-// Every users(id) reference cascades.
+// Ownership references to users(id) cascade; provenance columns (created_by, granted_by, audit actor/target) are SET NULL.
 function version_1($pdo)
 {
     $pdo->exec('CREATE TABLE IF NOT EXISTS vault_meta (
@@ -95,7 +95,7 @@ function version_1($pdo)
         id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
         group_id INT NOT NULL,
         owner_id INT NOT NULL,
-        created_by INT NOT NULL,
+        created_by INT,
         version INT NOT NULL DEFAULT 1,
         key_epoch INT NOT NULL DEFAULT 1,
         nonce TEXT NOT NULL,
@@ -105,7 +105,7 @@ function version_1($pdo)
         updated_at BIGINT NOT NULL,
         FOREIGN KEY(group_id) REFERENCES vault_groups(id) ON DELETE CASCADE,
         FOREIGN KEY(owner_id) REFERENCES users(id) ON DELETE CASCADE,
-        FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE CASCADE
+        FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE SET NULL
     ) ENGINE=InnoDB CHARSET=utf8mb4');
 
     $pdo->exec('CREATE TABLE IF NOT EXISTS vault_grants (
@@ -114,12 +114,12 @@ function version_1($pdo)
         subject_id INT NOT NULL,
         grantee_id INT NOT NULL,
         permission VARCHAR(16) NOT NULL,
-        granted_by INT NOT NULL,
+        granted_by INT,
         expires_at BIGINT,
         created_at BIGINT NOT NULL,
         UNIQUE(subject_type, subject_id, grantee_id),
         FOREIGN KEY(grantee_id) REFERENCES users(id) ON DELETE CASCADE,
-        FOREIGN KEY(granted_by) REFERENCES users(id) ON DELETE CASCADE
+        FOREIGN KEY(granted_by) REFERENCES users(id) ON DELETE SET NULL
     ) ENGINE=InnoDB CHARSET=utf8mb4');
 
     $pdo->exec('CREATE TABLE IF NOT EXISTS vault_keys (
@@ -192,8 +192,8 @@ function version_1($pdo)
         ua_family VARCHAR(64),
         via VARCHAR(8) NOT NULL CHECK (via IN ('ui', 'api', 'cli')),
         count INT,
-        FOREIGN KEY(actor_user_id) REFERENCES users(id) ON DELETE CASCADE,
-        FOREIGN KEY(target_user_id) REFERENCES users(id) ON DELETE CASCADE
+        FOREIGN KEY(actor_user_id) REFERENCES users(id) ON DELETE SET NULL,
+        FOREIGN KEY(target_user_id) REFERENCES users(id) ON DELETE SET NULL
     ) ENGINE=InnoDB CHARSET=utf8mb4");
 
     $pdo->exec('CREATE TABLE IF NOT EXISTS vault_rate (

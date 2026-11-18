@@ -69,6 +69,49 @@ class SchemaTest extends Base
         $this->assertSame(0, $db->table('vault_principals')->eq('user_id', 2)->count());
     }
 
+    private function users(string ...$names): void
+    {
+        foreach ($names as $name) {
+            $this->container['userModel']->create(['username' => $name, 'password' => 'secret123']);
+        }
+    }
+
+    public function testDeletingEditorKeepsEntryInOwnersGroup(): void
+    {
+        $this->migrate();
+        $this->users('owner', 'editor'); // ids 2 and 3
+        $db = $this->container['db'];
+        $db->table('vault_groups')->insert(['owner_id' => 2] + self::ROWS['vault_groups']);
+        $db->table('vault_entries')->insert(['owner_id' => 2, 'created_by' => 3] + self::ROWS['vault_entries']);
+        $db->table('vault_grants')->insert(['grantee_id' => 2, 'granted_by' => 3] + self::ROWS['vault_grants']);
+
+        $this->assertTrue($this->container['userModel']->remove(3));
+
+        $entry = $db->table('vault_entries')->eq('owner_id', 2)->findOne();
+        $this->assertNotNull($entry);
+        $this->assertNull($entry['created_by']);
+        $grant = $db->table('vault_grants')->eq('grantee_id', 2)->findOne();
+        $this->assertNotNull($grant);
+        $this->assertNull($grant['granted_by']);
+    }
+
+    public function testAuditSurvivesActorDeletion(): void
+    {
+        $this->migrate();
+        $this->users('actor', 'target'); // ids 2 and 3
+        $db = $this->container['db'];
+        $db->table('vault_audit')->insert(['actor_user_id' => 2, 'target_user_id' => 3, 'action' => 'grant'] + self::ROWS['vault_audit']);
+
+        $this->assertTrue($this->container['userModel']->remove(2));
+        $this->assertTrue($this->container['userModel']->remove(3));
+
+        $rows = $db->table('vault_audit')->findAll();
+        $this->assertCount(1, $rows);
+        $this->assertSame('grant', $rows[0]['action']);
+        $this->assertNull($rows[0]['actor_user_id']);
+        $this->assertNull($rows[0]['target_user_id']);
+    }
+
     public function testAllThreeDialectsDeclareVersion1(): void
     {
         $tables = array_merge(['vault_meta'], array_keys(self::ROWS));
@@ -80,7 +123,10 @@ class SchemaTest extends Base
                 $this->assertStringContainsString("CREATE TABLE IF NOT EXISTS $t (", $src, "$d: $t");
             }
             $this->assertStringContainsString('INSERT INTO vault_meta', $src, $d);
-            $this->assertStringNotContainsString('ON DELETE SET NULL', $src, $d);
+            foreach (['created_by', 'granted_by', 'actor_user_id', 'target_user_id'] as $col) {
+                $this->assertMatchesRegularExpression("/FOREIGN KEY\\($col\\) REFERENCES users\\(id\\) ON DELETE SET NULL/", $src, "$d: $col");
+            }
+            $this->assertSame(4, substr_count($src, 'ON DELETE SET NULL'), "$d: only provenance columns are SET NULL");
         }
         $mysql = file_get_contents(__DIR__.'/../Schema/Mysql.php');
         $this->assertSame(2, substr_count($mysql, 'ciphertext LONGTEXT NOT NULL'), 'entry and group ciphertext are LONGTEXT');
