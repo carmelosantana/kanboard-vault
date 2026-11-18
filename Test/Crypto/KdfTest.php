@@ -43,6 +43,20 @@ class KdfTest extends TestCase
         );
     }
 
+    // An empty IKM would make generichash unkeyed: a public, deterministic KEK. Kills accepting '' or short IKM.
+    public function testEmptyOrShortIkmRefused(): void
+    {
+        foreach (['', str_repeat("\x01", 15)] as $ikm) {
+            try {
+                Kdf::kek($ikm, 'passphrase');
+                $this->fail('accepted IKM of '.strlen($ikm).' bytes');
+            } catch (CryptoException $e) {
+                $this->addToAssertionCount(1);
+            }
+        }
+        $this->assertSame(32, strlen(Kdf::kek(str_repeat("\x01", 16), 'passphrase')));
+    }
+
     // Kills dropping or concatenating context fields.
     public function testEveryContextFieldMatters(): void
     {

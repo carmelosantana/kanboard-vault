@@ -27,6 +27,10 @@ final class Kdf
      */
     public static function kek(string $ikm, string|int ...$context): string
     {
+        // An empty key makes generichash unkeyed, which would give a public KEK; refuse anything short.
+        if (strlen($ikm) < SODIUM_CRYPTO_GENERICHASH_KEYBYTES_MIN) {
+            throw new CryptoException('kdf: bad key material length');
+        }
         $msg = Encoding::enc('kek', ...$context);
         try {
             return sodium_crypto_generichash($msg, $ikm, 32);
