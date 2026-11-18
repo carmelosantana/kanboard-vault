@@ -1,0 +1,12 @@
+{
+    "name": "Vault",
+    "description": "End-to-end encrypted password store for Kanboard: per-user keys, shared groups, agent access, one-time share links and KeePassXC import/export.",
+    "version": "1.0.0",
+    "author": "Carmelo Santana",
+    "homepage": "https://github.com/carmelosantana/kanboard-vault",
+    "license": "MIT",
+    "kanboard_version": ">=1.2.47",
+    "php_version": ">=8.4",
+    "requires": [],
+    "recommends": [{"name": "Agents", "version": ">=0.3.2"}]
+}
