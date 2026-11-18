@@ -21,10 +21,19 @@ use ValueError;
 // here, never inside a lock (R18), and wipe their own copy (R12). Every authorisation or crypto failure on a
 // read is the one generic not_found, so "exists but not yours" looks like "no such object".
 //
-// Owner only for now: effectiveRecipients() is the one place Task 7 extends with grants.
+// Authorisation has one gate: effectivePermission() ('owner'|'edit'|'read'|null). Reads need any permission,
+// updateEntry and creating an entry in a group need edit or owner, and everything else (sub-groups, delete,
+// and in Task 7 grant, move and revoke) needs owner. effectiveRecipients() only builds the recipient set that
+// DEKs are sealed to. Owner only for now: Task 7 extends both with grants.
 class ObjectStore extends Base
 {
     public const TYPES = ['entry', 'group'];
+    public const OWNER = 'owner';
+    public const EDIT = 'edit';
+    public const READ = 'read';
+    private const CAN_READ = [self::OWNER, self::EDIT, self::READ];
+    private const CAN_EDIT = [self::OWNER, self::EDIT];
+    private const OWNER_ONLY = [self::OWNER];
     public const CRYPTO_V = 1;
     public const LIST_LIMIT = 200;
     private const CHUNK = 500;
@@ -51,10 +60,7 @@ class ObjectStore extends Base
                 $db = $this->vdb();
                 $this->requirePrincipal($db, $actorId);
                 if ($parentId !== null) {
-                    $parent = $this->fetchObject($db, 'group', $parentId);
-                    if ($parent === null || (int) $parent['owner_id'] !== $actorId) {
-                        throw new VaultException('not_found');
-                    }
+                    $this->requirePermission('group', $parentId, $actorId, self::OWNER_ONLY);
                 }
                 $now = $this->now();
                 $id = $db->insert('vault_groups', [
@@ -85,10 +91,8 @@ class ObjectStore extends Base
             return $this->lock()->exclusive(function () use ($actorId, $groupId, $json): int {
                 $db = $this->vdb();
                 $this->requirePrincipal($db, $actorId);
-                $group = $this->fetchObject($db, 'group', $groupId);
-                if ($group === null || (int) $group['owner_id'] !== $actorId) {
-                    throw new VaultException('not_found');
-                }
+                $this->requirePermission('group', $groupId, $actorId, self::CAN_EDIT);
+                $group = $this->fetchObject($db, 'group', $groupId) ?? throw new VaultException('not_found');
                 $ownerId = (int) $group['owner_id'];
                 $now = $this->now();
                 $id = $db->insert('vault_entries', [
@@ -165,6 +169,7 @@ class ObjectStore extends Base
         try {
             return $this->lock()->exclusive(function () use ($actorId, $entryId, $expectedVersion, $json, $sk): int {
                 $db = $this->vdb();
+                $this->requirePermission('entry', $entryId, $actorId, self::CAN_EDIT);
                 $row = $this->fetchObject($db, 'entry', $entryId);
                 $dek = $this->dekFor($db, 'entry', $row, $actorId, $sk);
                 try {
@@ -226,20 +231,19 @@ class ObjectStore extends Base
         });
     }
 
-    // Owner only. A group takes its whole subtree with it. Key, grant and re-key queue rows have no FK (R6),
+    // Owner only, and the owner must be unlocked: $sk must be the actor's current key (R25). A group takes
+    // its whole subtree with it. Key, grant and re-key queue rows have no FK (R6),
     // so they are deleted here, per type, for every object removed. Rows are deleted bottom-up rather than
     // left to the parent_id cascade (InnoDB stops cascading at 15 levels).
-    public function deleteObject(int $actorId, string $type, int $id): void
+    public function deleteObject(int $actorId, string $type, int $id, #[\SensitiveParameter] string $sk): void
     {
         if (! in_array($type, self::TYPES, true)) {
             throw new InvalidArgumentException('Vault: unknown object type');
         }
-        $this->lock()->exclusive(function () use ($actorId, $type, $id): void {
+        $this->lock()->exclusive(function () use ($actorId, $type, $id, $sk): void {
             $db = $this->vdb();
-            $row = $this->fetchObject($db, $type, $id);
-            if ($row === null || (int) $row['owner_id'] !== $actorId) {
-                throw new VaultException('not_found');
-            }
+            $this->requirePermission($type, $id, $actorId, self::OWNER_ONLY);
+            $this->requireCurrentKey($db, $actorId, $sk);
             if ($type === 'entry') {
                 $this->purgeRefs($db, 'entry', [$id]);
                 $db->execute('DELETE FROM vault_entries WHERE id = ?', [$id]);
@@ -266,10 +270,26 @@ class ObjectStore extends Base
         });
     }
 
-    // The principals who may read an object: today only its owner. Task 7 replaces this with the owner plus
-    // the grantees of live direct and ancestor grants. An object that no longer exists has no recipients (R8).
+    // The actor's permission on an object: 'owner', 'edit', 'read' or null. The single authorisation gate:
+    // Task 7 adds the highest permission among live direct and ancestor grants here. A missing object gives
+    // null (R8). Protected so tests can stand in a grantee.
+    protected function effectivePermission(string $type, int $id, int $actorId): ?string
+    {
+        $row = $this->fetchObject($this->vdb(), $type, $id);
+        return $row !== null && (int) $row['owner_id'] === $actorId ? self::OWNER : null;
+    }
+
+    private function requirePermission(string $type, int $id, int $actorId, array $allowed): void
+    {
+        if (! in_array($this->effectivePermission($type, $id, $actorId), $allowed, true)) {
+            throw new VaultException('not_found');
+        }
+    }
+
+    // The recipient set DEKs are sealed to (never an authorisation decision): today only the owner. Task 7
+    // adds the grantees of live direct and ancestor grants. A missing object has no recipients (R8).
     /** @return list<int> */
-    private function effectiveRecipients(string $type, int $id): array
+    protected function effectiveRecipients(string $type, int $id): array
     {
         $row = $this->fetchObject($this->vdb(), $type, $id);
         return $row === null ? [] : [(int) $row['owner_id']];
@@ -286,7 +306,7 @@ class ObjectStore extends Base
                 'UPDATE '.self::TABLES[$type].' SET nonce = ?, ciphertext = ? WHERE id = ?',
                 [base64_encode($box['nonce']), base64_encode($box['ct']), $id]
             );
-            foreach ($this->effectiveRecipients($type, $id) as $principalId) {
+            foreach (array_unique($this->effectiveRecipients($type, $id)) as $principalId) {
                 $principal = $this->requirePrincipal($db, $principalId);
                 $db->insert('vault_keys', [
                     'object_type' => $type,
@@ -335,19 +355,14 @@ class ObjectStore extends Base
         }
         $id = (int) $row['id'];
         $epoch = (int) $row['key_epoch'];
+        $this->requirePermission($type, $id, $actorId, self::CAN_READ);
         if (! in_array($actorId, $this->effectiveRecipients($type, $id), true)) {
             throw new VaultException('not_found');
         }
-        $principal = $this->principal($db, $actorId);
-        if ($principal === null) {
-            throw new VaultException('not_found');
-        }
+        $principal = $this->requireCurrentKey($db, $actorId, $sk);
+        $pk = $principal['public_key'];
         $keypair = '';
         try {
-            $pk = sodium_crypto_box_publickey_from_secretkey($sk);
-            if (! hash_equals($principal['public_key'], $pk)) {
-                throw new CryptoException('object: secret key does not match the principal');
-            }
             $key = $db->fetchOne(
                 'SELECT key_epoch, sealed_dek FROM vault_keys WHERE object_type = ? AND object_id = ? AND principal_id = ? AND principal_key_gen = ?',
                 [$type, $id, $actorId, $principal['key_gen']]
@@ -380,6 +395,23 @@ class ObjectStore extends Base
             return null;
         }
         return ['public_key' => $pk, 'key_gen' => (int) $row['key_gen']];
+    }
+
+    // The actor's principal, provided $sk is its current secret key (pk(sk) equals the stored pk). Any
+    // mismatch or malformed key is not_found.
+    /** @return array{public_key:string,key_gen:int} */
+    private function requireCurrentKey(VaultDb $db, int $actorId, #[\SensitiveParameter] string $sk): array
+    {
+        $principal = $this->principal($db, $actorId);
+        try {
+            $pk = sodium_crypto_box_publickey_from_secretkey($sk);
+        } catch (SodiumException|ValueError) {
+            throw new VaultException('not_found');
+        }
+        if ($principal === null || ! hash_equals($principal['public_key'], $pk)) {
+            throw new VaultException('not_found');
+        }
+        return $principal;
     }
 
     private function requirePrincipal(VaultDb $db, int $userId): array

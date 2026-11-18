@@ -9,6 +9,33 @@ use Kanboard\Plugin\Vault\Model\EntryPayload;
 use Kanboard\Plugin\Vault\Model\ObjectStore;
 use KanboardTests\units\Base;
 
+// Stands in for Task 7: one grantee holds $perm on every object and is a recipient (DEKs are sealed to them,
+// so the read path works) when $perm is set or $recipient forces it. Only the permission gate can then refuse.
+class GranteeObjectStore extends ObjectStore
+{
+    public function __construct($container, callable $clock, private int $grantee, private ?string $perm, private bool $recipient = false)
+    {
+        parent::__construct($container, $clock);
+    }
+
+    protected function effectivePermission(string $type, int $id, int $actorId): ?string
+    {
+        $owner = parent::effectivePermission($type, $id, $actorId);
+        return $owner === null && $actorId === $this->grantee && $this->exists($type, $id) ? $this->perm : $owner;
+    }
+
+    protected function effectiveRecipients(string $type, int $id): array
+    {
+        $r = parent::effectiveRecipients($type, $id);
+        return $r !== [] && ($this->perm !== null || $this->recipient) ? array_merge($r, [$this->grantee]) : $r;
+    }
+
+    private function exists(string $type, int $id): bool
+    {
+        return parent::effectiveRecipients($type, $id) !== [];
+    }
+}
+
 // Spec: Entries, groups and grants (objects, AD binding, read path, optimistic versions). Owner only until T7.
 class ObjectStoreTest extends Base
 {
@@ -147,7 +174,7 @@ class ObjectStoreTest extends Base
         $this->assertVaultError('not_found', fn () => $s->listEntries($this->bob, $g, $this->bobSk));
         $this->assertVaultError('not_found', fn () => $s->readGroup($this->bob, $g, $this->bobSk));
         $this->assertVaultError('not_found', fn () => $s->updateEntry($this->bob, $id, 1, ['title' => 'pwned'], $this->bobSk));
-        $this->assertVaultError('not_found', fn () => $s->deleteObject($this->bob, 'entry', $id));
+        $this->assertVaultError('not_found', fn () => $s->deleteObject($this->bob, 'entry', $id, $this->bobSk));
         $this->assertVaultError('not_found', fn () => $s->createEntry($this->bob, $g, ['title' => 'in your group']));
         $this->assertVaultError('not_found', fn () => $s->createGroup($this->bob, $g, ['name' => 'child']));
         // An entry that never existed looks the same.
@@ -368,6 +395,81 @@ class ObjectStoreTest extends Base
         $this->assertSame([], $s->listEntries($this->alice, $g, $this->aliceSk, 500));
     }
 
+    private function granteeStore(?string $perm, bool $recipient = false): GranteeObjectStore
+    {
+        return new GranteeObjectStore($this->container, fn () => $this->now, $this->bob, $perm, $recipient);
+    }
+
+    // Holding a sealed DEK (being in the recipient set) is not permission: with none, reads are refused.
+    // Kills: a read path that checks only recipient membership.
+    public function testRecipientWithoutPermissionCannotRead(): void
+    {
+        $s = $this->granteeStore(null, true);
+        $g = $s->createGroup($this->alice, null, ['name' => 'Shared']);
+        $e = $s->createEntry($this->alice, $g, ['title' => 'x']);
+        $this->assertSame(1, $this->countRows("SELECT COUNT(*) FROM vault_keys WHERE object_type = 'entry' AND principal_id = ?", [$this->bob]));
+        $this->assertVaultError('not_found', fn () => $s->readEntry($this->bob, $e, $this->bobSk));
+        $this->assertVaultError('not_found', fn () => $s->listEntries($this->bob, $g, $this->bobSk));
+        $this->assertVaultError('not_found', fn () => $s->readGroup($this->bob, $g, $this->bobSk));
+    }
+
+    // A read grantee can read, and every write is refused by the permission gate even though the grantee is a
+    // recipient holding the DEK. Kills: write access decided by recipient membership (updateEntry, createEntry)
+    // and a create/delete gate that accepts read.
+    public function testReadGranteeCannotWrite(): void
+    {
+        $s = $this->granteeStore('read');
+        $g = $s->createGroup($this->alice, null, ['name' => 'Shared']);
+        $e = $s->createEntry($this->alice, $g, ['title' => 'shared', 'password' => 'pw']);
+        $this->assertSame('pw', $s->readField($this->bob, $e, 'password', $this->bobSk));
+        $this->assertCount(1, $s->listEntries($this->bob, $g, $this->bobSk));
+
+        $this->assertVaultError('not_found', fn () => $s->updateEntry($this->bob, $e, 1, ['title' => 'pwned'], $this->bobSk));
+        $this->assertVaultError('not_found', fn () => $s->createEntry($this->bob, $g, ['title' => 'planted']));
+        $this->assertVaultError('not_found', fn () => $s->createGroup($this->bob, $g, ['name' => 'child']));
+        $this->assertVaultError('not_found', fn () => $s->deleteObject($this->bob, 'entry', $e, $this->bobSk));
+        $this->assertVaultError('not_found', fn () => $s->deleteObject($this->bob, 'group', $g, $this->bobSk));
+        $this->assertSame(1, $this->countRows('SELECT COUNT(*) FROM vault_entries'));
+        $this->assertSame(1, $this->countRows('SELECT COUNT(*) FROM vault_groups'));
+        $this->assertSame(1, (int) $this->row('SELECT version FROM vault_entries WHERE id = ?', [$e])['version']);
+    }
+
+    // Edit allows updating and creating entries in the group (owned by the group owner), never sub-groups or
+    // deletion. Kills: owner-only gates on edit paths, and delete/sub-group gates that accept edit.
+    public function testEditGranteeCanEditButNotDeleteOrNest(): void
+    {
+        $s = $this->granteeStore('edit');
+        $g = $s->createGroup($this->alice, null, ['name' => 'Shared']);
+        $e = $s->createEntry($this->alice, $g, ['title' => 'shared']);
+        $this->assertSame(2, $s->updateEntry($this->bob, $e, 1, ['title' => 'edited by bob'], $this->bobSk));
+        $this->assertSame('edited by bob', $s->readEntry($this->alice, $e, $this->aliceSk)['payload']['title']);
+        $new = $s->createEntry($this->bob, $g, ['title' => 'added by bob']);
+        $row = $this->row('SELECT owner_id, created_by FROM vault_entries WHERE id = ?', [$new]);
+        $this->assertSame([$this->alice, $this->bob], [(int) $row['owner_id'], (int) $row['created_by']]);
+        $this->assertSame('added by bob', $s->readEntry($this->alice, $new, $this->aliceSk)['payload']['title']);
+
+        $this->assertVaultError('not_found', fn () => $s->createGroup($this->bob, $g, ['name' => 'child']));
+        $this->assertVaultError('not_found', fn () => $s->deleteObject($this->bob, 'entry', $e, $this->bobSk));
+        $this->assertVaultError('not_found', fn () => $s->deleteObject($this->bob, 'group', $g, $this->bobSk));
+        $this->assertSame(2, $this->countRows('SELECT COUNT(*) FROM vault_entries'));
+    }
+
+    // R25: deletion needs the owner unlocked. Kills: deleting on actor id alone.
+    public function testDeleteNeedsTheOwnersCurrentKey(): void
+    {
+        $s = $this->store();
+        $g = $this->aliceGroup();
+        $e = $s->createEntry($this->alice, $g, ['title' => 'x']);
+        $this->assertVaultError('not_found', fn () => $s->deleteObject($this->alice, 'entry', $e, $this->bobSk));
+        $this->assertVaultError('not_found', fn () => $s->deleteObject($this->alice, 'group', $g, $this->bobSk));
+        $this->assertVaultError('not_found', fn () => $s->deleteObject($this->alice, 'entry', $e, 'short'));
+        $this->assertSame(1, $this->countRows('SELECT COUNT(*) FROM vault_entries'));
+        $this->assertSame(1, $this->countRows('SELECT COUNT(*) FROM vault_groups'));
+        $s->deleteObject($this->alice, 'group', $g, $this->aliceSk);
+        $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_groups'));
+        $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_entries'));
+    }
+
     // R6/R8: deleting an object removes its key, grant and re-key queue rows in model code, for a group's whole
     // subtree, and leaves other objects' rows alone. Kills: deleting only the object row, deleting only the
     // top group's rows, and a type-blind cleanup.
@@ -390,8 +492,8 @@ class ObjectStoreTest extends Base
                 ->execute([$type, $id, $this->now]);
         }
 
-        $this->assertVaultError('not_found', fn () => $s->deleteObject($this->alice, 'group', 99999));
-        $s->deleteObject($this->alice, 'group', $root);
+        $this->assertVaultError('not_found', fn () => $s->deleteObject($this->alice, 'group', 99999, $this->aliceSk));
+        $s->deleteObject($this->alice, 'group', $root, $this->aliceSk);
 
         $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_groups WHERE id IN (?, ?, ?)', [$root, $child, $grandchild]));
         $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_entries WHERE id IN (?, ?)', [$eRoot, $eDeep]));
@@ -401,13 +503,13 @@ class ObjectStoreTest extends Base
         }
         $this->assertSame('k', $s->readEntry($this->alice, $eKeep, $this->aliceSk)['payload']['title']);
 
-        $s->deleteObject($this->alice, 'entry', $eKeep);
+        $s->deleteObject($this->alice, 'entry', $eKeep, $this->aliceSk);
         $this->assertSame(0, $this->countRows("SELECT COUNT(*) FROM vault_keys WHERE object_type = 'entry'"));
         $this->assertSame(0, $this->countRows("SELECT COUNT(*) FROM vault_grants WHERE subject_type = 'entry' AND subject_id = ?", [$eKeep]));
         $this->assertSame(0, $this->countRows("SELECT COUNT(*) FROM vault_rekey_queue WHERE object_type = 'entry' AND object_id = ?", [$eKeep]));
         $this->assertVaultError('not_found', fn () => $s->readEntry($this->alice, $eKeep, $this->aliceSk));
         $this->expectException(\InvalidArgumentException::class);
-        $s->deleteObject($this->alice, 'share', $keep);
+        $s->deleteObject($this->alice, 'share', $keep, $this->aliceSk);
     }
 
     // R8: a key row left behind for an object that no longer exists (a DB cascade bypassed the model) is ignored.
@@ -454,6 +556,7 @@ class ObjectStoreTest extends Base
             [ObjectStore::class, 'updateEntry', 'payload'],
             [ObjectStore::class, 'updateEntry', 'sk'],
             [ObjectStore::class, 'listEntries', 'sk'],
+            [ObjectStore::class, 'deleteObject', 'sk'],
             [EntryPayload::class, 'validate', 'p'],
             [EntryPayload::class, 'validateGroup', 'p'],
             [EntryPayload::class, 'encode', 'p'],
