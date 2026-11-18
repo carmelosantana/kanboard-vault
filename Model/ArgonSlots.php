@@ -61,7 +61,8 @@ class ArgonSlots extends Base
     /** @return resource|null */
     private function tryLock(string $path)
     {
-        $fh = @fopen($path, 'c');
+        // 'e' = O_CLOEXEC: a child process must never inherit (and so keep holding) a slot lock.
+        $fh = @fopen($path, 'ce');
         if ($fh === false) {
             throw new RuntimeException('Argon slots: cannot open a lock file');
         }

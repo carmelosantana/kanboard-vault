@@ -15,6 +15,7 @@ class RateLimiter extends Base
     public const BACKOFF_BASE = 60;
     public const BACKOFF_CAP = 3600;
     private const MAX_BUCKET_BYTES = 191; // the MySQL VARCHAR(191) key
+    private const EPSILON = 1e-9;
 
     private VaultLock $lock;
     private VaultDb $vaultDb;
@@ -31,12 +32,30 @@ class RateLimiter extends Base
     // Token bucket: starts full, refills continuously at $refillPerSec up to $capacity.
     public function consume(string $bucket, float $capacity, float $refillPerSec, float $cost = 1.0): bool
     {
+        return $this->settle($bucket, $capacity, $refillPerSec, $cost, function (float $tokens) use ($cost): array {
+            // A small tolerance: float sums (and PDO's 14-digit float binding) must not delay a due token.
+            if ($tokens + self::EPSILON >= $cost) {
+                return [max(0.0, $tokens - $cost), true];
+            }
+            return [$tokens, false];
+        });
+    }
+
+    // Gives back tokens spent by consume(), never above $capacity.
+    public function refund(string $bucket, float $capacity, float $refillPerSec, float $cost = 1.0): void
+    {
+        $this->settle($bucket, $capacity, $refillPerSec, $cost, fn (float $tokens): array => [min($capacity, $tokens + $cost), null]);
+    }
+
+    // Reads the bucket, refills it to now and writes back what $apply returns, all under the exclusive lock.
+    private function settle(string $bucket, float $capacity, float $refillPerSec, float $cost, callable $apply): mixed
+    {
         $this->checkBucket($bucket);
         if (! is_finite($capacity) || $capacity <= 0 || ! is_finite($refillPerSec) || $refillPerSec < 0 || ! is_finite($cost) || $cost <= 0) {
             throw new InvalidArgumentException('Rate limit: invalid bucket parameters');
         }
 
-        return $this->lock->exclusive(function () use ($bucket, $capacity, $refillPerSec, $cost): bool {
+        return $this->lock->exclusive(function () use ($bucket, $capacity, $refillPerSec, $apply): mixed {
             $now = $this->now();
             $row = $this->read($bucket);
             if ($row === null) {
@@ -46,12 +65,9 @@ class RateLimiter extends Base
                 $elapsed = max(0, $now - $row['updated_at']);
                 $tokens = min($capacity, $row['tokens'] + $elapsed * $refillPerSec);
             }
-            $allowed = $tokens >= $cost;
-            if ($allowed) {
-                $tokens -= $cost;
-            }
+            [$tokens, $result] = $apply($tokens);
             $this->write($bucket, $tokens, $row === null || $now > $row['updated_at'] ? $now : $row['updated_at'], $row !== null);
-            return $allowed;
+            return $result;
         });
     }
 

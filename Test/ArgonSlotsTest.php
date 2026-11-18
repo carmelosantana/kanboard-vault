@@ -103,4 +103,35 @@ class ArgonSlotsTest extends Base
         $this->expectException(\InvalidArgumentException::class);
         $this->slots()->acquire(0);
     }
+
+    // R16(c): lock files are opened close-on-exec. Otherwise a child process started while a slot is held
+    // (proc_open, exec, mail) inherits the descriptor, and its copy keeps the flock after the request dies.
+    // A forked worker takes a slot, starts a long-lived child and is killed without releasing anything.
+    public function testLockFilesAreNotInheritedByChildProcesses(): void
+    {
+        if (! function_exists('pcntl_fork') || ! function_exists('posix_kill')) {
+            $this->markTestSkipped('pcntl and posix are needed for the inheritance test');
+        }
+        $ready = $this->dir.'.ready';
+        $pid = pcntl_fork();
+        $this->assertNotSame(-1, $pid, 'fork failed');
+        if ($pid === 0) {
+            $slot = $this->slots()->acquire(7);
+            // The grandchild outlives this worker; its stdio goes nowhere.
+            $child = proc_open(['sleep', '5'], [0 => ['file', '/dev/null', 'r'], 1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
+            file_put_contents($ready, ($slot !== null && is_resource($child)) ? (string) proc_get_status($child)['pid'] : 'E');
+            posix_kill(getmypid(), SIGKILL);
+        }
+        pcntl_waitpid($pid, $status);
+        $grandchild = (int) @file_get_contents($ready);
+        @unlink($ready);
+        $this->assertGreaterThan(0, $grandchild, 'the worker took a slot and started a child');
+        try {
+            $slots = $this->slots();
+            $this->held[] = $again = $slots->acquire(7);
+            $this->assertNotNull($again, 'an inherited descriptor still holds the lock: '.var_export($slots->lastBusy(), true));
+        } finally {
+            posix_kill($grandchild, SIGKILL);
+        }
+    }
 }

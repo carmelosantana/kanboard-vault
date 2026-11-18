@@ -163,6 +163,38 @@ class VaultLockTest extends Base
         });
     }
 
+    // R16(b): a nested exclusive() that throws marks the transaction rollback-only. If the outer callable
+    // swallows the exception and returns, the outermost call still rolls back and throws, so the inner
+    // half-done writes are never committed.
+    public function testSwallowedNestedFailureRollsBackTheOuterTransaction(): void
+    {
+        $this->migrate();
+        $pdo = $this->container['db']->getConnection();
+        $lock = new VaultLock($this->container);
+        $thrown = null;
+        try {
+            $lock->exclusive(function () use ($pdo, $lock) {
+                $pdo->exec("INSERT INTO vault_rate (bucket, tokens, updated_at) VALUES ('outer', 1, 1)");
+                try {
+                    $lock->exclusive(function () use ($pdo) {
+                        $pdo->exec("INSERT INTO vault_rate (bucket, tokens, updated_at) VALUES ('inner-half', 1, 1)");
+                        throw new \DomainException('inner fails half way');
+                    });
+                } catch (\DomainException $swallowed) {
+                }
+                return 'carried on';
+            });
+        } catch (\RuntimeException $e) {
+            $thrown = $e;
+        }
+        $this->assertNotNull($thrown, 'the outermost call must not report success');
+        $this->assertStringContainsString('rollback-only', $thrown->getMessage());
+        $this->assertSame(0, $this->rateRows($pdo));
+        $this->assertFalse($pdo->inTransaction());
+        // The flag does not leak into the next transaction.
+        $this->assertSame('ok', $lock->exclusive(fn () => 'ok'));
+    }
+
     public function testSharedInsideExclusiveIsAllowed(): void
     {
         $lock = new VaultLock($this->container);

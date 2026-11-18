@@ -18,7 +18,7 @@ class VaultLock extends Base
     public const EXCLUSIVE = 'exclusive';
     public const SHARED = 'shared';
 
-    /** @var WeakMap<PDO, array{mode: string, depth: int}>|null */
+    /** @var WeakMap<PDO, array{mode: string, depth: int, rollbackOnly: bool}>|null */
     private static ?WeakMap $held = null;
 
     public function exclusive(callable $fn): mixed
@@ -39,20 +39,26 @@ class VaultLock extends Base
         if (isset(self::$held[$pdo])) {
             $state = self::$held[$pdo];
             if ($mode === self::EXCLUSIVE && $state['mode'] === self::SHARED) {
+                self::markRollbackOnly($pdo);
                 throw new LogicException('Vault lock: cannot take the exclusive lock inside a shared one');
             }
-            // Re-use the outer transaction; an exception propagates to the outermost call, which rolls back.
-            self::$held[$pdo] = ['mode' => $state['mode'], 'depth' => $state['depth'] + 1];
+            // Re-use the outer transaction. A failure marks it rollback-only, so the outermost call rolls back
+            // even when a caller in between catches the exception and carries on.
+            self::$held[$pdo] = ['depth' => $state['depth'] + 1] + $state;
             try {
                 return $fn();
+            } catch (Throwable $e) {
+                self::markRollbackOnly($pdo);
+                throw $e;
             } finally {
-                self::$held[$pdo] = $state;
+                $now = self::$held[$pdo];
+                self::$held[$pdo] = ['depth' => $state['depth'], 'rollbackOnly' => $now['rollbackOnly']] + $state;
             }
         }
 
         $driver = $pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
         $this->begin($pdo, $driver, $mode);
-        self::$held[$pdo] = ['mode' => $mode, 'depth' => 1];
+        self::$held[$pdo] = ['mode' => $mode, 'depth' => 1, 'rollbackOnly' => false];
         try {
             $this->lockMetaRow($pdo, $driver, $mode);
             $result = $fn();
@@ -61,7 +67,13 @@ class VaultLock extends Base
             $this->rollback($pdo, $driver);
             throw $e;
         }
+        $rollbackOnly = self::$held[$pdo]['rollbackOnly'];
         unset(self::$held[$pdo]);
+        if ($rollbackOnly) {
+            // A nested operation failed and its exception was swallowed; its partial writes must not commit.
+            $this->rollback($pdo, $driver);
+            throw new RuntimeException('Vault lock: a nested operation failed, so the transaction was rollback-only and has been rolled back');
+        }
         if (! $pdo->inTransaction()) {
             // Something (e.g. PicoDb's error handler) ended the transaction, so later work ran outside the lock.
             throw new RuntimeException('Vault lock: the transaction was ended inside the lock');
@@ -127,6 +139,11 @@ class VaultLock extends Base
             }
         } catch (Throwable $ignored) {
         }
+    }
+
+    private static function markRollbackOnly(PDO $pdo): void
+    {
+        self::$held[$pdo] = ['rollbackOnly' => true] + self::$held[$pdo];
     }
 
     private function exec(PDO $pdo, string $sql): void

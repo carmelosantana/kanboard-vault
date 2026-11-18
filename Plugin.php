@@ -2,6 +2,9 @@
 namespace Kanboard\Plugin\Vault;
 
 use Kanboard\Core\Plugin\Base;
+use Kanboard\Core\Security\AuthenticationManager;
+use Kanboard\Core\Session\SessionManager;
+use Kanboard\Plugin\Vault\Subscriber\AuthSubscriber;
 
 class Plugin extends Base
 {
@@ -12,6 +15,10 @@ class Plugin extends Base
             $this->hook->on('template:layout:top', ['template' => 'Vault:layout/sodium_notice']);
             return;
         }
+
+        $subscriber = new AuthSubscriber($this->container);
+        $this->container['dispatcher']->addListener(AuthenticationManager::EVENT_SUCCESS, [$subscriber, 'onAuthSuccess']);
+        $this->container['dispatcher']->addListener(SessionManager::EVENT_DESTROY, [$subscriber, 'onSessionDestroy']);
     }
 
     public function isSupported(): bool

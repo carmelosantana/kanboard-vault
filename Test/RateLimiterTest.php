@@ -187,4 +187,41 @@ class RateLimiterTest extends Base
             }
         }
     }
+
+    // R16(a): PDO binds floats as strings with 14 significant digits, so a stored 1/3 reads back as
+    // 0.33333333333333. Three denied checks one second apart then sum to just under 1, although the token
+    // is due. A strict `>=` without a tolerance delays it.
+    public function testFloatDriftDoesNotDelayADueToken(): void
+    {
+        $rl = $this->limiter();
+        $rate = 1 / 3;
+        $this->assertTrue($rl->consume('drift', 1, $rate));
+        for ($i = 0; $i < 2; $i++) {
+            $this->now++;
+            $this->assertFalse($rl->consume('drift', 1, $rate), "second $i");
+        }
+        $this->now++;
+        $this->assertTrue($rl->consume('drift', 1, $rate), 'the token is due after 3 s');
+        // The tolerance never grants a token that is not due.
+        $this->assertFalse($rl->consume('drift', 1, $rate));
+    }
+
+    // Unlock spends an IP token up front (atomic, no overshoot) and gives it back on success, so the IP
+    // bucket counts failures and attempts in flight, never successful unlocks.
+    public function testRefundReturnsASpentTokenButNeverExceedsCapacity(): void
+    {
+        $rl = $this->limiter();
+        $this->assertTrue($rl->consume('ip', 2, 0));
+        $this->assertTrue($rl->consume('ip', 2, 0));
+        $this->assertFalse($rl->consume('ip', 2, 0));
+        $rl->refund('ip', 2, 0);
+        $this->assertTrue($rl->consume('ip', 2, 0), 'the refunded token is usable');
+        $this->assertFalse($rl->consume('ip', 2, 0));
+        // Refunds on a full or missing bucket never raise it above capacity.
+        $rl->refund('fresh', 2, 0);
+        $rl->refund('fresh', 2, 0);
+        $this->assertTrue($rl->consume('fresh', 2, 0));
+        $this->assertTrue($rl->consume('fresh', 2, 0));
+        $this->assertFalse($rl->consume('fresh', 2, 0));
+    }
 }
