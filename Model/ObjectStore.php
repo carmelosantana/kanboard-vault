@@ -81,6 +81,7 @@ class ObjectStore extends Base
                     'updated_at' => $now,
                 ]);
                 $this->sealNew($db, 'group', $id, $actorId, $json);
+                $this->audit('create', $actorId, 'group', $id);
                 return $id;
             });
         } finally {
@@ -114,6 +115,7 @@ class ObjectStore extends Base
                     'updated_at' => $now,
                 ]);
                 $this->sealNew($db, 'entry', $id, $ownerId, $json);
+                $this->audit('create', $actorId, 'entry', $id);
                 return $id;
             });
         } finally {
@@ -191,6 +193,7 @@ class ObjectStore extends Base
                     if ($changed !== 1) {
                         throw new VaultException('conflict');
                     }
+                    $this->audit('update', $actorId, 'entry', $entryId);
                     return $expectedVersion + 1;
                 } finally {
                     sodium_memzero($dek);
@@ -260,6 +263,7 @@ class ObjectStore extends Base
             $db = $this->vdb();
             $this->requirePermission($type, $id, $actorId, self::OWNER_ONLY);
             $this->requireCurrentKey($db, $actorId, $sk);
+            $this->audit('delete', $actorId, $type, $id);
             if ($type === 'entry') {
                 $this->purgeRefs($db, 'entry', [$id]);
                 $db->execute('DELETE FROM vault_entries WHERE id = ?', [$id]);
@@ -427,6 +431,12 @@ class ObjectStore extends Base
             $db->execute('DELETE FROM vault_grants WHERE subject_type = ? AND subject_id IN ('.$in.')', $params);
             $db->execute('DELETE FROM vault_rekey_queue WHERE object_type = ? AND object_id IN ('.$in.')', $params);
         }
+    }
+
+    // Inside the caller's exclusive transaction, so the row commits or rolls back with the change.
+    private function audit(string $action, int $actorId, string $type, int $id): void
+    {
+        AuditModel::of($this->container, $this->clock)->record($action, ['actor_user_id' => $actorId, 'object_type' => $type, 'object_id' => $id]);
     }
 
     private function resolver(): RecipientResolver

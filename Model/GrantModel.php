@@ -67,6 +67,7 @@ class GrantModel extends Base
             foreach ($this->resolver()->subtree($type, $id) as [$t, $oid]) {
                 $this->sealMissing($db, $t, $oid, $ownerId, $ownerSk);
             }
+            AuditModel::of($this->container, $this->clock)->record('grant', ['actor_user_id' => $ownerId, 'object_type' => $type, 'object_id' => $id, 'target_user_id' => $granteeId]);
         });
     }
 
@@ -84,7 +85,7 @@ class GrantModel extends Base
                 'SELECT id FROM vault_grants WHERE subject_type = ? AND subject_id = ? AND grantee_id = ?',
                 [$type, $id, $granteeId]
             ) ?? throw new VaultException('not_found');
-            $this->removeSource((int) $grant['id']);
+            $this->removeSource((int) $grant['id'], $ownerId);
             $resolver = $this->resolver();
             foreach ($resolver->subtree($type, $id) as [$t, $oid]) {
                 $row = $resolver->object($t, $oid);
@@ -100,10 +101,12 @@ class GrantModel extends Base
     // and, for a group, its whole subtree), the principals that lose effective access are worked out: anyone
     // holding a key row, or the source's grantee, who is not an effective recipient once this source is gone.
     // Their key rows are deleted and the object is queued for re-key. Only then is the source deleted. A source
-    // whose subject no longer exists is just deleted (R8); a missing grant id is a no-op.
-    public function removeSource(int $grantId): void
+    // whose subject no longer exists is just deleted (R8); a missing grant id is a no-op. Audited as revoke by
+    // $actorId, or with no actor for an expiry, a sweep or another system removal; the target is the grantee,
+    // unless their Kanboard user is gone (the audit's foreign key).
+    public function removeSource(int $grantId, ?int $actorId = null): void
     {
-        $this->lock()->exclusive(function () use ($grantId): void {
+        $this->lock()->exclusive(function () use ($grantId, $actorId): void {
             $db = $this->vdb();
             $grant = $db->fetchOne('SELECT id, subject_type, subject_id, grantee_id FROM vault_grants WHERE id = ?', [$grantId]);
             if ($grant === null) {
@@ -122,6 +125,14 @@ class GrantModel extends Base
                 $this->dropLosers($db, $t, $row, $after, [(int) $grant['grantee_id']]);
             }
             $db->execute('DELETE FROM vault_grants WHERE id = ?', [$grantId]);
+            // live_user_id is NULL once the grantee's Kanboard user is deleted (R26), so it is safe for the FK.
+            $live = $db->fetchOne('SELECT live_user_id FROM vault_principals WHERE user_id = ?', [(int) $grant['grantee_id']]);
+            AuditModel::of($this->container, $this->clock)->record('revoke', [
+                'actor_user_id' => $actorId,
+                'object_type' => isset(RecipientResolver::TABLES[$type]) ? $type : null,
+                'object_id' => isset(RecipientResolver::TABLES[$type]) ? (int) $grant['subject_id'] : null,
+                'target_user_id' => $live === null || $live['live_user_id'] === null ? null : (int) $live['live_user_id'],
+            ]);
         });
     }
 
@@ -191,6 +202,8 @@ class GrantModel extends Base
                 $this->sealMissing($db, $t, $oid, $ownerId, $ownerSk, $row, $after, false);
                 $this->dropLosers($db, $t, $row, $after, array_keys($before[$t.':'.$oid]));
             }
+            // The audit table has no move action; a move changes the object's placement, so it is an update.
+            AuditModel::of($this->container, $this->clock)->record('update', ['actor_user_id' => $ownerId, 'object_type' => $type, 'object_id' => $id]);
         });
     }
 

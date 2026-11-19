@@ -122,6 +122,7 @@ class PrincipalModel extends Base
                 ]);
                 $wrap = Wraps::wrap($sk, $kek, $userId, 'passphrase', '', $wrapId);
                 $db->execute('UPDATE vault_wraps SET nonce = ?, wrapped_sk = ? WHERE id = ?', [$wrap['nonce'], $wrap['wrapped_sk'], $wrapId]);
+                AuditModel::of($this->container, $this->clock)->record('enroll', ['actor_user_id' => $userId]);
             });
         } finally {
             sodium_memzero($keypair);

@@ -78,11 +78,11 @@ class UnlockService extends Base
             $wrap = $this->loadPassphraseWrap($userId, $prf);
             $sk = $this->open($wrap, $passphrase);
             if ($sk === null) {
-                $this->limiter->recordFailure(self::userBucket($userId));
+                (new FailedGuess($this->container, $this->limiter, $this->clock))->record($userId, self::userBucket($userId), $ip);
                 throw new VaultException('unlock_failed');
             }
 
-            $this->recordSuccess($userId, $ipBucket);
+            $this->recordSuccess($userId, $ipBucket, $ip);
             $this->upgradeKdf($wrap, $sk, $passphrase);
             if (empty($wrap['resume'])) {
                 return $this->openSession($userId, $sk, $passphrase);
@@ -212,10 +212,10 @@ class UnlockService extends Base
     }
 
     // The failure count before this success is kept for the banner; the back-off resets and the IP
-    // token spent on this attempt goes back.
-    private function recordSuccess(int $userId, string $ipBucket): void
+    // token spent on this attempt goes back. The unlock is audited in the same transaction.
+    private function recordSuccess(int $userId, string $ipBucket, string $ip): void
     {
-        (new VaultLock($this->container))->exclusive(function () use ($userId, $ipBucket): void {
+        (new VaultLock($this->container))->exclusive(function () use ($userId, $ipBucket, $ip): void {
             $db = new VaultDb($this->container);
             $row = $db->fetchOne('SELECT tokens FROM vault_rate WHERE bucket = ?', [self::userBucket($userId)]);
             $failures = $row === null ? 0 : (int) round((float) $row['tokens']);
@@ -225,6 +225,8 @@ class UnlockService extends Base
             }
             $this->limiter->recordSuccess(self::userBucket($userId));
             $this->limiter->refund($ipBucket, self::IP_FAILURES, self::IP_FAILURES / self::IP_WINDOW);
+            $ipTrunc = (new ClientIp($this->container))->truncate($ip);
+            AuditModel::of($this->container, $this->clock)->record('unlock', ['actor_user_id' => $userId, 'ip_trunc' => $ipTrunc === '' ? null : $ipTrunc]);
         });
     }
 

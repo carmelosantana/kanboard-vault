@@ -7,6 +7,8 @@ use Kanboard\Core\Session\SessionManager;
 use Kanboard\Plugin\Vault\Console\OrgKeygenCommand;
 use Kanboard\Plugin\Vault\Console\OrgRecoverCommand;
 use Kanboard\Plugin\Vault\Console\PurgeCommand;
+use Kanboard\Plugin\Vault\Model\AuditModel;
+use Kanboard\Plugin\Vault\Model\Notifier;
 use Kanboard\Plugin\Vault\Subscriber\AuthSubscriber;
 
 class Plugin extends Base
@@ -18,6 +20,10 @@ class Plugin extends Base
             $this->hook->on('template:layout:top', ['template' => 'Vault:layout/sodium_notice']);
             return;
         }
+
+        // The audit log and the email notices every service uses (AuditModel::of, Notifier::of).
+        $this->container['vaultAudit'] = static fn ($c): AuditModel => new AuditModel($c);
+        $this->container['vaultNotifier'] = static fn ($c): Notifier => new Notifier($c);
 
         $subscriber = new AuthSubscriber($this->container);
         $this->container['dispatcher']->addListener(AuthenticationManager::EVENT_SUCCESS, [$subscriber, 'onAuthSuccess']);

@@ -50,6 +50,8 @@ class RecoveryService extends Base
         VaultSettings::POLICY_CODE_ORG => ['recovery', 'org'],
     ];
     private const POLICY_METHODS = ['recovery', 'org'];
+    // vault:org-keygen and vault:org-recover are CLI only (spec), whatever process runs them.
+    private const CLI = ['actor_kind' => 'cli', 'via' => 'cli'];
 
     private ArgonSlots $slots;
     private Closure $argon2;
@@ -57,7 +59,8 @@ class RecoveryService extends Base
     private ?RotationService $rotation;
     private Closure $audit;
 
-    // $audit is called as ($action, $columns) after a change commits; T10 wires it to the audit log.
+    // $audit is called as ($action, $columns) inside the transaction of the change it records; by default it is
+    // the audit log (AuditModel::record).
     public function __construct($container, ?ArgonSlots $slots = null, ?callable $argon2 = null, ?callable $clock = null, ?RotationService $rotation = null, ?callable $audit = null)
     {
         parent::__construct($container);
@@ -65,7 +68,7 @@ class RecoveryService extends Base
         $this->argon2 = Closure::fromCallable($argon2 ?? [Kdf::class, 'argon2id']);
         $this->clock = $clock !== null ? Closure::fromCallable($clock) : static fn (): int => time();
         $this->rotation = $rotation;
-        $this->audit = $audit !== null ? Closure::fromCallable($audit) : static function (string $action, array $cols): void {};
+        $this->audit = $audit !== null ? Closure::fromCallable($audit) : fn (string $action, array $cols) => AuditModel::of($container, $this->clock)->record($action, $cols);
     }
 
     public static function userBucket(int $userId): string
@@ -116,8 +119,8 @@ class RecoveryService extends Base
                 ]);
                 $w = Wraps::wrap($sk, $kek, $userId, 'recovery', '', $wrapId);
                 $db->execute('UPDATE vault_wraps SET nonce = ?, wrapped_sk = ? WHERE id = ?', [$w['nonce'], $w['wrapped_sk'], $wrapId]);
+                ($this->audit)('recovery_code_create', ['actor_user_id' => $userId]);
             });
-            ($this->audit)('recovery_code_create', ['actor_user_id' => $userId]);
             return $code['display'];
         } finally {
             sodium_memzero($code['secret']);
@@ -157,7 +160,9 @@ class RecoveryService extends Base
                 $sk1 = '';
             }
             if ($sk1 === '') {
-                $limiter->recordFailure(self::userBucket($userId));
+                // Audited as unlock_failed (the table has no recovery failure) and counted toward the five-failure
+                // notice with the unlock failures.
+                (new FailedGuess($this->container, $limiter, $this->clock))->record($userId, self::userBucket($userId), $ip);
                 throw new VaultException('unlock_failed');
             }
             $limiter->recordSuccess(self::userBucket($userId));
@@ -169,15 +174,16 @@ class RecoveryService extends Base
             $ikm = ($this->argon2)($newPassphrase, $salt, Kdf::DEFAULT_OPS, Kdf::DEFAULT_MEM);
             $newKek = Kdf::kek($ikm, 'passphrase');
             $wrapId = (int) $wrap['id'];
-            $sk2 = $this->lock()->exclusive(function () use ($userId, $wrapId, $sk1, $newKek, $salt): string {
+            $sk2 = $this->lock()->exclusive(function () use ($userId, $wrapId, $sk1, $newKek, $salt, $ip): string {
                 $db = $this->vdb();
                 // One use: a concurrent use has already consumed the wrap (its rotation deleted it).
                 if ($db->fetchOne("SELECT id FROM vault_wraps WHERE id = ? AND user_id = ? AND method = 'recovery'", [$wrapId, $userId]) === null) {
                     throw new VaultException('unlock_failed');
                 }
-                return $this->replaceFactors($db, $userId, $sk1, $newKek, $salt);
+                $sk2 = $this->replaceFactors($db, $userId, $sk1, $newKek, $salt, []);
+                ($this->audit)('recovery_used', ['actor_user_id' => $userId, 'ip_trunc' => (new ClientIp($this->container))->truncate($ip) ?: null]);
+                return $sk2;
             });
-            ($this->audit)('recovery_used', ['actor_user_id' => $userId, 'ip_trunc' => (new ClientIp($this->container))->truncate($ip) ?: null]);
             return $this->completeContained($userId, $sk1, $sk2);
         } finally {
             sodium_memzero($secret);
@@ -201,7 +207,7 @@ class RecoveryService extends Base
             $settings->write($db, VaultSettings::POLICY, $policy, $actorId);
             $this->pruneMethods($db, self::forbidden($policy), null);
         });
-        $settings->changed($actorId);
+        $settings->changed();
     }
 
     // vault:org-keygen. Stores only the public key, on the vault_meta lock row, and returns the secret's display
@@ -223,8 +229,8 @@ class RecoveryService extends Base
                     $this->pruneMethods($db, ['org'], null);
                 }
                 $db->execute('UPDATE vault_meta SET org_pk = ? WHERE id = 1', [base64_encode($pk)]);
+                ($this->audit)('policy_change', ['actor_user_id' => null] + self::CLI);
             });
-            ($this->audit)('policy_change', ['actor_user_id' => null]);
             return OrgSecret::format($sk);
         } finally {
             sodium_memzero($sk);
@@ -267,12 +273,19 @@ class RecoveryService extends Base
             $sk2 = $this->lock()->exclusive(function () use ($userId, $orgKeypair, $kek, $salt, &$sk1): string {
                 $db = $this->vdb();
                 $sk1 = $this->openOrgWrap($db, $userId, $orgKeypair, false) ?? throw new VaultException('recovery_failed');
-                $sk2 = $this->replaceFactors($db, $userId, $sk1, $kek, $salt);
+                $sk2 = $this->replaceFactors($db, $userId, $sk1, $kek, $salt, self::CLI);
                 $db->execute('UPDATE vault_principals SET notices = notices | ? WHERE user_id = ?', [self::NOTICE_ORG_RECOVERED, $userId]);
+                ($this->audit)('org_recovery', ['target_user_id' => $userId] + self::CLI);
                 return $sk2;
             });
-            ($this->audit)('org_recovery', ['target_user_id' => $userId]);
-            return $this->completeContained($userId, $sk1, $sk2);
+            $result = $this->completeContained($userId, $sk1, $sk2);
+            // Spec: the user is notified. After the commit, and contained: the recovery has happened.
+            try {
+                Notifier::of($this->container)->orgRecovered($userId);
+            } catch (Throwable $e) {
+                $this->logger->warning('Vault: the org recovery notice could not be sent ('.get_class($e).')');
+            }
+            return $result;
         } finally {
             sodium_memzero($orgSk);
             sodium_memzero($orgKeypair);
@@ -369,10 +382,14 @@ class RecoveryService extends Base
     }
 
     // Inside the caller's exclusive transaction: hardware keys and every session go, and the rotation starts with
-    // the new passphrase as the only surviving factor (start deletes every old wrap). Returns sk2.
-    private function replaceFactors(VaultDb $db, int $userId, #[\SensitiveParameter] string $sk1, #[\SensitiveParameter] string $kek, string $salt): string
+    // the new passphrase as the only surviving factor (start deletes every old wrap). Each removed hardware key is
+    // an hw_key_remove row ($context: the caller's actor_kind and via). Returns sk2.
+    private function replaceFactors(VaultDb $db, int $userId, #[\SensitiveParameter] string $sk1, #[\SensitiveParameter] string $kek, string $salt, array $context): string
     {
-        $db->execute('DELETE FROM vault_webauthn WHERE user_id = ?', [$userId]);
+        $removed = $db->execute('DELETE FROM vault_webauthn WHERE user_id = ?', [$userId]);
+        for ($i = 0; $i < $removed; $i++) {
+            ($this->audit)('hw_key_remove', ['actor_user_id' => $userId] + $context);
+        }
         $db->execute('DELETE FROM vault_sessions WHERE user_id = ?', [$userId]);
         return $this->rotation()->start($userId, $sk1, [self::passphraseFactor($kek, $salt)]);
     }

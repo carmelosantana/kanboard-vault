@@ -303,7 +303,7 @@ class PurgeTest extends Base
         $this->assertSame([(string) ($now + 1)], array_map('strval', $pdo->query('SELECT expires_at FROM vault_challenges')->fetchAll(\PDO::FETCH_COLUMN)));
         $this->assertSame(['r-live'], $pdo->query('SELECT id_hash FROM vault_share_reservations')->fetchAll(\PDO::FETCH_COLUMN));
         $this->assertSame(['sh-live'], $pdo->query('SELECT id_hash FROM vault_shares')->fetchAll(\PDO::FETCH_COLUMN));
-        $this->assertSame(1, $this->countRows('SELECT COUNT(*) FROM vault_audit'));
+        $this->assertSame(1, $this->countRows("SELECT COUNT(*) FROM vault_audit WHERE action = 'unlock' AND via = 'ui'"));
         $this->assertSame([2, 1, 1, 1, 1], [$counts['sessions'], $counts['challenges'], $counts['reservations'], $counts['shares'], $counts['audit']]);
         $this->assertSame([['share_expire', ['target_user_id' => $this->bob, 'share_hash' => 'sh-old']]], $this->audits);
     }

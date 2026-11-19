@@ -49,6 +49,19 @@ class SodiumGateTest extends Base
         }
     }
 
+    // The plugin makes the real audit log and notifier the container defaults that every service resolves.
+    // Kills: either registration removed (services would fall back silently, but T11+ inject through these).
+    public function testAuditAndNotifierRegisteredWithSodium(): void
+    {
+        $with = new class($this->container) extends Plugin {
+            public function isSupported(): bool { return true; }
+        };
+        $with->initialize();
+        $this->assertInstanceOf(\Kanboard\Plugin\Vault\Model\AuditModel::class, \Kanboard\Plugin\Vault\Model\AuditModel::of($this->container));
+        $this->assertSame($this->container['vaultAudit'], \Kanboard\Plugin\Vault\Model\AuditModel::of($this->container));
+        $this->assertSame($this->container['vaultNotifier'], \Kanboard\Plugin\Vault\Model\Notifier::of($this->container));
+    }
+
     public function testNoticeRendersForAdminsOnly(): void
     {
         $src = file_get_contents(__DIR__.'/../Template/layout/sodium_notice.php');

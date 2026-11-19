@@ -150,6 +150,7 @@ class Rekeyer extends Base
             $db->execute('DELETE FROM vault_keys WHERE object_type = ? AND object_id = ?', [$type, $id]);
             $this->sealTo($db, $type, $id, $epoch + 1, $new, array_keys($recipients), false, true);
             $this->dequeue($db, $type, $id);
+            AuditModel::of($this->container, $this->clock)->record('rekey', ['actor_user_id' => $holderId, 'object_type' => $type, 'object_id' => $id]);
             return true;
         } finally {
             sodium_memzero($old);

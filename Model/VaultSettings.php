@@ -8,8 +8,9 @@ use PDO;
 
 // Admin settings (spec: Admin settings), stored in Kanboard's settings table under vault_*. Reads and writes go
 // through VaultDb (R13), so they can run inside the vault lock and always see the current row (Kanboard's own
-// ConfigModel caches per request). Every change audits policy_change. The recovery policy has one write path,
-// RecoveryService::setPolicy, because lowering it must delete wraps in the same transaction; set() routes there.
+// ConfigModel caches per request). Every change audits policy_change inside its own transaction. The recovery
+// policy has one write path, RecoveryService::setPolicy, because lowering it must delete wraps in the same
+// transaction; set() routes there.
 //
 // Kanboard's settings form saves whatever keys it is posted, so an admin can write a vault_* row without coming
 // through here. Reads therefore validate too: a stored value that doesn't parse reads as the default, and the
@@ -48,12 +49,12 @@ class VaultSettings extends Base
     private Closure $audit;
     private Closure $clock;
 
-    // $audit is called as ($action, $columns) after a change commits; T10 wires it to the audit log.
+    // $audit is called as ($action, $columns) inside the change's transaction; by default it is the audit log.
     public function __construct($container, ?callable $audit = null, ?callable $clock = null)
     {
         parent::__construct($container);
-        $this->audit = $audit !== null ? Closure::fromCallable($audit) : static function (string $action, array $cols): void {};
         $this->clock = $clock !== null ? Closure::fromCallable($clock) : static fn (): int => time();
+        $this->audit = $audit !== null ? Closure::fromCallable($audit) : fn (string $action, array $cols) => AuditModel::of($container, $this->clock)->record($action, $cols);
     }
 
     // The typed value: int for numeric keys, string otherwise. A missing or invalid stored value is the default.
@@ -80,10 +81,11 @@ class VaultSettings extends Base
             return;
         }
         (new VaultLock($this->container))->exclusive(fn () => $this->write($this->vdb(), $key, $stored, $actorId));
-        $this->changed($actorId);
+        $this->changed();
     }
 
-    // Writes one validated value inside the caller's exclusive transaction. For RecoveryService.
+    // Writes one validated value, and its policy_change audit row, inside the caller's exclusive transaction.
+    // For RecoveryService.
     public function write(VaultDb $db, string $key, string $value, int $actorId): void
     {
         self::checkKey($key);
@@ -94,15 +96,15 @@ class VaultSettings extends Base
         } else {
             $db->execute('UPDATE settings SET value = ?, changed_by = ?, changed_on = ? WHERE '.$col.' = ?', [$value, $actorId, $now, $key]);
         }
+        ($this->audit)('policy_change', ['actor_user_id' => $actorId > 0 ? $actorId : null]);
     }
 
-    // After a committed change: audit it, and drop Kanboard's per-request config cache so ConfigModel sees it.
-    public function changed(int $actorId): void
+    // After a committed change: drop Kanboard's per-request config cache so ConfigModel sees it.
+    public function changed(): void
     {
         if (isset($this->container['memoryCache'])) {
             $this->memoryCache->flush();
         }
-        ($this->audit)('policy_change', ['actor_user_id' => $actorId > 0 ? $actorId : null]);
     }
 
     // The org public key (raw 32 bytes) from the vault_meta row, or null when vault:org-keygen hasn't run.

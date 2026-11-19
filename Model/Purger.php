@@ -25,11 +25,12 @@ class Purger extends Base
 
     private Closure $audit;
 
-    // $audit is called as ($action, $columns) after a change commits; T10 wires it to the audit log.
+    // $audit is called as ($action, $columns) inside the change's transaction; by default it is the audit log.
+    // Grant removals are audited by GrantModel::removeSource itself.
     public function __construct($container, ?callable $audit = null)
     {
         parent::__construct($container);
-        $this->audit = $audit !== null ? Closure::fromCallable($audit) : static function (string $action, array $cols): void {};
+        $this->audit = $audit !== null ? Closure::fromCallable($audit) : static fn (string $action, array $cols) => AuditModel::of($container)->record($action, $cols);
     }
 
     // ['ran' => false] when a purge ran less than INTERVAL seconds ago (unless $force), else 'ran' => true and a
@@ -155,19 +156,17 @@ class Purger extends Base
             $rows = $db->fetchAll('SELECT id_hash, creator_id FROM vault_shares WHERE expires_at <= ? ORDER BY id_hash', [$now]);
             foreach ($rows as $r) {
                 $db->execute('DELETE FROM vault_shares WHERE id_hash = ?', [$r['id_hash']]);
+                ($this->audit)('share_expire', ['target_user_id' => (int) $r['creator_id'], 'share_hash' => (string) $r['id_hash']]);
             }
             return $rows;
         });
-        foreach ($expired as $r) {
-            ($this->audit)('share_expire', ['target_user_id' => (int) $r['creator_id'], 'share_hash' => (string) $r['id_hash']]);
-        }
         return count($expired);
     }
 
     private function auditPastRetention(int $now): int
     {
         $days = (int) (new VaultSettings($this->container))->get('vault_audit_retention_days');
-        return $this->lock()->exclusive(fn (): int => $this->vdb()->execute('DELETE FROM vault_audit WHERE created_at < ?', [$now - $days * 86400]));
+        return $this->lock()->exclusive(fn (): int => (new AuditModel($this->container, null, null, static fn (): int => $now))->purge($days));
     }
 
     private function vdb(): VaultDb

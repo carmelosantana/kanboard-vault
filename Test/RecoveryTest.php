@@ -387,7 +387,10 @@ class RecoveryTest extends Base
         $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_webauthn WHERE user_id = ?', [$this->alice]));
         $this->assertSame([], $this->wraps($this->alice, 'passphrase+prf'));
         $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_rotations'));
-        $this->assertSame([['org_recovery', ['target_user_id' => $this->alice]]], $this->audits);
+        $this->assertSame([
+            ['hw_key_remove', ['actor_user_id' => $this->alice, 'actor_kind' => 'cli', 'via' => 'cli']],
+            ['org_recovery', ['target_user_id' => $this->alice, 'actor_kind' => 'cli', 'via' => 'cli']],
+        ], $this->audits);
 
         $sk2 = $this->unlock($this->alice, self::NEW_PASS, 'sid-a2');
         $this->assertSame(base64_decode($after['public_key']), $this->pk($sk2));

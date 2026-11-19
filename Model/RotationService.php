@@ -126,7 +126,7 @@ class RotationService extends Base
                 $opened = '';
             }
             if ($opened === '' || ! hash_equals($opened, $sk)) {
-                $limiter->recordFailure(UnlockService::userBucket($userId));
+                (new FailedGuess($this->container, $limiter, $this->clock))->record($userId, UnlockService::userBucket($userId), '');
                 throw new VaultException('unlock_failed');
             }
             sodium_memzero($ikm);
@@ -232,6 +232,13 @@ class RotationService extends Base
                 } else {
                     $db->execute('DELETE FROM vault_sessions WHERE user_id = ? AND sid_hash <> ?', [$userId, $keep]);
                 }
+                // Audited with start, where the change takes effect; count is the objects the sweep re-keys. A
+                // failed audit write rolls start back, so nothing changed. Each re-key is a rekey row in its sweep
+                // batch's transaction; a failure there stops the sweep like any other, which callers contain (R33).
+                AuditModel::of($this->container, $this->clock)->record('rotate', [
+                    'actor_user_id' => $userId,
+                    'count' => $this->oldGenerationLeft($db, $userId, $principal['key_gen']),
+                ]);
             });
             $this->fire('start', 0, microtime(true) - $t0);
             return $sk2;

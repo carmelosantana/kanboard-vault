@@ -233,9 +233,13 @@ class VaultSession extends Base
         $this->vaultLock()->exclusive(function () use ($userId, $sidHash): void {
             $db = new VaultDb($this->container);
             if ($sidHash === null) {
-                $db->execute('DELETE FROM vault_sessions WHERE user_id = ?', [$userId]);
+                $locked = $db->execute('DELETE FROM vault_sessions WHERE user_id = ?', [$userId]);
             } else {
-                $db->execute('DELETE FROM vault_sessions WHERE user_id = ? AND sid_hash = ?', [$userId, $sidHash]);
+                $locked = $db->execute('DELETE FROM vault_sessions WHERE user_id = ? AND sid_hash = ?', [$userId, $sidHash]);
+            }
+            // Audited only when an unlocked session was actually locked (a login with none locks nothing).
+            if ($locked > 0) {
+                AuditModel::of($this->container, $this->clock)->record('lock', ['actor_user_id' => $userId]);
             }
         });
         $current = $this->sidHash();
