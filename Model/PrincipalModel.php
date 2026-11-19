@@ -32,8 +32,10 @@ class PrincipalModel extends Base
     }
 
     // A passphrase change is a key rotation trigger (spec: Key rotation). The new passphrase meets the same
-    // rules as at enrolment; the current one must open the principal's wrap to $sk (RotationService).
-    public function changePassphrase(int $userId, #[\SensitiveParameter] string $currentPassphrase, #[\SensitiveParameter] string $newPassphrase, #[\SensitiveParameter] string $sk): void
+    // rules as at enrolment; the current one must open the principal's wrap to $sk (RotationService). Returns
+    // RotationService::ROTATED or ::PENDING; both mean the new passphrase is now the one. Throws only when nothing
+    // changed.
+    public function changePassphrase(int $userId, #[\SensitiveParameter] string $currentPassphrase, #[\SensitiveParameter] string $newPassphrase, #[\SensitiveParameter] string $sk): string
     {
         $user = (new VaultDb($this->container))->fetchOne('SELECT username, password, is_active FROM users WHERE id = ?', [$userId]);
         if ($user === null || (int) $user['is_active'] !== 1) {
@@ -41,7 +43,7 @@ class PrincipalModel extends Base
         }
         $this->checkPassphrase($newPassphrase, (string) $user['username'], (string) ($user['password'] ?? ''));
         $rotation = $this->rotation ?? new RotationService($this->container, $this->slots, $this->argon2, $this->clock);
-        $rotation->rotateWithPassphrase($userId, $sk, $currentPassphrase, $newPassphrase);
+        return $rotation->rotateWithPassphrase($userId, $sk, $currentPassphrase, $newPassphrase);
     }
 
     /** @return array{user_id:int,kind:string,public_key:string,key_gen:int,state:string,created_at:int}|null */

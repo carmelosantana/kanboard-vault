@@ -303,8 +303,8 @@ class RotationTest extends Base
         $this->assertCount(11, $before);
         $sk1 = $this->skFor($this->alice, $this->alicePassphrase);
         $this->crashAt('batch', $k);
-        $e = $this->thrown(fn () => $this->rotatingPrincipals(2)->changePassphrase($this->alice, $this->alicePassphrase, self::NEW_PASS, $sk1));
-        $this->assertSame('injected crash', $e->getMessage());
+        // A crash after start has committed is contained: the change took, the rotation is pending.
+        $this->assertSame(RotationService::PENDING, $this->rotatingPrincipals(2)->changePassphrase($this->alice, $this->alicePassphrase, self::NEW_PASS, $sk1));
         $batches = array_values(array_filter($this->hookLog, static fn (array $h): bool => $h[0] === 'batch'));
         $this->assertSame(range(0, $k), array_column($batches, 1));
 
@@ -424,7 +424,7 @@ class RotationTest extends Base
         }
         $this->assertCount(11, $deks, 'control: the pre-rotation dump opens all 11 objects');
 
-        $this->rotatingPrincipals()->changePassphrase($this->alice, $this->alicePassphrase, self::NEW_PASS, $sk1);
+        $this->assertSame(RotationService::ROTATED, $this->rotatingPrincipals()->changePassphrase($this->alice, $this->alicePassphrase, self::NEW_PASS, $sk1));
         $post = $this->dump();
 
         $this->assertSame([], $post['vault_rotations'], 'the bridge is gone');
@@ -668,6 +668,25 @@ class RotationTest extends Base
         $bobSk = $this->skFor($this->bob, $this->bobPassphrase);
         (new \Kanboard\Plugin\Vault\Model\Rekeyer($this->container, fn () => $this->now))->drainQueue($this->bob, $bobSk);
         $this->assertSame('a4', $this->read($this->alice, 'entry', $e4, $sk2)['title'], "bob's re-key reaches alice's new key");
+    }
+
+    // Once start has committed, a passphrase change has happened: the old passphrase opens nothing. So a sweep
+    // that can't finish (here an integrity fault) must not read as "change failed"; it returns PENDING, the new
+    // passphrase unlocks and the old one doesn't. Kills: letting complete()'s integrity_error escape the change.
+    public function testPassphraseChangeWithACorruptObjectReturnsPending(): void
+    {
+        $this->populate();
+        $sk1 = $this->skFor($this->alice, $this->alicePassphrase);
+        $this->pdo()->prepare('UPDATE vault_entries SET crypto_v = 2 WHERE id = ?')->execute([$this->objs[2][1]]);
+        $this->assertSame(RotationService::PENDING, $this->rotatingPrincipals()->changePassphrase($this->alice, $this->alicePassphrase, self::NEW_PASS, $sk1));
+        $this->assertNotNull($this->row('SELECT * FROM vault_rotations WHERE user_id = ?', [$this->alice]));
+        $sk = $this->unlockFresh($this->alice, self::NEW_PASS, 'php-session-N');
+        $this->assertSame(base64_decode($this->row('SELECT new_pk FROM vault_rotations WHERE user_id = ?', [$this->alice])['new_pk']), $this->pkOf($sk));
+        $this->assertSame('a4', $this->read($this->alice, 'entry', $this->objs[5][1], $sk)['title']);
+        $this->assertVaultError('unlock_failed', fn () => $this->unlockService()->unlock($this->alice, $this->alicePassphrase, self::IP));
+        // Rotate my keys behaves the same way once a rotation is no longer in progress; here it is, so it refuses
+        // up front (before any start), which is a real failure.
+        $this->assertVaultError('rotation_in_progress', fn () => $this->rotation()->requestManual($this->alice, $sk, self::NEW_PASS));
     }
 
     // R33: unlock succeeds once resume has verified sk2. The session works with sk2 and the rotation stays

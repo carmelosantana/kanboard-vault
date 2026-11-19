@@ -41,6 +41,9 @@ use ValueError;
 class RotationService extends Base
 {
     public const DEFAULT_BATCH = 100;
+    // Results of a passphrase ceremony. Both mean the change took effect (the old passphrase opens nothing).
+    public const ROTATED = 'rotated';
+    public const PENDING = 'rotation_pending';
     private const FINISH_ATTEMPTS = 3;
     private const KDF_METHODS = ['passphrase', 'passphrase+prf'];
 
@@ -67,9 +70,9 @@ class RotationService extends Base
     }
 
     // "Rotate my keys": the same passphrase, a new keypair. The passphrase is checked first.
-    public function requestManual(int $userId, #[\SensitiveParameter] string $sk, #[\SensitiveParameter] string $passphrase): void
+    public function requestManual(int $userId, #[\SensitiveParameter] string $sk, #[\SensitiveParameter] string $passphrase): string
     {
-        $this->rotateWithPassphrase($userId, $sk, $passphrase, $passphrase);
+        return $this->rotateWithPassphrase($userId, $sk, $passphrase, $passphrase);
     }
 
     // The passphrase ceremony (passphrase change, Rotate my keys). The surviving factor is the new passphrase,
@@ -77,7 +80,10 @@ class RotationService extends Base
     // passphrase wrap to exactly $sk, so a hijacked unlocked session can't change it, and a mistyped one can't
     // lock the user out; failures count against the unlock back-off. Principals with other kinds of wrap
     // (hardware keys, recovery, agent) are refused here: their ceremonies must present those factors (T9/T20).
-    public function rotateWithPassphrase(int $userId, #[\SensitiveParameter] string $sk, #[\SensitiveParameter] string $currentPassphrase, #[\SensitiveParameter] string $newPassphrase): void
+    // Only failures before start() commits are thrown. After it, the change has happened (the old passphrase
+    // opens nothing), so the rest of the rotation is contained as at unlock (R33): ROTATED when it finished,
+    // PENDING when it stopped (logged with the exception class only; the next unlock or request continues it).
+    public function rotateWithPassphrase(int $userId, #[\SensitiveParameter] string $sk, #[\SensitiveParameter] string $currentPassphrase, #[\SensitiveParameter] string $newPassphrase): string
     {
         $slot = $this->slots->acquire($userId);
         if ($slot === null) {
@@ -134,7 +140,13 @@ class RotationService extends Base
                 'kdf_ops' => Kdf::DEFAULT_OPS,
                 'kdf_mem' => Kdf::DEFAULT_MEM,
             ]]);
-            $this->complete($userId, $sk, $sk2);
+            try {
+                $this->complete($userId, $sk, $sk2);
+                return self::ROTATED;
+            } catch (Throwable $e) {
+                $this->logger->warning('Vault: key rotation for user '.$userId.' started but could not complete and stays pending ('.get_class($e).')');
+                return self::PENDING;
+            }
         } finally {
             sodium_memzero($ikm);
             sodium_memzero($kek);
