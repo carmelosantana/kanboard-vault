@@ -5,7 +5,8 @@
 //   node gate-fixtures.mjs craft <dir>     writes the broken files from the KeePassXC-written gate-unicode.kdbx:
 //                                          truncated, one data block's HMAC flipped, and a hostile KDF header.
 // The content: Unicode, tabs and whitespace (fixtures.mjs's KPXC_ENTRIES, with an attachment and history the import
-// drops), 10,000 generated entries, and one entry made in Vault itself (EDGE: name collisions, CR LF, a TOTP seed).
+// drops), 10,000 generated entries, and one entry made in Vault itself (EDGE: emoji with a ZWJ sequence, 64 KiB+ notes with tabs, CR LF and emoji, name
+// collisions, a TOTP seed).
 import { writeFileSync, readFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,10 +28,24 @@ export const BULK_COUNT = 10000;
 // The import groups are renamed to these before the export, so every entry has a unique path for keepassxc-cli show.
 export const ROOTS = { unicode: 'Unicode and tabs', bulk: 'Bulk' };
 export const EDGE_ROOT = 'Made in Vault';
+// Emoji, including the ZWJ sequence 👩‍💻 (woman, ZWJ, laptop): astral code points, so surrogate pairs in JS and in
+// PHP's json_encode.
+const EMOJI_TITLE = '🔑 Keys 👩\u200d💻';
+const EMOJI_PASSWORD = 'edge\tpässword 🔑👩\u200d💻 ';
+// Long notes: over 64 KiB of UTF-8 (several HMAC blocks' worth of protected value), lines ending CR LF, with tabs and
+// emoji throughout.
+const LONG_NOTES = (() => {
+  let s = '';
+  for (let i = 0; Buffer.byteLength(s, 'utf8') < 66 * 1024; i++) {
+    s += `line ${String(i).padStart(5, '0')}\tnotes ✓ 🔑\tand 👩\u200d💻 then 🏳️\u200d🌈 tab\tend\r\n`;
+  }
+  return s + 'last line 🏁';
+})();
+
 // One entry made in Vault (vault/save), with what the export must turn it into.
 export const EDGE_PAYLOAD = {
-  title: 'Edge ✓', username: '\tedge user ', password: 'edge\tpässword ', url: 'https://edge.example.test/',
-  notes: 'first line\r\nsecond line', tags: ['edge', 'gate'], expires_at: 1924992000, otp: 'otpauth://totp/Edge?secret=GEZDGNBVGY3TQOJQ',
+  title: EMOJI_TITLE, username: '\tedge user ', password: EMOJI_PASSWORD, url: 'https://edge.example.test/',
+  notes: LONG_NOTES, tags: ['edge', 'gate'], expires_at: 1924992000, otp: 'otpauth://totp/Edge?secret=GEZDGNBVGY3TQOJQ',
   fields: [
     { name: 'Title', value: 'a custom field named Title', protected: false },
     { name: 'otp', value: 'otpauth://totp/Field?secret=MFRGGZDFMZTWQ2LK', protected: false },
@@ -40,8 +55,8 @@ export const EDGE_PAYLOAD = {
 const EDGE_EXPECTED = {
   path: [EDGE_ROOT],
   fields: {
-    Title: ['Edge ✓', false], UserName: ['\tedge user ', false], Password: ['edge\tpässword ', true], URL: ['https://edge.example.test/', false],
-    Notes: ['first line\r\nsecond line', true], 'Title (2)': ['a custom field named Title', false],
+    Title: [EMOJI_TITLE, false], UserName: ['\tedge user ', false], Password: [EMOJI_PASSWORD, true], URL: ['https://edge.example.test/', false],
+    Notes: [LONG_NOTES, true], 'Title (2)': ['a custom field named Title', false],
     otp: ['otpauth://totp/Field?secret=MFRGGZDFMZTWQ2LK', true], 'Secret ✓': ['\tsecret value ', true],
     'otp (2)': ['otpauth://totp/Edge?secret=GEZDGNBVGY3TQOJQ', true],
   },

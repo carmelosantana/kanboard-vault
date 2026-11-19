@@ -46,7 +46,7 @@ const DATA = () => ({
       otp: 'otpauth://totp/Example:mail?secret=JBSWY3DPEHPK3PXP&issuer=Example',
       fields: [{ name: 'Plain custom', value: 'plain\tvalue ', protected: false }, { name: 'Secret custom', value: ' secret value\t', protected: true }],
     }),
-    entry(11, { title: 'Ünïcødé ✓ host', username: 'root', password: 'pässwörd ✓' }),
+    entry(11, { title: 'Ünïcødé ✓ host', username: 'root', password: 'pässwörd ✓ 🔑 Keys 👩‍💻' }),
     entry(12, { title: 'In the first Dup' }),
     entry(13, { title: 'In the second Dup' }),
     entry(5, { title: 'In the child' }),
@@ -111,7 +111,7 @@ test('every field and group survives the round trip', async () => {
       Notes: ['line one\n\tline two  ', false], 'Plain custom': ['plain\tvalue ', false], 'Secret custom': [' secret value\t', true],
       otp: ['otpauth://totp/Example:mail?secret=JBSWY3DPEHPK3PXP&issuer=Example', true],
     }) },
-    { path: ['Mail ✓', 'Sub'], tags: [], expires: null, fields: STANDARD({ Title: ['Ünïcødé ✓ host', false], UserName: ['root', false], Password: ['pässwörd ✓', true] }) },
+    { path: ['Mail ✓', 'Sub'], tags: [], expires: null, fields: STANDARD({ Title: ['Ünïcødé ✓ host', false], UserName: ['root', false], Password: ['pässwörd ✓ 🔑 Keys 👩‍💻', true] }) },
     { path: ['Dup'], tags: [], expires: null, fields: STANDARD({ Title: ['In the first Dup', false] }) },
     { path: ['Dup'], tags: [], expires: null, fields: STANDARD({ Title: ['In the second Dup', false] }) },
     { path: ['Dup', 'Child'], tags: [], expires: null, fields: STANDARD({ Title: ['In the child', false] }) },
@@ -286,6 +286,39 @@ test('the page re-proves the passphrase, builds and downloads the file, then cle
   assert.equal(q('[data-vault-export-report]').querySelector('[data-field="entries"]').textContent, '7');
   assert.deepEqual(p.stored, []);
   assert.equal(q('[data-vault-export-submit]').disabled, false);
+});
+
+test('Cancel while the server is still answering drops the answer: no file is built or downloaded', async () => {
+  let release;
+  const pending = new Promise((r) => { release = r; });
+  const p = loadExportPage([pending]);
+  p.run();
+  const q = (s) => p.doc.querySelector(s);
+  const status = q('[data-vault-export-status]');
+  fill(q);
+  await flush();
+  assert.equal(status.textContent, 'Checking');
+  assert.equal(q('[data-vault-export-cancel]').hidden, false, 'Cancel is offered while the server answers');
+  q('[data-vault-export-cancel]').click();
+  const answer = DATA();
+  release(answer);
+  await settle(() => status.classList.contains('vault-bad') || p.blobs.length > 0);
+  await flush();
+  assert.equal(status.textContent, 'Cancelled.');
+  assert.equal(p.blobs.length, 0, 'no Blob');
+  assert.equal(p.anchors.length, 0, 'no download link');
+  assert.equal(answer.entries.length, 0, 'the decrypted answer is dropped');
+  assert.equal(q('[data-vault-export-submit]').disabled, false);
+  assert.equal(q('[data-vault-export-cancel]').hidden, true);
+
+  // The next export is not cancelled by the earlier click.
+  const p2 = loadExportPage([DATA()]);
+  p2.run();
+  const q2 = (s) => p2.doc.querySelector(s);
+  q2('[data-vault-export-cancel]').click();
+  fill(q2);
+  await settle(() => p2.urls.revoked.length > 0 || q2('[data-vault-export-status]').classList.contains('vault-bad'));
+  assert.equal(q2('[data-vault-export-status]').textContent, 'Done');
 });
 
 test('the page asks a hardware key for a fresh assertion when the user has one', async () => {

@@ -321,7 +321,11 @@
       }
     };
 
+    // Cancel can come before the build starts (re-auth, hardware key, the server's answer); the build's own cancel
+    // can't see that, so the page remembers it and drops the answer.
+    var aborted = false;
     cancelButton.addEventListener('click', function () {
+      aborted = true;
       cancel();
     });
     form.addEventListener('submit', function (ev) {
@@ -342,6 +346,7 @@
         return;
       }
       again = '';
+      aborted = false;
       busy = true;
       submit.disabled = true;
       cancelButton.hidden = false;
@@ -357,9 +362,16 @@
         })
         : Promise.resolve(body);
       withKey.then(function (b) {
+        if (aborted) {
+          throw fail('cancelled');
+        }
         return win.KBVault.api('export', b);
       }).then(function (a) {
         body.passphrase = '';
+        if (aborted) {
+          answer = a;
+          throw fail('cancelled');
+        }
         if (!isObj(a) || a.ok !== true) {
           throw fail(isObj(a) && typeof a.reason === 'string' ? a.reason : 'failed');
         }
