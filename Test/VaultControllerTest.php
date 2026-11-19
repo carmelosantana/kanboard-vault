@@ -88,13 +88,17 @@ class VaultControllerTest extends Base
 
     // One request to the controller. HTTPS on kb.example from 203.0.113.7 unless $server says otherwise; the cookie
     // the last response set travels with it, as a browser would send it.
-    private function call(string $action, string $method = 'POST', array $post = [], array $server = []): VaultTestResponse
+    // POSTs are vault.js's fetch (X-Requested-With) unless $ajax is false: a native form submission.
+    private function call(string $action, string $method = 'POST', array $post = [], array $server = [], ?bool $ajax = null, array $get = []): VaultTestResponse
     {
         $last = $this->jar->last();
         $cookies = $last === null || $last['value'] === '' ? [] : [$last['name'] => $last['value']];
+        if ($ajax ?? $method === 'POST') {
+            $server += ['HTTP_X_REQUESTED_WITH' => 'XMLHttpRequest'];
+        }
         $this->container['request'] = new Request($this->container, $server + $this->server + [
             'REQUEST_METHOD' => $method, 'HTTPS' => 'on', 'HTTP_HOST' => 'kb.example', 'SCRIPT_NAME' => '/index.php', 'REMOTE_ADDR' => '203.0.113.7',
-        ], [], $post, [], $cookies);
+        ], $get, $post, [], $cookies);
         $response = new VaultTestResponse($this->container);
         $this->container['response'] = $response;
         (new VaultController($this->container))->$action();
@@ -170,7 +174,7 @@ class VaultControllerTest extends Base
         $this->enrol();
         $calls = $this->argonCalls;
         $refused = [
-            'GET' => $this->call('unlock', 'GET', ['passphrase' => Fixtures::PASSPHRASE, 'csrf_token' => $this->token()]),
+            'GET' => $this->call('unlock', 'GET', ['passphrase' => Fixtures::PASSPHRASE, 'csrf_token' => $this->token()], [], true),
             'no token' => $this->call('unlock', 'POST', ['passphrase' => Fixtures::PASSPHRASE]),
             'bad token' => $this->call('unlock', 'POST', ['passphrase' => Fixtures::PASSPHRASE, 'csrf_token' => str_repeat('0', 64)]),
         ];
@@ -181,6 +185,9 @@ class VaultControllerTest extends Base
         foreach (['enrol', 'lock'] as $action) {
             $this->assertSame(403, $this->call($action, 'POST', [])->status, $action);
         }
+        $native = $this->call('unlock', 'GET', [], [], false, ['passphrase' => Fixtures::PASSPHRASE, 'csrf_token' => $this->token()]);
+        $this->assertSame(403, $native->status, 'a native GET is refused with a page');
+        $this->assertStringNotContainsString(Fixtures::PASSPHRASE, $native->body);
         $this->assertSame($calls, $this->argonCalls, 'no Argon2 for a refused request');
         $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_sessions'));
         $this->assertNull($this->jar->last());
@@ -448,5 +455,93 @@ class VaultControllerTest extends Base
         (new Housekeeping($this->container, $this->clock(), $batch1))->afterWrite($this->alice, $sk2);
         $this->assertSame(0, $old());
         $this->assertNull($this->row('SELECT * FROM vault_rotations WHERE user_id = ?', [$this->alice]), 'finished');
+    }
+
+    // Fix C1: every form holding a password input submits as POST to its own endpoint and carries the CSRF token,
+    // so without vault.js (disabled, 404, or a submit before the deferred script runs) the browser never sends the
+    // passphrase as a GET query string. Kills: method="post" removed from either form; the action removed (a form
+    // without one posts to the page URL); the hidden token removed.
+    public function testPassphraseFormsPostToTheirEndpoint(): void
+    {
+        $pages = ['enrol' => $this->call('index', 'GET')->body];
+        $this->enrol();
+        $pages['unlock'] = $this->call('index', 'GET')->body;
+        foreach ($pages as $endpoint => $html) {
+            $doc = new DOMDocument();
+            @$doc->loadHTML($html);
+            $forms = [];
+            foreach ($doc->getElementsByTagName('form') as $form) {
+                $hasPassword = false;
+                foreach ($form->getElementsByTagName('input') as $input) {
+                    $hasPassword = $hasPassword || strtolower($input->getAttribute('type')) === 'password';
+                }
+                if ($hasPassword) {
+                    $forms[] = $form;
+                }
+            }
+            $this->assertCount(1, $forms, "$endpoint: one passphrase form");
+            $form = $forms[0];
+            $this->assertSame('post', strtolower($form->getAttribute('method')), "$endpoint: method=post");
+            $this->assertMatchesRegularExpression('~controller=VaultController&action='.$endpoint.'&plugin=Vault$~', $form->getAttribute('action'), "$endpoint: posts to its endpoint");
+            $token = null;
+            foreach ($form->getElementsByTagName('input') as $input) {
+                if ($input->getAttribute('name') === 'csrf_token' && $input->getAttribute('type') === 'hidden') {
+                    $token = $input->getAttribute('value');
+                }
+                if ($input->getAttribute('type') === 'password') {
+                    $this->assertContains($input->getAttribute('autocomplete'), ['current-password', 'new-password'], "$endpoint: autocomplete");
+                }
+            }
+            $this->assertTrue($this->container['token']->validateReusableCSRFToken($token), "$endpoint: a valid hidden csrf_token");
+        }
+    }
+
+    // Fix C1: a native form POST (no vault.js, so no X-Requested-With) works and answers with a hardened redirect to
+    // the page. Only a fixed reason code ever goes into that URL, never the passphrase; the page then shows the
+    // message. Kills: native POSTs answered with JSON (a dead end without JS); the passphrase or a raw message in
+    // the Location; the redirect without the Vault headers; the reason not shown on the page.
+    public function testNativeFormPostIsSafeWithoutJs(): void
+    {
+        $r = $this->call('enrol', 'POST', ['passphrase' => Fixtures::PASSPHRASE, 'confirm' => Fixtures::PASSPHRASE, 'csrf_token' => $this->token()], [], false);
+        $this->assertHardened($r, 'native enrol');
+        $this->assertSame('/?controller=VaultController&action=index&plugin=Vault', $r->headers['Location'] ?? null);
+        $this->assertSame(1, $this->countRows('SELECT COUNT(*) FROM vault_sessions'));
+        $this->post('lock');
+
+        $r = $this->call('unlock', 'POST', ['passphrase' => Fixtures::WRONG_PASSPHRASE, 'csrf_token' => $this->token()], [], false);
+        $this->assertHardened($r, 'native unlock failed');
+        $location = $r->headers['Location'] ?? '';
+        $this->assertSame('/?controller=VaultController&action=index&plugin=Vault&vault_error=unlock_failed', $location);
+        $this->assertStringNotContainsString('passphrase', $location);
+        $page = $this->call('index', 'GET', [], [], false, ['vault_error' => 'unlock_failed']);
+        $this->assertMatchesRegularExpression('~<p class="vault-error" role="alert">Unlock failed\.</p>~', $page->body);
+        $forged = $this->call('index', 'GET', [], [], false, ['vault_error' => '<script>x</script>']);
+        $this->assertStringNotContainsString('<script>x</script>', $forged->body);
+        $this->assertMatchesRegularExpression('~<p class="vault-error" role="alert" hidden></p>~', $forged->body, 'an unknown code shows nothing');
+
+        $r = $this->call('unlock', 'POST', ['passphrase' => Fixtures::PASSPHRASE], [], false);
+        $this->assertStringEndsWith('&vault_error=forbidden', $r->headers['Location'] ?? '', 'no token: refused, by redirect');
+        $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_sessions'));
+
+        $r = $this->call('unlock', 'POST', ['passphrase' => Fixtures::PASSPHRASE, 'csrf_token' => $this->token()], [], false);
+        $this->assertHardened($r, 'native unlock ok');
+        $this->assertSame('/?controller=VaultController&action=index&plugin=Vault', $r->headers['Location'] ?? null);
+        $this->assertSame(1, $this->countRows('SELECT COUNT(*) FROM vault_sessions'));
+        $this->assertStringNotContainsString(Fixtures::PASSPHRASE, $r->body.implode('', $r->headers));
+    }
+
+    // Fix I1: the page goes through the hardened handler too. An exception in index gives a generic 500 page with
+    // X-Frame-Options, frame-ancestors and no-store, never the raw message (Kanboard's index.php would print
+    // "Internal Error: <message>" with none of the headers). Kills: index outside handle(); the message echoed.
+    public function testIndexFailureIsHardenedAndGeneric(): void
+    {
+        unset($this->container['vaultPrincipals']);
+        $this->container['vaultPrincipals'] = fn () => throw new RuntimeException('secret-detail-xyz');
+        $r = $this->call('index', 'GET');
+        $this->assertHardened($r, 'index failure');
+        $this->assertSame(500, $r->status);
+        $this->assertStringNotContainsString('secret-detail-xyz', $r->body);
+        $this->assertStringNotContainsString('RuntimeException', $r->body);
+        $this->assertStringContainsString('Something went wrong', $r->body);
     }
 }

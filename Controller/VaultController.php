@@ -15,36 +15,43 @@ use Kanboard\Plugin\Vault\Model\VaultSettings;
 //                      busy 503 with Retry-After: 2, https_required 403. Then drains the re-key queue (R28).
 //   POST vault/lock    locks this session ("Lock now", and the idle timer in vault.js).
 //
-// A passphrase only ever arrives in a POST body; on plain HTTP off the dev localhost both POSTs refuse with
-// https_required before any Argon2 work, and the page says so up front.
+// A passphrase only ever arrives in a POST body. The forms post to their endpoints natively too (fix C1), so they
+// work without vault.js: success and failure then redirect to the page, with only a reason code in the URL. On
+// plain HTTP off the dev localhost both POSTs refuse with https_required before any Argon2 work, and the page says
+// so up front.
 class VaultController extends BaseVaultController
 {
     public function index(): void
     {
-        $this->housekeeping()->purge();
-        $userId = $this->userId();
-        $session = $this->vaultSession();
-        $params = [
-            'title' => t('Vault'),
-            'client' => $this->clientConfig(),
-            'https_ok' => $session->transportAllowed(),
-        ];
-        if ($this->principals()->get($userId) === null) {
-            $template = 'enrol';
-            $params['policy'] = (string) (new VaultSettings($this->container))->get(VaultSettings::POLICY);
-        } else {
-            // R18: the session's key is fetched before any vault lock; the shell carries no secret, so it is wiped.
-            $sk = $session->secretKey();
-            if ($sk === null) {
-                $template = 'locked';
+        $this->handle(function (): void {
+            $userId = $this->userId();
+            $session = $this->vaultSession();
+            $client = $this->clientConfig();
+            // A native form POST comes back here with a fixed reason code; anything else shows nothing.
+            $code = $this->request->getStringParam('vault_error');
+            $params = [
+                'title' => t('Vault'),
+                'client' => $client,
+                'https_ok' => $session->transportAllowed(),
+                'error' => $code !== '' && $code !== 'working' && isset($client['messages'][$code]) ? $client['messages'][$code] : '',
+            ];
+            if ($this->principals()->get($userId) === null) {
+                $template = 'enrol';
+                $params['policy'] = (string) (new VaultSettings($this->container))->get(VaultSettings::POLICY);
             } else {
-                sodium_memzero($sk);
-                $template = 'shell';
-                $params['notices'] = (new RecoveryService($this->container))->takeNotices($userId);
-                $params['failed_attempts'] = $this->principals()->failedAttemptsSinceLastUnlock($userId);
+                // R18: the session's key is fetched before any vault lock; the shell carries no secret, so it is wiped.
+                $sk = $session->secretKey();
+                if ($sk === null) {
+                    $template = 'locked';
+                } else {
+                    sodium_memzero($sk);
+                    $template = 'shell';
+                    $params['notices'] = (new RecoveryService($this->container))->takeNotices($userId);
+                    $params['failed_attempts'] = $this->principals()->failedAttemptsSinceLastUnlock($userId);
+                }
             }
-        }
-        $this->respond()->html($this->helper->layout->app('Vault:vault/'.$template, $params));
+            $this->respond()->html($this->helper->layout->app('Vault:vault/'.$template, $params));
+        });
     }
 
     public function unlock(): void
@@ -63,7 +70,7 @@ class VaultController extends BaseVaultController
                     sodium_memzero($sk);
                 }
             }
-            $this->respond()->json(['ok' => true]);
+            $this->succeed();
         });
     }
 
@@ -82,7 +89,7 @@ class VaultController extends BaseVaultController
             $this->principals()->enrolHuman($userId, $passphrase);
             $sessionKey = $this->unlockService()->unlock($userId, $passphrase, $this->clientIp());
             sodium_memzero($sessionKey);
-            $this->respond()->json(['ok' => true]);
+            $this->succeed();
         });
     }
 
@@ -95,7 +102,7 @@ class VaultController extends BaseVaultController
             if ($sidHash !== null) {
                 $session->lock($this->userId(), $sidHash);
             }
-            $this->respond()->json(['ok' => true]);
+            $this->succeed();
         });
     }
 

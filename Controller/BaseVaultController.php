@@ -18,8 +18,10 @@ use Throwable;
 //   requirePostCsrf()  state changes and secret-returning requests are POSTs carrying Kanboard's CSRF token.
 //   requireUnlocked()  the session's sk (sk2 while a rotation runs), or the locked view / a JSON "locked". It is
 //                      called before any vault lock is taken (R18).
-//   handle()           runs a JSON action: the opportunistic purge first, then the action; any failure becomes a
-//                      JSON answer from VaultFailure::map (no stack, no detail; T6/R28), with the same headers.
+//   handle()           runs every action, the page included: the opportunistic purge first, then the action; any
+//                      failure goes to fail() with VaultFailure::map's fixed reason (no stack, no detail; T6/R28).
+//   succeed()/fail()   answer vault.js (X-Requested-With) with JSON, and a native form POST (no JS) with a redirect
+//                      to the page that carries only a reason code, so a passphrase never reaches a URL (fix C1).
 //   clientIp()         ClientIp::resolve with the admin's trusted proxies, never Request::getIpAddress() (R21).
 //
 // Controllers expose Rekeyer::drainQueue only (through Housekeeping); Rekeyer::rekey, which re-keys an object that
@@ -40,7 +42,7 @@ abstract class BaseVaultController extends BaseController
     protected function requirePostCsrf(): void
     {
         if (! $this->request->isPost() || ! $this->token->validateReusableCSRFToken($this->request->getRawValue('csrf_token'))) {
-            $this->respond()->json(['ok' => false, 'reason' => 'forbidden'], 403);
+            $this->fail(403, 'forbidden');
             throw new ResponseSent();
         }
     }
@@ -51,14 +53,16 @@ abstract class BaseVaultController extends BaseController
         if ($sk !== null) {
             return $sk;
         }
-        if ($this->request->isPost() || $this->request->isAjax()) {
-            $this->respond()->json(['ok' => false, 'reason' => 'locked'], 401);
+        if ($this->request->isAjax()) {
+            $this->fail(401, 'locked');
         } else {
-            $this->respond()->redirect($this->helper->url->to('VaultController', 'index', ['plugin' => 'Vault']));
+            $this->redirectToPage();
         }
         throw new ResponseSent();
     }
 
+    // Every Vault action, the page included (fix I1), runs here: the opportunistic purge, then the action. Any
+    // exception becomes fail() with VaultFailure's fixed reason: never the message, never Kanboard's bare error page.
     protected function handle(callable $action): void
     {
         try {
@@ -70,12 +74,45 @@ abstract class BaseVaultController extends BaseController
             if ($reason === 'failed') {
                 $this->logger->warning('Vault: a request failed ('.get_class($e).')');
             }
+            $this->fail($status, $reason);
+        }
+    }
+
+    // The success answer of a POST: {ok: true} to vault.js, or back to the page for a native form POST (fix C1).
+    protected function succeed(): void
+    {
+        if ($this->request->isAjax()) {
+            $this->respond()->json(['ok' => true]);
+        } else {
+            $this->redirectToPage();
+        }
+    }
+
+    // A failure, hardened like every Vault response.
+    //   vault.js (X-Requested-With): JSON {ok: false, reason}, with Retry-After on 503.
+    //   A native form POST (no JS, fix C1): a redirect to the page carrying only the fixed reason code, so the
+    //     browser never re-sends the form and nothing but the code reaches the URL, a log or the Referer.
+    //   A native GET (the page itself, fix I1): a minimal generic error page.
+    protected function fail(int $status, string $reason): void
+    {
+        if ($this->request->isAjax()) {
             $response = $this->respond();
             if ($status === 503) {
                 $response->withHeader('Retry-After', (string) VaultFailure::RETRY_AFTER);
             }
             $response->json(['ok' => false, 'reason' => $reason], $status);
+        } elseif ($this->request->isPost()) {
+            $this->redirectToPage($reason);
+        } else {
+            $this->respond()->html('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Vault</title></head><body><p>'
+                .htmlspecialchars(t('Something went wrong. Try again.'), ENT_QUOTES, 'UTF-8').'</p></body></html>', $status);
         }
+    }
+
+    private function redirectToPage(?string $reason = null): void
+    {
+        $params = ['plugin' => 'Vault'] + ($reason === null ? [] : ['vault_error' => $reason]);
+        $this->respond()->withStatusCode(303)->redirect($this->helper->url->to('VaultController', 'index', $params));
     }
 
     protected function clientIp(): string
