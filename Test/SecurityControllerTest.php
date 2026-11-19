@@ -7,7 +7,9 @@ use Kanboard\Core\Http\Request;
 use Kanboard\Plugin\Vault\Controller\SecurityController;
 use Kanboard\Plugin\Vault\Controller\VaultController;
 use Kanboard\Plugin\Vault\Crypto\RecoveryCode;
+use Kanboard\Plugin\Vault\Model\FailedGuess;
 use Kanboard\Plugin\Vault\Model\Housekeeping;
+use Kanboard\Plugin\Vault\Model\VaultDb;
 use Kanboard\Plugin\Vault\Model\PrincipalModel;
 use Kanboard\Plugin\Vault\Model\RotationService;
 use Kanboard\Plugin\Vault\Model\UnlockService;
@@ -151,7 +153,7 @@ class SecurityControllerTest extends Base
         $this->recovery()->setPolicy('code', self::ADMIN);
         $x = $this->dom($this->call(SecurityController::class, 'index', 'GET')->body);
         $this->assertSame(1, $x->query('//*[@data-vault-recovery]')->length, 'policy code: the recovery section');
-        $this->assertSame('button', $x->query('//*[@data-vault-action="recovery-create"]/@type')->item(0)?->nodeValue);
+        $this->assertSame('submit', $x->query('//form[@data-vault-form="recovery"]//*[@data-vault-action="recovery-create"]/@type')->item(0)?->nodeValue, 'R54: the create button submits the passphrase form');
     }
 
     // R40 / R33: a passphrase change. Pre-commit errors are failures (wrong current passphrase, mismatch, a weak one);
@@ -229,12 +231,12 @@ class SecurityControllerTest extends Base
     public function testRecoveryCodeCreatedOnceUnderPolicy(): void
     {
         $this->unlock();
-        $r = $this->post('recoveryCode');
+        $r = $this->post('recoveryCode', ['passphrase' => Fixtures::PASSPHRASE]);
         $this->assertSame([403, ['ok' => false, 'reason' => 'policy_forbids']], [$r->status, $r->json_()]);
         $this->assertSame(0, $this->countRows("SELECT COUNT(*) FROM vault_wraps WHERE method = 'recovery'"));
 
         $this->recovery()->setPolicy('code', self::ADMIN);
-        $r = $this->post('recoveryCode');
+        $r = $this->post('recoveryCode', ['passphrase' => Fixtures::PASSPHRASE]);
         $this->assertHardened($r, 'code');
         $code = $r->json_()['code'] ?? '';
         $this->assertMatchesRegularExpression('/^([0-9A-Z]{4}-){8}[0-9A-Z]{2}$/', $code);
@@ -245,7 +247,7 @@ class SecurityControllerTest extends Base
         $page = $this->call(SecurityController::class, 'index', 'GET');
         $this->assertStringNotContainsString($code, $page->body, 'never in the page HTML');
 
-        $second = $this->post('recoveryCode')->json_()['code'];
+        $second = $this->post('recoveryCode', ['passphrase' => Fixtures::PASSPHRASE])->json_()['code'];
         $this->assertNotSame($code, $second);
         $this->assertSame(1, $this->countRows("SELECT COUNT(*) FROM vault_wraps WHERE method = 'recovery' AND user_id = ?", [$this->alice]), 'replaced');
     }
@@ -258,7 +260,7 @@ class SecurityControllerTest extends Base
         $bodies = [
             'passphrase' => ['current' => Fixtures::PASSPHRASE, 'passphrase' => Fixtures::NEW_PASSPHRASE, 'confirm' => Fixtures::NEW_PASSPHRASE],
             'rotate' => ['passphrase' => Fixtures::PASSPHRASE],
-            'recoveryCode' => [],
+            'recoveryCode' => ['passphrase' => Fixtures::PASSPHRASE],
         ];
         $this->recovery()->setPolicy('code', self::ADMIN);
         foreach ($bodies as $action => $body) {
@@ -275,7 +277,7 @@ class SecurityControllerTest extends Base
             $this->assertSame([403, 'forbidden'], [$none->status, $none->json_()['reason'] ?? null], "$action no token");
             $this->assertHardened($none, "$action no token");
         }
-        foreach (['passphrase', 'rotate'] as $action) {
+        foreach (['passphrase', 'rotate', 'recoveryCode'] as $action) {
             $r = $this->post($action, $bodies[$action], ['HTTPS' => '', 'REMOTE_ADDR' => '198.51.100.9', 'HTTP_X_FORWARDED_PROTO' => 'https']);
             $this->assertSame('https_required', $r->json_()['reason'] ?? null, "$action plain HTTP");
         }
@@ -313,5 +315,73 @@ class SecurityControllerTest extends Base
         $this->assertStringNotContainsString('alert-success', $response->body, 'no notice for an unknown code');
         $this->assertStringNotContainsString('&lt;b&gt;', $response->body, 'not even escaped');
         $this->assertSame(200, $page->status);
+    }
+
+    // R54 (review I1): minting a recovery code needs the current passphrase, through the same throttled check as the
+    // passphrase change, so an unlocked session alone can't turn into a lasting factor that bypasses hardware keys.
+    // No passphrase or a wrong one: unlock_failed, a failed guess on the streak and the IP bucket, and the user's
+    // existing code untouched. The right one: a new code. Kills: no passphrase check; a check that doesn't count the
+    // failure; the code replaced before the check.
+    public function testRecoveryCodeNeedsTheCurrentPassphrase(): void
+    {
+        $this->recovery()->setPolicy('code', self::ADMIN);
+        $this->unlock();
+        $old = $this->post('recoveryCode', ['passphrase' => Fixtures::PASSPHRASE])->json_()['code'] ?? '';
+        $this->assertNotSame('', $old);
+        $wrap = fn (): ?array => $this->row("SELECT id, nonce, wrapped_sk FROM vault_wraps WHERE method = 'recovery' AND user_id = ?", [$this->alice]);
+        $before = $wrap();
+        $streak = fn (): int => FailedGuess::streak(new VaultDb($this->container), $this->alice);
+        $tokens = fn (): float => (float) $this->row('SELECT tokens FROM vault_rate WHERE bucket = ?', [UnlockService::ipBucket('203.0.113.7')])['tokens'];
+
+        $t0 = $tokens();
+        foreach (['no passphrase' => [], 'empty' => ['passphrase' => ''], 'wrong' => ['passphrase' => Fixtures::WRONG_PASSPHRASE]] as $what => $body) {
+            $s0 = $streak();
+            $calls = $this->argonCalls;
+            $r = $this->post('recoveryCode', $body);
+            $this->assertSame(($body['passphrase'] ?? '') === '' ? $calls : $calls + 1, $this->argonCalls, "$what: Argon2 only for a non-empty guess (libsodium warns on an empty one)");
+            $this->assertHardened($r, $what);
+            $this->assertSame([401, ['ok' => false, 'reason' => 'unlock_failed']], [$r->status, $r->json_()], $what);
+            $this->assertSame($s0 + 1, $streak(), "$what: counted toward the five-failure streak");
+            $this->assertSame($before, $wrap(), "$what: the existing code is untouched");
+        }
+        $this->assertEqualsWithDelta($t0 - 3, $tokens(), 0.01, 'each refusal paid an IP token');
+        $this->assertCount(1, $this->auditRows('recovery_code_create'), 'no code was created by a refused request');
+
+        $r = $this->post('recoveryCode', ['passphrase' => Fixtures::PASSPHRASE]);
+        $new = $r->json_()['code'] ?? '';
+        $this->assertMatchesRegularExpression('/^([0-9A-Z]{4}-){8}[0-9A-Z]{2}$/', $new);
+        $this->assertNotSame($old, $new);
+        $this->assertNotSame($before['id'], $wrap()['id'], 'replaced');
+        $this->assertSame(0, $streak(), 'a correct passphrase resets the streak');
+        foreach ([$r->body, implode('', $r->headers)] as $out) {
+            $this->assertStringNotContainsString(Fixtures::PASSPHRASE, $out);
+        }
+
+        // Native form POST (no vault.js): failure redirects with a code only; success shows the code once on a
+        // no-store page, never in a URL.
+        $bad = $this->post('recoveryCode', ['passphrase' => Fixtures::WRONG_PASSPHRASE], [], false);
+        $this->assertSame('/?controller=SecurityController&action=index&plugin=Vault&vault_error=unlock_failed', $bad->headers['Location'] ?? null);
+        $ok = $this->post('recoveryCode', ['passphrase' => Fixtures::PASSPHRASE], [], false);
+        $this->assertHardened($ok, 'native code');
+        $this->assertSame(200, $ok->status);
+        $this->assertArrayNotHasKey('Location', $ok->headers);
+        $this->assertSame(1, preg_match_all('~<code[^>]*data-vault-recovery-code[^>]*>(([0-9A-Z]{4}-){8}[0-9A-Z]{2})</code>~', $ok->body, $m), 'the code, once');
+        $this->assertSame(20, strlen(RecoveryCode::parse($m[1][0])));
+        $this->assertStringNotContainsString(Fixtures::PASSPHRASE, $ok->body);
+    }
+
+    // R54: the recovery form asks for the current passphrase and posts natively with the CSRF token.
+    public function testRecoveryFormAsksForThePassphrase(): void
+    {
+        $this->recovery()->setPolicy('code', self::ADMIN);
+        $this->unlock();
+        $x = $this->dom($this->call(SecurityController::class, 'index', 'GET')->body);
+        $f = $x->query('//form[@data-vault-form="recovery"]')->item(0);
+        $this->assertNotNull($f);
+        $this->assertSame('post', $f->getAttribute('method'));
+        $this->assertStringContainsString('action=recoveryCode', $f->getAttribute('action'));
+        $this->assertTrue($this->container['token']->validateReusableCSRFToken($x->query('.//input[@name="csrf_token"]/@value', $f)->item(0)?->nodeValue));
+        $in = $x->query('.//input[@name="passphrase"]', $f)->item(0);
+        $this->assertSame(['password', 'current-password'], [$in?->getAttribute('type'), $in?->getAttribute('autocomplete')]);
     }
 }

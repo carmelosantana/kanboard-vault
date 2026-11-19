@@ -6,8 +6,8 @@
  *       ok (ROTATED or PENDING) is a success: the answer's message (PENDING says the re-encryption finishes at the
  *       next unlock), else the page's own; offer_recovery_code reveals the "create a new code" hint (R36). Any
  *       failure shows the message for its fixed reason. The password inputs are cleared either way.
- *   [data-vault-action="recovery-create"]  after a confirm (it replaces any code), asks for a code and shows it
- *       once. [data-vault-action="recovery-confirm"] clears it from the page only when the typed text is group 3
+ *   [data-vault-form="recovery"]  {passphrase} (R54: the current passphrase is re-proved). After a confirm (it
+ *       replaces any code), asks for a code and shows it once. [data-vault-action="recovery-confirm"] clears it from the page only when the typed text is group 3
  *       of the code (spec: Recovery).
  */
 (function (win) {
@@ -93,16 +93,22 @@
   }
 
   function bindRecovery(msgs) {
+    var form = doc.querySelector('[data-vault-form="recovery"]');
+    var pass = form && form.querySelector('input[name="passphrase"]');
     var create = doc.querySelector('[data-vault-action="recovery-create"]');
     var show = doc.querySelector('[data-vault-recovery-show]');
     var codeEl = doc.querySelector('[data-vault-recovery-code]');
     var input = doc.querySelector('[data-vault-recovery-confirm]');
     var done = doc.querySelector('[data-vault-action="recovery-confirm"]');
     var status = doc.querySelector('[data-vault-recovery-status]');
-    if (!create || !show || !codeEl || !input || !done) {
+    if (!form || !pass || !create || !show || !codeEl || !input || !done) {
       return;
     }
-    var expected = null;
+    // A native form POST (no vault.js at submit time) rendered the page with the code already shown.
+    var expected = codeEl.textContent !== '' ? group3(codeEl.textContent) : null;
+    if (expected !== null) {
+      create.disabled = true;
+    }
 
     function clear() {
       expected = null;
@@ -112,12 +118,16 @@
       create.disabled = false;
     }
 
-    create.addEventListener('click', function () {
+    // R54: the current passphrase goes with the request; the input is cleared whatever the answer.
+    form.addEventListener('submit', function (ev) {
+      ev.preventDefault();
       if (create.disabled || !win.confirm(msgs.confirm_new_code || '')) {
         return;
       }
       create.disabled = true;
-      win.KBVault.api('recovery_code', {}).then(function (res) {
+      var body = { passphrase: pass.value };
+      pass.value = '';
+      win.KBVault.api('recovery_code', body).then(function (res) {
         var g = res && res.ok && typeof res.code === 'string' ? group3(res.code) : null;
         if (g === null) {
           clear();

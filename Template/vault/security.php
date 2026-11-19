@@ -1,8 +1,8 @@
 <?php
 // "My vault security" (R40). The passphrase forms POST natively to their own endpoints with the CSRF token (fix C1)
-// and vault-security.js sends them through KBVault.api instead when it runs. The recovery code is created by a
-// button only (JSON answer, never in this HTML) and shown once; vault-security.js asks for group 3 back before
-// clearing it. No inline JS.
+// and vault-security.js sends them through KBVault.api instead when it runs. A recovery code needs the current
+// passphrase (R54); with vault.js it comes back as JSON, without it this page is rendered once with it ($code,
+// no-store). Either way it is shown once and vault-security.js asks for group 3 back before clearing it. No inline JS.
 ?>
 <div class="page-header vault-header">
     <h2><?= t('Vault security') ?></h2>
@@ -56,10 +56,16 @@
     <h3><?= t('Recovery code') ?></h3>
     <p class="alert alert-info" data-vault-recovery-offer hidden><?= t('Your old recovery code no longer works. Create a new one if you want one.') ?></p>
     <p><?= t('A recovery code resets your passphrase if you forget it, and it bypasses hardware keys. It is shown once. Creating one replaces any code you have.') ?></p>
-    <button type="button" class="btn btn-blue" data-vault-action="recovery-create"><?= t('Create a recovery code') ?></button>
-    <div class="vault-recovery-show" data-vault-recovery-show hidden>
+    <?php // R54: the current passphrase is asked again; posts natively too (fix C1), never through a URL. ?>
+    <form class="vault-form" data-vault-form="recovery" method="post" action="<?= $this->url->href('SecurityController', 'recoveryCode', ['plugin' => 'Vault']) ?>">
+        <input type="hidden" name="csrf_token" value="<?= $this->text->e($client['csrf']) ?>">
+        <label for="vault-recovery-passphrase"><?= t('Your passphrase') ?></label>
+        <input type="password" id="vault-recovery-passphrase" name="passphrase" required autocomplete="current-password">
+        <div class="form-actions"><button type="submit" class="btn btn-blue" data-vault-action="recovery-create"><?= t('Create a recovery code') ?></button></div>
+    </form>
+    <div class="vault-recovery-show" data-vault-recovery-show<?php if ($code === ''): ?> hidden<?php endif ?>>
         <p><?= t('Write this down and keep it offline. It won\'t be shown again.') ?></p>
-        <p><code class="vault-recovery-code" data-vault-recovery-code></code></p>
+        <p><code class="vault-recovery-code" data-vault-recovery-code><?= $this->text->e($code) ?></code></p>
         <label for="vault-recovery-group3"><?= t('To confirm, type group 3 of the code') ?></label>
         <input type="text" id="vault-recovery-group3" data-vault-recovery-confirm maxlength="4" autocomplete="off" spellcheck="false">
         <div class="form-actions"><button type="button" class="btn" data-vault-action="recovery-confirm"><?= t('I wrote it down') ?></button></div>

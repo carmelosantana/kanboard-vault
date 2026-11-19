@@ -92,67 +92,21 @@ class RotationService extends Base
     // next unlock or request continues it).
     public function rotateWithPassphrase(int $userId, #[\SensitiveParameter] string $sk, #[\SensitiveParameter] string $currentPassphrase, #[\SensitiveParameter] string $newPassphrase, string $ip): string
     {
-        $slot = $this->slots->acquire($userId);
-        if ($slot === null) {
-            throw new VaultException($this->slots->lastBusy() === ArgonSlots::BUSY_GLOBAL ? 'busy_global' : 'busy');
-        }
-        $limiter = new RateLimiter($this->container, null, $this->clock);
-        $ikm = $kek = $opened = $sk2 = '';
+        $slot = $this->acquireSlot($userId);
+        $ikm = $kek = $sk2 = '';
         $guess = null;
         $streak = 0;
         try {
-            if ($limiter->backoffSeconds(UnlockService::userBucket($userId)) > 0) {
-                (new RateLimitAudit($this->container, $this->clock))->note($userId, $ip);
-                throw new VaultException('rate_limited');
-            }
-            $ipBucket = UnlockService::ipBucket($ip);
-            if (! $limiter->consume($ipBucket, UnlockService::IP_FAILURES, UnlockService::IP_FAILURES / UnlockService::IP_WINDOW)) {
-                (new RateLimitAudit($this->container, $this->clock))->note(null, $ip);
-                throw new VaultException('rate_limited');
-            }
-            $db = $this->vdb();
-            $rekeyer = $this->rekeyer();
-            $principal = $rekeyer->principal($db, $userId);
-            if ($principal === null || $rekeyer->currentPrincipal($db, $userId, $sk) === null) {
-                throw new VaultException('not_found');
-            }
-            if ($rekeyer->rotation($db, $userId) !== null) {
-                throw new VaultException('rotation_in_progress');
-            }
-            // The org wrap and the recovery code are rebuilt without the user (start() re-seals the one and flags the
-            // other as replaced); a hardware key or an agent key must be presented, which this ceremony can't do.
-            $others = $db->fetchOne("SELECT 1 AS x FROM vault_wraps WHERE user_id = ? AND method NOT IN ('passphrase', 'org', 'recovery')", [$userId]);
-            if ($others !== null) {
-                throw new VaultException('rotation_needs_factors');
-            }
-            $wrap = $db->fetchOne(
-                "SELECT * FROM vault_wraps WHERE user_id = ? AND method = 'passphrase' AND status = 'active' AND key_gen = ? ORDER BY id LIMIT 1",
-                [$userId, $principal['key_gen']]
-            );
-            $salt = $wrap === null ? false : base64_decode((string) $wrap['kdf_salt'], true);
-            if ($salt === false || strlen($salt) !== SODIUM_CRYPTO_PWHASH_SALTBYTES) {
-                throw new VaultException('unlock_failed');
-            }
-            try {
-                $ikm = ($this->argon2)($currentPassphrase, $salt, (int) $wrap['kdf_ops'], (int) $wrap['kdf_mem']);
-                $kek = Kdf::kek($ikm, 'passphrase');
-                $opened = Wraps::unwrap(self::wrapRow($wrap), $kek, $principal['public_key']);
-            } catch (CryptoException) {
-                $opened = '';
-            }
-            if ($opened === '' || ! hash_equals($opened, $sk)) {
-                $guess = new FailedGuess($this->container, $limiter, $this->clock);
-                $streak = $guess->record($userId, UnlockService::userBucket($userId), $ip);
-                throw new VaultException('unlock_failed');
-            }
-            sodium_memzero($ikm);
-            sodium_memzero($kek);
-            $this->lock()->exclusive(function () use ($limiter, $userId): void {
-                $limiter->recordSuccess(UnlockService::userBucket($userId));
-                FailedGuess::resetStreak($this->vdb(), $userId);
+            $this->verifyCurrent($userId, $sk, $currentPassphrase, $ip, $guess, $streak, function (VaultDb $db, array $principal) use ($userId): void {
+                if ($this->rekeyer()->rotation($db, $userId) !== null) {
+                    throw new VaultException('rotation_in_progress');
+                }
+                // The org wrap and the recovery code are rebuilt without the user (start() re-seals the one and flags
+                // the other as replaced); a hardware key or an agent key must be presented, which this ceremony can't do.
+                if ($db->fetchOne("SELECT 1 AS x FROM vault_wraps WHERE user_id = ? AND method NOT IN ('passphrase', 'org', 'recovery')", [$userId]) !== null) {
+                    throw new VaultException('rotation_needs_factors');
+                }
             });
-            $limiter->refund($ipBucket, UnlockService::IP_FAILURES, UnlockService::IP_FAILURES / UnlockService::IP_WINDOW);
-
             $newSalt = random_bytes(SODIUM_CRYPTO_PWHASH_SALTBYTES);
             $ikm = ($this->argon2)($newPassphrase, $newSalt, Kdf::DEFAULT_OPS, Kdf::DEFAULT_MEM);
             $kek = Kdf::kek($ikm, 'passphrase');
@@ -169,7 +123,6 @@ class RotationService extends Base
         } finally {
             sodium_memzero($ikm);
             sodium_memzero($kek);
-            sodium_memzero($opened);
             $slot->release();
             // R39: the five-failure email goes once the slot is free.
             $guess?->notifyIfDue($userId, $streak);
@@ -178,6 +131,97 @@ class RotationService extends Base
             return $this->advanceContained($userId, $sk, $sk2);
         } finally {
             sodium_memzero($sk2);
+        }
+    }
+
+    // R54: re-prove the passphrase before an unlocked session may mint a lasting factor (a recovery code), so a
+    // hijacked session can't. The same throttled check as the passphrase ceremony (R15 order): the principal's
+    // Argon2 slot, its back-off, the per-IP bucket, then Argon2 against the active passphrase wrap, which must open
+    // to exactly $sk. A wrong passphrase is a failed guess (unlock_failed, the streak, the five-failure notice); a
+    // correct one resets the back-off and streak and refunds the IP token. Returns nothing; throws on any refusal.
+    public function confirmPassphrase(int $userId, #[\SensitiveParameter] string $sk, #[\SensitiveParameter] string $passphrase, string $ip): void
+    {
+        $slot = $this->acquireSlot($userId);
+        $guess = null;
+        $streak = 0;
+        try {
+            $this->verifyCurrent($userId, $sk, $passphrase, $ip, $guess, $streak, null);
+        } finally {
+            $slot->release();
+            $guess?->notifyIfDue($userId, $streak);
+        }
+    }
+
+    private function acquireSlot(int $userId): ArgonSlot
+    {
+        $slot = $this->slots->acquire($userId);
+        if ($slot === null) {
+            throw new VaultException($this->slots->lastBusy() === ArgonSlots::BUSY_GLOBAL ? 'busy_global' : 'busy');
+        }
+        return $slot;
+    }
+
+    // The shared check, inside the caller's Argon2 slot. Back-off and the per-IP bucket before any Argon2; then
+    // $beforeArgon($db, $principal) for the ceremony's own refusals; then the passphrase must open the active
+    // passphrase wrap to exactly $sk. $guess/$streak are set on a failed guess, for the caller's notifyIfDue once the
+    // slot is free (R39).
+    private function verifyCurrent(int $userId, #[\SensitiveParameter] string $sk, #[\SensitiveParameter] string $passphrase, string $ip, ?FailedGuess &$guess, int &$streak, ?callable $beforeArgon): void
+    {
+        $limiter = new RateLimiter($this->container, null, $this->clock);
+        $ikm = $kek = $opened = '';
+        try {
+            if ($limiter->backoffSeconds(UnlockService::userBucket($userId)) > 0) {
+                (new RateLimitAudit($this->container, $this->clock))->note($userId, $ip);
+                throw new VaultException('rate_limited');
+            }
+            $ipBucket = UnlockService::ipBucket($ip);
+            if (! $limiter->consume($ipBucket, UnlockService::IP_FAILURES, UnlockService::IP_FAILURES / UnlockService::IP_WINDOW)) {
+                (new RateLimitAudit($this->container, $this->clock))->note(null, $ip);
+                throw new VaultException('rate_limited');
+            }
+            $db = $this->vdb();
+            $rekeyer = $this->rekeyer();
+            $principal = $rekeyer->principal($db, $userId);
+            if ($principal === null || $rekeyer->currentPrincipal($db, $userId, $sk) === null) {
+                throw new VaultException('not_found');
+            }
+            if ($beforeArgon !== null) {
+                $beforeArgon($db, $principal);
+            }
+            $wrap = $db->fetchOne(
+                "SELECT * FROM vault_wraps WHERE user_id = ? AND method = 'passphrase' AND status = 'active' AND key_gen = ? ORDER BY id LIMIT 1",
+                [$userId, $principal['key_gen']]
+            );
+            $salt = $wrap === null ? false : base64_decode((string) $wrap['kdf_salt'], true);
+            if ($salt === false || strlen($salt) !== SODIUM_CRYPTO_PWHASH_SALTBYTES) {
+                throw new VaultException('unlock_failed');
+            }
+            try {
+                // An empty passphrase can't match (enrolment requires MIN_PASSPHRASE_CHARS) and libsodium warns on
+                // one, so it is a failed guess without Argon2.
+                if ($passphrase === '') {
+                    throw new CryptoException('empty passphrase');
+                }
+                $ikm = ($this->argon2)($passphrase, $salt, (int) $wrap['kdf_ops'], (int) $wrap['kdf_mem']);
+                $kek = Kdf::kek($ikm, 'passphrase');
+                $opened = Wraps::unwrap(self::wrapRow($wrap), $kek, $principal['public_key']);
+            } catch (CryptoException) {
+                $opened = '';
+            }
+            if ($opened === '' || ! hash_equals($opened, $sk)) {
+                $guess = new FailedGuess($this->container, $limiter, $this->clock);
+                $streak = $guess->record($userId, UnlockService::userBucket($userId), $ip);
+                throw new VaultException('unlock_failed');
+            }
+            $this->lock()->exclusive(function () use ($limiter, $userId): void {
+                $limiter->recordSuccess(UnlockService::userBucket($userId));
+                FailedGuess::resetStreak($this->vdb(), $userId);
+            });
+            $limiter->refund($ipBucket, UnlockService::IP_FAILURES, UnlockService::IP_FAILURES / UnlockService::IP_WINDOW);
+        } finally {
+            sodium_memzero($ikm);
+            sodium_memzero($kek);
+            sodium_memzero($opened);
         }
     }
 

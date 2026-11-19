@@ -153,12 +153,17 @@ test('a recovery code is shown once and cleared only after group 3 is typed back
   const done = doc.querySelector('[data-vault-action="recovery-confirm"]');
   const status = doc.querySelector('[data-vault-recovery-status]');
 
-  create.click();
+  const form = doc.querySelector('[data-vault-form="recovery"]');
+  const pass = form.querySelector('input[name="passphrase"]');
+  pass.value = 'my current passphrase';
+  assert.equal(submit(form).defaultPrevented, true, 'no native submit');
   await flush();
   assert.equal(calls.length, 0, 'declining the replace warning asks for nothing');
-  create.click();
+  submit(form);
   await flush();
   assert.deepEqual(calls.map((c) => c.action), ['recovery_code']);
+  assert.deepEqual(calls[0].body, { passphrase: 'my current passphrase' }, 'R54: the passphrase goes with it');
+  assert.equal(pass.value, '', 'and is cleared');
   assert.equal(code.textContent, CODE, 'the code, as text');
   assert.equal(show.hidden, false);
   assert.equal(create.disabled, true, 'one code at a time');
@@ -178,7 +183,7 @@ test('a recovery code is shown once and cleared only after group 3 is typed back
   assert.equal(create.disabled, false);
 
   answer = { ok: false, reason: 'policy_forbids' };
-  create.click();
+  submit(form);
   await flush();
   assert.equal(status.textContent, MESSAGES.policy_forbids);
   assert.equal(show.hidden, true);

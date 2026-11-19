@@ -12,8 +12,9 @@ use Kanboard\Plugin\Vault\Model\VaultSettings;
 //                              personal recovery code. Locked: back to the Vault page.
 //   POST vault/passphrase      {current, passphrase, confirm}: PrincipalModel::changePassphrase.
 //   POST vault/rotate          {passphrase}: RotationService::requestManual (same passphrase, new keypair).
-//   POST vault/recovery-code   RecoveryService::createCode: {ok, code}, shown once by vault-security.js, which
-//                              asks for group 3 back before it clears the code from the page.
+//   POST vault/recovery-code   {passphrase}: re-proves the passphrase (R54), then RecoveryService::createCode:
+//                              {ok, code}, shown once by vault-security.js, which asks for group 3 back before it
+//                              clears the code from the page.
 //
 // Every endpoint is a POST with the CSRF token, runs in the hardened handler with the unlocked session's key
 // (withKey: fetched before any vault lock, wiped after) and the IP from ClientIp (R21), and answers failures with
@@ -32,18 +33,25 @@ class SecurityController extends BaseVaultController
         $this->handle(function (): void {
             $sk = $this->requireUnlocked();
             sodium_memzero($sk);
-            $client = $this->clientConfig();
-            $notice = $this->request->getStringParam('vault_notice');
-            $policy = (string) (new VaultSettings($this->container))->get(VaultSettings::POLICY);
-            $this->respond()->html($this->helper->layout->app('Vault:vault/security', [
-                'title' => t('Vault security'),
-                'client' => $client,
-                'https_ok' => $this->vaultSession()->transportAllowed(),
-                'error' => $this->codeMessage('vault_error', $client['messages']),
-                'notice' => in_array($notice, self::NOTICES, true) ? $client['messages'][$notice === 'rotated' ? 'passphrase_changed' : 'rotation_pending'] : '',
-                'codes_allowed' => $policy !== VaultSettings::POLICY_NONE,
-            ]));
+            $this->page();
         });
+    }
+
+    // The page. $extra['code']: a recovery code just made by a native form POST, shown once.
+    private function page(array $extra = []): void
+    {
+        $client = $this->clientConfig();
+        $notice = $this->request->getStringParam('vault_notice');
+        $policy = (string) (new VaultSettings($this->container))->get(VaultSettings::POLICY);
+        $this->respond()->html($this->helper->layout->app('Vault:vault/security', [
+            'title' => t('Vault security'),
+            'client' => $client,
+            'https_ok' => $this->vaultSession()->transportAllowed(),
+            'error' => $this->codeMessage('vault_error', $client['messages']),
+            'notice' => in_array($notice, self::NOTICES, true) ? $client['messages'][$notice === 'rotated' ? 'passphrase_changed' : 'rotation_pending'] : '',
+            'codes_allowed' => $policy !== VaultSettings::POLICY_NONE,
+            'code' => (string) ($extra['code'] ?? ''),
+        ]));
     }
 
     public function passphrase(): void
@@ -68,13 +76,33 @@ class SecurityController extends BaseVaultController
         });
     }
 
-    // The code is answered as JSON only (it never goes into a URL or the page HTML), with no-store like every
-    // Vault response; the page's button is the only way to ask for it.
+    // R54: a recovery code is a lasting factor that bypasses hardware keys, so an unlocked session alone can't mint
+    // one: the current passphrase is re-proved first, through the passphrase change's throttled check
+    // (RotationService::confirmPassphrase: R15 order, the IP bucket, back-off, the streak). Then the T20 hook, then
+    // the code. The policy is checked up front (no Argon2 for a refusal) and again inside createCode's transaction.
+    // vault.js gets {ok, code}; a native form POST gets this page with the code shown once (no-store, never in a URL).
     public function recoveryCode(): void
     {
         $this->withKey(function (int $userId, string $sk): void {
-            $this->answer(['code' => $this->recoveryService()->createCode($userId, $sk)]);
+            $this->requireTransport();
+            if ((string) (new VaultSettings($this->container))->get(VaultSettings::POLICY) === VaultSettings::POLICY_NONE) {
+                throw new VaultException('policy_forbids');
+            }
+            $this->rotationService()->confirmPassphrase($userId, $sk, (string) $this->request->getRawValue('passphrase'), $this->clientIp());
+            $this->requireFreshHardwareKey($userId);
+            $code = $this->recoveryService()->createCode($userId, $sk);
+            if ($this->request->isAjax()) {
+                $this->answer(['code' => $code]);
+            } else {
+                $this->page(['code' => $code]);
+            }
         });
+    }
+
+    // T20 hook (R54): a user with hardware keys must also present a fresh assertion before a new recovery code is
+    // made. Until T20 adds hardware keys this has nothing to check.
+    protected function requireFreshHardwareKey(int $userId): void
+    {
     }
 
     protected function returnRoute(): array
