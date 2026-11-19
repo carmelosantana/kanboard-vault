@@ -333,6 +333,25 @@ class ObjectStore extends Base
         });
     }
 
+    // The names of the groups directly under $parentId that the actor owns, decrypted through the read path (the
+    // import finds its group paths with it). A group that fails to decrypt is left out. Ordered by id.
+    /** @return array<int,string> id => name */
+    public function childGroupNames(int $actorId, int $parentId, #[\SensitiveParameter] string $sk): array
+    {
+        return $this->lock()->shared(function () use ($actorId, $parentId, $sk): array {
+            $db = $this->vdb();
+            $out = [];
+            foreach ($db->fetchAll('SELECT * FROM vault_groups WHERE parent_id = ? AND owner_id = ? ORDER BY id', [$parentId, $actorId]) as $row) {
+                try {
+                    $out[(int) $row['id']] = (string) ($this->decryptFor($db, 'group', $row, $actorId, $sk)['name'] ?? '');
+                } catch (VaultException) {
+                    continue;
+                }
+            }
+            return $out;
+        });
+    }
+
     // The actor's permission on an object ('owner'|'edit'|'read'|null), for the UI only: what to offer. Every write
     // checks it again inside its own lock.
     public function permission(int $actorId, string $type, int $id): ?string

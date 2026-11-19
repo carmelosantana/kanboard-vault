@@ -6,12 +6,15 @@
  * JS, eval or WebAssembly, so Kanboard's CSP is unchanged. Sets window.KBVaultKdbx:
  *   load(fileBytes, password, keyFileBytes?) → Promise<kdbxweb.Kdbx>
  *                        fileBytes and keyFileBytes are Uint8Array (a view's own bytes only) or ArrayBuffer, copied,
- *                        so the caller's bytes are not changed. password is a string; '' means the file has no password part. One load at a time.
+ *                        so the caller's bytes are not changed. password is a string. '' is tried as no password
+ *                        part (a key-file-only database), then, if that key is wrong, as a literally empty password,
+ *                        as KeePassXC does. One load at a time.
  *   cancel()             Stops the load in progress: terminates its Argon2 worker, and the load rejects 'cancelled'.
  *   argon2TimeoutMs      How long one Argon2 job may run (120000 by default) before its worker is terminated and the
  *                        load rejects 'timeout'.
  * Failures reject with an Error whose .code is one of bad_input, busy, unavailable, cancelled, timeout, kdf_limits,
- * worker_failed, not_kdbx, invalid_key, file_corrupt, unsupported, load_failed. No message carries a secret.
+ * worker_failed, not_kdbx, invalid_key, file_corrupt, unsupported, too_large, load_failed. No message carries a
+ * secret. too_large: the payload would inflate past kdbxweb.KdbxFormat.inflateLimit (Vault patch 04, 256 MiB).
  *
  * Argon2 limits: the worker refuses m > 1 GiB, t > 100, p > 8 (the spec's import caps) and answers kdf_limits, so a
  * hostile header can't make it allocate or spin, even if the caller skipped the import pre-check. Each job runs in a
@@ -32,7 +35,8 @@
     InvalidVersion: 'unsupported',
     Unsupported: 'unsupported',
     InvalidKey: 'invalid_key',
-    FileCorrupt: 'file_corrupt'
+    FileCorrupt: 'file_corrupt',
+    InflateLimit: 'too_large'
   };
 
   var api = { load: load, cancel: cancel, argon2TimeoutMs: DEFAULT_TIMEOUT_MS };
@@ -148,13 +152,27 @@
     var mine = { cancelled: false, jobs: [] };
     op = mine;
     var settle = function () {
+      if (keyFile) {
+        keyFile.fill(0);
+      }
       if (op === mine) {
         op = null;
       }
     };
+    var open = function (pv) {
+      // Each attempt gets its own copies: kdbxweb keeps the buffers it is given, and XORs a 32-byte key file in place.
+      return kdbxweb.Kdbx.load(data.slice().buffer, new kdbxweb.Credentials(pv, keyFile && keyFile.slice()));
+    };
     return Promise.resolve().then(function () {
-      var pv = password === '' ? null : kdbxweb.ProtectedValue.fromString(password);
-      return kdbxweb.Kdbx.load(data.buffer, new kdbxweb.Credentials(pv, keyFile));
+      if (password !== '') {
+        return open(kdbxweb.ProtectedValue.fromString(password));
+      }
+      return open(null).catch(function (e) {
+        if (mine.cancelled || !e || e.code !== 'InvalidKey') {
+          throw e;
+        }
+        return open(kdbxweb.ProtectedValue.fromString(''));
+      });
     }).then(function (db) {
       settle();
       if (mine.cancelled) {

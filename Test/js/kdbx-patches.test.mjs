@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { createHash, randomBytes, webcrypto } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { loadKdbxPage } from './kdbx-page.mjs';
 import { applyPatch } from './unified-diff.mjs';
@@ -180,6 +181,113 @@ test('keys zeroed on failed load', async () => {
 
 // --- The vendored file ---------------------------------------------------------------------------------------------
 
+// --- Patch 4 (Task 22, T21 M5) ----------------------------------------------------------------------------------------
+
+test('inflated size is capped', async () => {
+  // kdbxweb's gunzip runs on the page, where cancel() can't stop it. Patch 04 gives each load an inflate budget
+  // (KdbxFormat.inflateLimit, 256 MiB): a gzip stream whose declared size would go past it is refused before it is
+  // inflated (vault-kdbx.js: too_large), and one that inflates past its declared size stops at once (FileCorrupt).
+  const { kdbxweb, vault } = loadKdbxPage({ vault: true });
+  assert.equal(kdbxweb.KdbxFormat.inflateLimit, 256 * 1024 * 1024);
+  kdbxweb.KdbxFormat.inflateLimit = 100;
+  await rejectsWith(vault.load(fixture(FILES.whitespace), PASSWORD), 'too_large');
+  await rejectsWith(vault.load(fixture(FILES.kdbx3), PASSWORD), 'too_large');
+  // The budget is per load, and the limit is read at each load.
+  kdbxweb.KdbxFormat.inflateLimit = 256 * 1024 * 1024;
+  assert.equal(fieldsOf(await vault.load(fixture(FILES.whitespace), PASSWORD)).Title, 'Whitespace');
+  assert.equal(fieldsOf(await vault.load(fixture(FILES.kdbx3), PASSWORD)).Title, 'Whitespace');
+
+  // A KDBX 3 compressed binary goes through the same gunzip. 1 MiB of zeros, declared as 1 KiB: refused while
+  // inflating, not after (the 1 KiB buffer is not silently overrun).
+  const bomb = new Uint8Array(gzipSync(Buffer.alloc(1024 * 1024)));
+  const lie = bomb.slice();
+  new DataView(lie.buffer).setUint32(lie.length - 4, 1024, true);
+  const node = (b) => kdbxweb.XmlUtils.parse('<Binary Compressed="True">' + Buffer.from(b).toString('base64') + '</Binary>').documentElement;
+  assert.throws(() => kdbxweb.XmlUtils.getProtectedBinary(node(lie)), (e) => e.code === 'FileCorrupt');
+  assert.equal(kdbxweb.XmlUtils.getProtectedBinary(node(bomb)).byteLength, 1024 * 1024);
+  // Declared past what is left of the budget: refused before a buffer is allocated.
+  const huge = bomb.slice();
+  new DataView(huge.buffer).setUint32(huge.length - 4, 0xffffffff, true);
+  assert.throws(() => kdbxweb.XmlUtils.getProtectedBinary(node(huge)), (e) => e.code === 'InflateLimit');
+
+  // The budget is shared by everything one load inflates: two 1 MiB binaries don't fit in 1.5 MiB.
+  kdbxweb.KdbxFormat.inflateLimit = 1.5 * 1024 * 1024;
+  await vault.load(fixture(FILES.whitespace), PASSWORD);
+  assert.equal(kdbxweb.XmlUtils.getProtectedBinary(node(bomb)).byteLength, 1024 * 1024);
+  assert.throws(() => kdbxweb.XmlUtils.getProtectedBinary(node(bomb)), (e) => e.code === 'InflateLimit');
+  kdbxweb.KdbxFormat.inflateLimit = 256 * 1024 * 1024;
+  await vault.load(fixture(FILES.whitespace), PASSWORD);
+
+  // Hand-made single deflate blocks (fixed Huffman), so no block boundary helps: a literal, then a million copies of
+  // 258 bytes (258 MB) declared as 1 KiB stops at the first copy past the buffer, at once; and literals alone past
+  // the declared size are refused at the end of the stream instead of cut off silently.
+  const copies = gzipFixed((w) => {
+    w.literal(0);
+    for (let i = 0; i < 1000000; i++) w.copy258();
+  }, 1024);
+  const t0 = Date.now();
+  assert.throws(() => kdbxweb.XmlUtils.getProtectedBinary(node(copies)), (e) => e.code === 'FileCorrupt');
+  assert.ok(Date.now() - t0 < 150, 'refused within ' + (Date.now() - t0) + ' ms');
+  const literals = gzipFixed((w) => {
+    for (let i = 0; i < 2000; i++) w.literal(0x61);
+  }, 1024);
+  assert.throws(() => kdbxweb.XmlUtils.getProtectedBinary(node(literals)), (e) => e.code === 'FileCorrupt');
+  assert.equal(kdbxweb.XmlUtils.getProtectedBinary(node(gzipFixed((w) => w.literal(0x61), 1))).byteLength, 1);
+});
+
+// A gzip stream with one final fixed-Huffman deflate block written by fill(w), whose trailer declares `size` bytes
+// (CRC left 0: fflate's gunzipSync doesn't check it). RFC 1951 3.2.6: literals 0–143 are 8-bit codes from 0x30,
+// length 258 is code 285 (8 bits, 0xc5) with no extra bits, distance 1 is code 0 (5 bits), end of block is 7 zero bits.
+function gzipFixed(fill, size) {
+  const out = [];
+  let acc = 0;
+  let n = 0;
+  const bits = (v, k) => {
+    for (let i = 0; i < k; i++) {
+      acc |= ((v >> i) & 1) << n;
+      if (++n === 8) { out.push(acc); acc = 0; n = 0; }
+    }
+  };
+  const huff = (code, k) => {
+    for (let i = k - 1; i >= 0; i--) bits((code >> i) & 1, 1);
+  };
+  bits(1, 1); // BFINAL
+  bits(1, 2); // BTYPE 01: fixed Huffman
+  fill({ literal: (b) => huff(0x30 + b, 8), copy258: () => { huff(0xc5, 8); huff(0, 5); } });
+  huff(0, 7);
+  if (n > 0) out.push(acc);
+  const trailer = new Uint8Array(8);
+  new DataView(trailer.buffer).setUint32(4, size, true);
+  return Uint8Array.from([0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff, ...out, ...trailer]);
+}
+
+test('an empty password is tried as no password, then as an empty one', async () => {
+  // KeePassXC's rule: an empty password field opens a key-file-only database, and a database whose password is
+  // literally empty on a retry (Task 21 concern 4).
+  const { kdbxweb, vault } = loadKdbxPage({ vault: true });
+  const { Kdbx, Credentials, ProtectedValue } = kdbxweb;
+  const keyFile = fixture(FILES.keyfileKey);
+  const make = async (pv, kf) => {
+    const db = Kdbx.create(new Credentials(pv, kf), 'Empty password');
+    db.setVersion(3);
+    db.header.keyEncryptionRounds = 1000;
+    db.createEntry(db.getDefaultGroup()).fields.set('Title', pv ? 'Empty' : 'Key only');
+    return new Uint8Array(await db.save());
+  };
+  const emptyPw = await make(ProtectedValue.fromString(''), null);
+  const emptyPwKey = await make(ProtectedValue.fromString(''), keyFile);
+  const keyOnly = await make(null, keyFile);
+  assert.equal(fieldsOf(await vault.load(emptyPw, '')).Title, 'Empty');
+  assert.equal(fieldsOf(await vault.load(emptyPwKey, '', keyFile)).Title, 'Empty');
+  assert.equal(fieldsOf(await vault.load(keyOnly, '', keyFile)).Title, 'Key only');
+  // A raw 32-byte key file, which kdbxweb XORs in place: the retry gets fresh bytes.
+  const raw = new Uint8Array(randomBytes(32));
+  assert.equal(fieldsOf(await vault.load(await make(ProtectedValue.fromString(''), raw.slice()), '', raw)).Title, 'Empty');
+  // A wrong key is still wrong after the retry, and a non-empty password is never retried.
+  await rejectsWith(vault.load(keyOnly, ''), 'invalid_key');
+  await rejectsWith(vault.load(emptyPw, 'x'), 'invalid_key');
+});
+
 test('vendored file sha256 matches VENDOR.md after patches', () => {
   const md = readFileSync(path('Assets/vendor/VENDOR.md'), 'utf8');
   const pinned = (label) => {
@@ -193,7 +301,7 @@ test('vendored file sha256 matches VENDOR.md after patches', () => {
 
   // The patches, in order, are exactly the files in patches/ and each is listed in VENDOR.md.
   const patches = readdirSync(path('Assets/vendor/kdbxweb/patches')).sort();
-  assert.deepEqual(patches, ['01-verify-final-hmac-block.patch', '02-preserve-tabs.patch', '03-zero-keys-on-failure.patch']);
+  assert.deepEqual(patches, ['01-verify-final-hmac-block.patch', '02-preserve-tabs.patch', '03-zero-keys-on-failure.patch', '04-cap-inflated-size.patch']);
   for (const f of patches) assert.ok(md.includes('`kdbxweb/patches/' + f + '`'), f + ' is recorded in VENDOR.md');
   const texts = patches.map((f) => readFileSync(path('Assets/vendor/kdbxweb/patches/' + f), 'utf8'));
 

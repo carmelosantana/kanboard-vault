@@ -2328,6 +2328,8 @@ class KdbxFormat {
         this.ctx = new kdbx_context_1.KdbxContext({ kdbx });
     }
     load(data) {
+        // Vault patch 04: each load may inflate at most KdbxFormat.inflateLimit bytes in all (see fflate's gunzipSync).
+        (0, fflate_1.vaultInflateBudget)(KdbxFormat.inflateLimit);
         const stm = new binary_stream_1.BinaryStream(data);
         return this.kdbx.credentials.ready.then(() => {
             this.kdbx.header = kdbx_header_1.KdbxHeader.read(stm, this.ctx);
@@ -2712,6 +2714,9 @@ class KdbxFormat {
         }
     }
 }
+// Vault patch 04: what one load may inflate in all (the payload and any compressed KDBX 3 binaries): 256 MiB, about
+// five times the 50 MB file limit of the import pre-check.
+KdbxFormat.inflateLimit = 256 * 1024 * 1024;
 exports.KdbxFormat = KdbxFormat;
 
 
@@ -5945,6 +5950,14 @@ var err = function (ind, msg, nt) {
         throw e;
     return e;
 };
+// Vault patch 04: with a fixed output buffer (gunzipSync sizes it from the gzip trailer), upstream silently dropped
+// whatever didn't fit and went on inflating, so a stream that lies about its size could spin the page for minutes.
+// Inflating past the buffer now stops at once.
+var vaultOverrun = function () {
+    var e = new Error('inflated past its declared size');
+    e.code = 'FileCorrupt';
+    throw e;
+};
 // expands raw DEFLATE data
 var inflt = function (dat, buf, st) {
     // source length
@@ -5993,6 +6006,8 @@ var inflt = function (dat, buf, st) {
                 // ensure size
                 if (noBuf)
                     cbuf(bt + l);
+                else if (bt + l > buf.length)
+                    vaultOverrun();
                 // Copy over uncompressed data
                 buf.set(dat.subarray(s, t), bt);
                 // Get new bitpos, update byte count
@@ -6063,6 +6078,8 @@ var inflt = function (dat, buf, st) {
         // Maximum chunk size (practically, theoretically infinite) is 2^17;
         if (noBuf)
             cbuf(bt + 131072);
+        else if (bt > buf.length)
+            vaultOverrun();
         var lms = (1 << lbt) - 1, dms = (1 << dbt) - 1;
         var lpos = pos;
         for (;; lpos = pos) {
@@ -6108,6 +6125,8 @@ var inflt = function (dat, buf, st) {
                 }
                 if (noBuf)
                     cbuf(bt + 131072);
+                else if (bt + add > buf.length)
+                    vaultOverrun();
                 var end = bt + add;
                 for (; bt < end; bt += 4) {
                     buf[bt] = buf[bt - dt];
@@ -6122,6 +6141,8 @@ var inflt = function (dat, buf, st) {
         if (lm)
             final = 1, st.m = lbt, st.d = dm, st.n = dbt;
     } while (!final);
+    if (!noBuf && bt > buf.length)
+        vaultOverrun();
     return bt == buf.length ? buf : slc(buf, 0, bt);
 };
 // starting at p, write the minimum number of bits that can hold v to d
@@ -7007,9 +7028,25 @@ exports.gunzip = gunzip;
  * @returns The decompressed version of the data
  */
 function gunzipSync(data, out) {
-    return inflt(data.subarray(gzs(data), -8), out || new u8(gzl(data)));
+    // Vault patch 04: refuse a declared size past what is left of this load's budget, before allocating it.
+    var l = gzl(data);
+    if (!out) {
+        if (l > vaultInflateLeft) {
+            var e = new Error('inflated size over the limit');
+            e.code = 'InflateLimit';
+            throw e;
+        }
+        vaultInflateLeft -= l;
+    }
+    return inflt(data.subarray(gzs(data), -8), out || new u8(l));
 }
 exports.gunzipSync = gunzipSync;
+// Vault patch 04: KdbxFormat.load sets the budget; it starts at 0, so nothing inflates outside a load.
+var vaultInflateLeft = 0;
+function vaultInflateBudget(n) {
+    vaultInflateLeft = n;
+}
+exports.vaultInflateBudget = vaultInflateBudget;
 /**
  * Streaming Zlib compression
  */

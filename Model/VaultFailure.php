@@ -30,6 +30,8 @@ final class VaultFailure
         'conflict' => [409, 'conflict'],
         'payload_invalid' => [400, 'payload_invalid'],
         'payload_too_large' => [413, 'payload_too_large'],
+        // KeePassXC import: over 20,000 entries in one import, or over 100 in one batch (Task 22).
+        'import_limit' => [413, 'import_limit'],
         'invalid_move' => [400, 'invalid_move'],
         'integrity_error' => [409, 'integrity_error'],
         'rotation_in_progress' => [409, 'rotation_in_progress'],

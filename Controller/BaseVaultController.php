@@ -204,6 +204,7 @@ abstract class BaseVaultController extends BaseController
         }
         // The one-time link's base: vault-onetime.js (T18) appends &id=<share_id>#<fragment> to an absolute copy.
         $endpoints['share_show'] = $url('show', 'VaultShareController');
+        $endpoints += ['import_start' => $url('start', 'ImportController'), 'import_batch' => $url('batch', 'ImportController')];
         $endpoints += ['agent_enrol' => $url('enrol', 'VaultAgentController'), 'agent_reenrol' => $url('reenrol', 'VaultAgentController'), 'agent_cap' => $url('cap', 'VaultAgentController')];
         return [
             'csrf' => $this->token->getReusableCSRFToken(),
@@ -276,6 +277,32 @@ abstract class BaseVaultController extends BaseController
             'hw_added' => t('Hardware key added.'),
             'hw_removed' => t('Hardware key removed.'),
             'confirm_hw_remove' => t('Remove this hardware key?'),
+            // KeePassXC import (vault-import.js shows import_<reason>, else the plain reason). The pre-check's reasons
+            // (vault-kdbx-header.js), then KBVaultKdbx's, then the page's own.
+            'import_limit' => t('This import is too large: at most 20,000 entries, each at most 256 KB.'),
+            'import_too_large' => t('This file is too large to import (over 50 MB, or over 256 MB once decompressed).'),
+            'import_not_kdbx' => t('This isn\'t a KeePass database (.kdbx).'),
+            'import_unsupported' => t('This database uses a format, cipher or key derivation that Vault can\'t read. Save it in KeePassXC with the current format (KDBX 4) and try again.'),
+            'import_file_corrupt' => t('This file is damaged or incomplete.'),
+            'import_twofish' => t('This database is encrypted with Twofish, which Vault can\'t read. In KeePassXC, change the encryption algorithm to AES-256 or ChaCha20 (Database → Database Security → Encryption Settings), save, and import it again.'),
+            'import_argon_mem' => t('This database asks for more than 1 GiB of memory to open, so Vault won\'t open it. Lower the memory in KeePassXC\'s encryption settings, save, and import it again.'),
+            'import_argon_iter' => t('This database asks for more than 100 key derivation passes, so Vault won\'t open it. Lower them in KeePassXC\'s encryption settings, save, and import it again.'),
+            'import_argon_lanes' => t('This database asks for more than 8 parallel threads, so Vault won\'t open it. Lower them in KeePassXC\'s encryption settings, save, and import it again.'),
+            'import_aes_rounds' => t('This database asks for more than 100,000,000 AES-KDF rounds, so Vault won\'t open it. Lower the rounds in KeePassXC\'s encryption settings, save, and import it again.'),
+            'import_yubikey_cr' => t('If this database also needs a YubiKey, Vault can\'t use it: in KeePassXC, save a copy of the database without the YubiKey, import that copy, then delete it.'),
+            'import_invalid_key' => t('The master password or key file is wrong.'),
+            'import_cancelled' => t('Import cancelled. Nothing more was sent.'),
+            'import_timeout' => t('Opening the database took too long, so it was stopped. Lower its key derivation settings in KeePassXC and try again.'),
+            'import_kdf_limits' => t('This database asks for more key derivation work than Vault allows.'),
+            'import_worker_failed' => t('This browser couldn\'t run the key derivation. Try a current browser.'),
+            'import_load_failed' => t('The database couldn\'t be opened.'),
+            'import_busy' => t('A database is already being opened.'),
+            'import_unavailable' => t('The import scripts didn\'t load. Reload the page.'),
+            'import_bad_input' => t('Choose a database file.'),
+            'import_opening' => t('Opening the database… Databases that use Argon2 take 10–20 seconds.'),
+            'import_uploading' => t('Saving the entries in your vault…'),
+            'import_done' => t('Import finished.'),
+            'import_partial' => t('{count} entries were saved before it stopped; they are in the new import group.'),
         ];
     }
 

@@ -15,14 +15,17 @@ import { workerClass } from './node-worker.mjs';
 const file = (p) => new URL('../../' + p, import.meta.url);
 export const KDBXWEB_PATH = file('Assets/vendor/kdbxweb/kdbxweb.js');
 export const VAULT_KDBX_PATH = file('Assets/js/vault-kdbx.js');
+export const HEADER_PATH = file('Assets/js/vault-kdbx-header.js');
+export const IMPORT_PATH = file('Assets/js/vault-import.js');
 const BASE = 'https://kb.test/plugins/Vault/Assets/';
 
 const BINARY = { ArrayBuffer, DataView, Uint8Array, Int8Array, Uint16Array, Int16Array, Uint32Array, Int32Array, Float32Array, Float64Array, Uint8ClampedArray, BigInt64Array, BigUint64Array };
 
 // crypto: a WebCrypto-shaped object.
-// vault: also load Assets/js/vault-kdbx.js. workerLog: node-worker.mjs's log object to fill (optional).
-// Returns { win, kdbxweb, vault, log } (log: the worker's counters).
-export function loadKdbxPage({ crypto = webcrypto, vault = false, workerLog } = {}) {
+// vault: also load Assets/js/vault-kdbx.js. importer: also load vault-kdbx-header.js and vault-import.js (the
+// import page's scripts, in its order; implies vault). workerLog: node-worker.mjs's log object to fill (optional).
+// Returns { win, kdbxweb, vault, importer, log } (log: the worker's counters).
+export function loadKdbxPage({ crypto = webcrypto, vault = false, importer = false, workerLog } = {}) {
   const { Worker, log } = workerClass(workerLog);
   const document = { currentScript: null };
   const ctx = vm.createContext({
@@ -37,9 +40,13 @@ export function loadKdbxPage({ crypto = webcrypto, vault = false, workerLog } = 
     document.currentScript = null;
   };
   run(readFileSync(KDBXWEB_PATH, 'utf8'), BASE + 'vendor/kdbxweb/kdbxweb.js', 'kdbxweb.js');
-  if (vault) {
+  if (vault || importer) {
     run(readFileSync(VAULT_KDBX_PATH, 'utf8'), BASE + 'js/vault-kdbx.js?1700000000', 'vault-kdbx.js');
   }
+  if (importer) {
+    run(readFileSync(HEADER_PATH, 'utf8'), BASE + 'js/vault-kdbx-header.js?1700000000', 'vault-kdbx-header.js');
+    run(readFileSync(IMPORT_PATH, 'utf8'), BASE + 'js/vault-import.js?1700000000', 'vault-import.js');
+  }
   const win = vm.runInContext('window', ctx);
-  return { win, kdbxweb: win.kdbxweb, vault: win.KBVaultKdbx, log };
+  return { win, kdbxweb: win.kdbxweb, vault: win.KBVaultKdbx, importer: win.KBVaultImport, log };
 }

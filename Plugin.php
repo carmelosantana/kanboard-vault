@@ -12,6 +12,7 @@ use Kanboard\Plugin\Vault\Console\PurgeCommand;
 use Kanboard\Plugin\Vault\Model\AuditModel;
 use Kanboard\Plugin\Vault\Model\GrantModel;
 use Kanboard\Plugin\Vault\Model\HardwareKeys;
+use Kanboard\Plugin\Vault\Model\Importer;
 use Kanboard\Plugin\Vault\Model\Housekeeping;
 use Kanboard\Plugin\Vault\Model\Notifier;
 use Kanboard\Plugin\Vault\Model\ObjectStore;
@@ -47,6 +48,7 @@ class Plugin extends Base
         $this->container['vaultRecovery'] = static fn ($c): RecoveryService => new RecoveryService($c);
         $this->container['vaultShares'] = static fn ($c): ShareModel => new ShareModel($c);
         $this->container['vaultHardwareKeys'] = static fn ($c): HardwareKeys => new HardwareKeys($c);
+        $this->container['vaultImporter'] = static fn ($c): Importer => new Importer($c);
 
         // The page and its POST endpoints (spec: UI). No template:layout:js or :css: Vault's own templates load
         // vault.js and vault.css, so nothing of Vault's runs on other pages.
@@ -67,6 +69,10 @@ class Plugin extends Base
         foreach (['sharing', 'grant', 'revoke', 'activity'] as $action) {
             $this->route->addRoute('vault/'.$action, 'ShareGrantController', $action, 'Vault');
         }
+        // KeePassXC import (spec: KeePassXC import and export → Import): the page, then start and batch.
+        $this->route->addRoute('vault/import', 'ImportController', 'index', 'Vault');
+        $this->route->addRoute('vault/import/start', 'ImportController', 'start', 'Vault');
+        $this->route->addRoute('vault/import/batch', 'ImportController', 'batch', 'Vault');
         // "My vault security" (R40): passphrase change, Rotate my keys, a personal recovery code.
         $this->route->addRoute('vault/security', 'SecurityController', 'index', 'Vault');
         $this->route->addRoute('vault/passphrase', 'SecurityController', 'passphrase', 'Vault');

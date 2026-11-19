@@ -1,0 +1,462 @@
+{
+ "kdbx3": {
+  "total": 5,
+  "groups": 4,
+  "skippedAttachments": 1,
+  "batches": [
+   {
+    "group_path": [],
+    "entries": [
+     {
+      "title": "Mail",
+      "username": "mail user",
+      "password": "Mail\tpass word ",
+      "url": "https://mail.example.test/login",
+      "notes": "line one\n\tline two  ",
+      "tags": [
+       "mail",
+       "work"
+      ],
+      "expires_at": 1893553445,
+      "otp": "",
+      "fields": [
+       {
+        "name": "Plain custom",
+        "value": "plain\tvalue ",
+        "protected": false
+       },
+       {
+        "name": "Secret custom",
+        "value": " secret value\t",
+        "protected": true
+       },
+       {
+        "name": "otp",
+        "value": "otpauth://totp/Example:mail?secret=JBSWY3DPEHPK3PXP&issuer=Example",
+        "protected": true
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "group_path": [
+     "Servers"
+    ],
+    "entries": [
+     {
+      "title": "Empty",
+      "username": "",
+      "password": "",
+      "url": "",
+      "notes": "",
+      "tags": [],
+      "expires_at": null,
+      "otp": "",
+      "fields": []
+     }
+    ]
+   },
+   {
+    "group_path": [
+     "Servers",
+     "Linux"
+    ],
+    "entries": [
+     {
+      "title": "Ünïcødé ✓ host",
+      "username": "root",
+      "password": "pässwörd ✓",
+      "url": "ssh://host.example.test",
+      "notes": "",
+      "tags": [],
+      "expires_at": null,
+      "otp": "",
+      "fields": []
+     }
+    ]
+   },
+   {
+    "group_path": [
+     "Dup"
+    ],
+    "entries": [
+     {
+      "title": "In the first Dup",
+      "username": "one",
+      "password": "p1",
+      "url": "",
+      "notes": "",
+      "tags": [],
+      "expires_at": null,
+      "otp": "",
+      "fields": []
+     }
+    ]
+   },
+   {
+    "group_path": [
+     "Dup (2)"
+    ],
+    "entries": [
+     {
+      "title": "In the second Dup",
+      "username": "two",
+      "password": "p2",
+      "url": "",
+      "notes": "",
+      "tags": [],
+      "expires_at": null,
+      "otp": "",
+      "fields": []
+     }
+    ]
+   }
+  ]
+ },
+ "argon2d": {
+  "total": 5,
+  "groups": 4,
+  "skippedAttachments": 1,
+  "batches": [
+   {
+    "group_path": [],
+    "entries": [
+     {
+      "title": "Mail",
+      "username": "mail user",
+      "password": "Mail\tpass word ",
+      "url": "https://mail.example.test/login",
+      "notes": "line one\n\tline two  ",
+      "tags": [
+       "mail",
+       "work"
+      ],
+      "expires_at": 1893553445,
+      "otp": "",
+      "fields": [
+       {
+        "name": "Plain custom",
+        "value": "plain\tvalue ",
+        "protected": false
+       },
+       {
+        "name": "Secret custom",
+        "value": " secret value\t",
+        "protected": true
+       },
+       {
+        "name": "otp",
+        "value": "otpauth://totp/Example:mail?secret=JBSWY3DPEHPK3PXP&issuer=Example",
+        "protected": true
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "group_path": [
+     "Servers"
+    ],
+    "entries": [
+     {
+      "title": "Empty",
+      "username": "",
+      "password": "",
+      "url": "",
+      "notes": "",
+      "tags": [],
+      "expires_at": null,
+      "otp": "",
+      "fields": []
+     }
+    ]
+   },
+   {
+    "group_path": [
+     "Servers",
+     "Linux"
+    ],
+    "entries": [
+     {
+      "title": "Ünïcødé ✓ host",
+      "username": "root",
+      "password": "pässwörd ✓",
+      "url": "ssh://host.example.test",
+      "notes": "",
+      "tags": [],
+      "expires_at": null,
+      "otp": "",
+      "fields": []
+     }
+    ]
+   },
+   {
+    "group_path": [
+     "Dup"
+    ],
+    "entries": [
+     {
+      "title": "In the first Dup",
+      "username": "one",
+      "password": "p1",
+      "url": "",
+      "notes": "",
+      "tags": [],
+      "expires_at": null,
+      "otp": "",
+      "fields": []
+     }
+    ]
+   },
+   {
+    "group_path": [
+     "Dup (2)"
+    ],
+    "entries": [
+     {
+      "title": "In the second Dup",
+      "username": "two",
+      "password": "p2",
+      "url": "",
+      "notes": "",
+      "tags": [],
+      "expires_at": null,
+      "otp": "",
+      "fields": []
+     }
+    ]
+   }
+  ]
+ },
+ "argon2id": {
+  "total": 5,
+  "groups": 4,
+  "skippedAttachments": 1,
+  "batches": [
+   {
+    "group_path": [],
+    "entries": [
+     {
+      "title": "Mail",
+      "username": "mail user",
+      "password": "Mail\tpass word ",
+      "url": "https://mail.example.test/login",
+      "notes": "line one\n\tline two  ",
+      "tags": [
+       "mail",
+       "work"
+      ],
+      "expires_at": 1893553445,
+      "otp": "",
+      "fields": [
+       {
+        "name": "Plain custom",
+        "value": "plain\tvalue ",
+        "protected": false
+       },
+       {
+        "name": "Secret custom",
+        "value": " secret value\t",
+        "protected": true
+       },
+       {
+        "name": "otp",
+        "value": "otpauth://totp/Example:mail?secret=JBSWY3DPEHPK3PXP&issuer=Example",
+        "protected": true
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "group_path": [
+     "Servers"
+    ],
+    "entries": [
+     {
+      "title": "Empty",
+      "username": "",
+      "password": "",
+      "url": "",
+      "notes": "",
+      "tags": [],
+      "expires_at": null,
+      "otp": "",
+      "fields": []
+     }
+    ]
+   },
+   {
+    "group_path": [
+     "Servers",
+     "Linux"
+    ],
+    "entries": [
+     {
+      "title": "Ünïcødé ✓ host",
+      "username": "root",
+      "password": "pässwörd ✓",
+      "url": "ssh://host.example.test",
+      "notes": "",
+      "tags": [],
+      "expires_at": null,
+      "otp": "",
+      "fields": []
+     }
+    ]
+   },
+   {
+    "group_path": [
+     "Dup"
+    ],
+    "entries": [
+     {
+      "title": "In the first Dup",
+      "username": "one",
+      "password": "p1",
+      "url": "",
+      "notes": "",
+      "tags": [],
+      "expires_at": null,
+      "otp": "",
+      "fields": []
+     }
+    ]
+   },
+   {
+    "group_path": [
+     "Dup (2)"
+    ],
+    "entries": [
+     {
+      "title": "In the second Dup",
+      "username": "two",
+      "password": "p2",
+      "url": "",
+      "notes": "",
+      "tags": [],
+      "expires_at": null,
+      "otp": "",
+      "fields": []
+     }
+    ]
+   }
+  ]
+ },
+ "keyfile": {
+  "total": 5,
+  "groups": 4,
+  "skippedAttachments": 1,
+  "batches": [
+   {
+    "group_path": [],
+    "entries": [
+     {
+      "title": "Mail",
+      "username": "mail user",
+      "password": "Mail\tpass word ",
+      "url": "https://mail.example.test/login",
+      "notes": "line one\n\tline two  ",
+      "tags": [
+       "mail",
+       "work"
+      ],
+      "expires_at": 1893553445,
+      "otp": "",
+      "fields": [
+       {
+        "name": "Plain custom",
+        "value": "plain\tvalue ",
+        "protected": false
+       },
+       {
+        "name": "Secret custom",
+        "value": " secret value\t",
+        "protected": true
+       },
+       {
+        "name": "otp",
+        "value": "otpauth://totp/Example:mail?secret=JBSWY3DPEHPK3PXP&issuer=Example",
+        "protected": true
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "group_path": [
+     "Servers"
+    ],
+    "entries": [
+     {
+      "title": "Empty",
+      "username": "",
+      "password": "",
+      "url": "",
+      "notes": "",
+      "tags": [],
+      "expires_at": null,
+      "otp": "",
+      "fields": []
+     }
+    ]
+   },
+   {
+    "group_path": [
+     "Servers",
+     "Linux"
+    ],
+    "entries": [
+     {
+      "title": "Ünïcødé ✓ host",
+      "username": "root",
+      "password": "pässwörd ✓",
+      "url": "ssh://host.example.test",
+      "notes": "",
+      "tags": [],
+      "expires_at": null,
+      "otp": "",
+      "fields": []
+     }
+    ]
+   },
+   {
+    "group_path": [
+     "Dup"
+    ],
+    "entries": [
+     {
+      "title": "In the first Dup",
+      "username": "one",
+      "password": "p1",
+      "url": "",
+      "notes": "",
+      "tags": [],
+      "expires_at": null,
+      "otp": "",
+      "fields": []
+     }
+    ]
+   },
+   {
+    "group_path": [
+     "Dup (2)"
+    ],
+    "entries": [
+     {
+      "title": "In the second Dup",
+      "username": "two",
+      "password": "p2",
+      "url": "",
+      "notes": "",
+      "tags": [],
+      "expires_at": null,
+      "otp": "",
+      "fields": []
+     }
+    ]
+   }
+  ]
+ }
+}
