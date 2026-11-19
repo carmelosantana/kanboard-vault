@@ -5,10 +5,15 @@
  *                               data-href with an href only when safeHref allows the value. Never HTML.
  *   safeHref(url)               the URL when its scheme is http: or https:, else null.
  *   copy(text)                  writes text to the clipboard, then 30 s later writes "" if the tab still has focus.
- *   reveal(id, field, node)     fetches one field through vault/field into node's text, or masks it again.
+ *   reveal(id, field, node, isCurrent)
+ *                               fetches one field through vault/field into node's text, or masks it again. When
+ *                               isCurrent is given and returns false by the time the answer arrives, nothing is written.
  * Everything decrypted reaches the DOM through textContent, an input's value, or setAttribute on a fixed attribute.
  * Secrets (password, notes, OTP seed, custom field values) are fetched one field at a time from vault/field, which
  * audits each as read; the list and the detail answers carry metadata only.
+ * Late answers never land on the wrong entry (T12 review M1): every mask (entry switch, hide, show) starts a new view,
+ * and a reveal writes only into the view it was clicked in; only the latest entry load renders. The editor sends one
+ * save at a time (M6).
  */
 (function (win) {
   'use strict';
@@ -87,7 +92,7 @@
     });
   }
 
-  function reveal(id, field, node) {
+  function reveal(id, field, node, isCurrent) {
     if (node.getAttribute('data-revealed') === '1') {
       node.textContent = MASK;
       node.removeAttribute('data-revealed');
@@ -96,6 +101,9 @@
     return kb().api('field', { id: id, field: field }).then(function (res) {
       if (!res || !res.ok) {
         report(res);
+        return false;
+      }
+      if (isCurrent && !isCurrent()) {
         return false;
       }
       node.textContent = text(res.value);
@@ -344,6 +352,7 @@
   // Detail
 
   function hideDetail() {
+    ui.entryReq++;
     ui.entry = null;
     ui.detail.hidden = true;
     ui.detailEmpty.hidden = false;
@@ -352,6 +361,7 @@
   }
 
   function maskAll() {
+    ui.view++;
     Array.prototype.forEach.call(ui.panes.querySelectorAll('[data-vault-value]'), function (v) {
       v.textContent = MASK;
       v.removeAttribute('data-revealed');
@@ -359,9 +369,13 @@
   }
 
   function loadEntry(id) {
+    var req = ++ui.entryReq;
     return kb().api('entry', { id: id }).then(function (res) {
       if (!res || !res.ok) {
         return report(res);
+      }
+      if (req !== ui.entryReq) {
+        return;
       }
       showEntry(res.entry);
     });
@@ -467,7 +481,10 @@
         }
       });
       if (node) {
-        reveal(ui.entry.id, revealRef, node);
+        var view = ui.view;
+        reveal(ui.entry.id, revealRef, node, function () {
+          return ui.view === view;
+        });
       }
     } else if (copyRef !== null) {
       copyField(copyRef);
@@ -481,7 +498,7 @@
       return;
     }
     ui.form.hidden = true;
-    Array.prototype.forEach.call(ui.form.querySelectorAll('input:not([type="hidden"]), textarea'), function (i) {
+    Array.prototype.forEach.call(ui.form.querySelectorAll('input:not([type="hidden"]):not([data-vault-gen]), textarea'), function (i) {
       i.value = '';
     });
     clear(ui.editFields);
@@ -605,10 +622,17 @@
     };
   }
 
+  function setSaving(on) {
+    ui.saving = on;
+    if (ui.saveBtn) {
+      ui.saveBtn.disabled = on;
+    }
+  }
+
   function save(ev) {
     ev.preventDefault();
     var editing = ui.editing;
-    if (!editing) {
+    if (!editing || ui.saving) {
       return;
     }
     var body = { type: 'entry', payload: collect() };
@@ -618,7 +642,9 @@
     } else {
       body.group_id = editing.group_id;
     }
+    setSaving(true);
     kb().api('save', body).then(function (res) {
+      setSaving(false);
       if (!res || !res.ok) {
         return report(res);
       }
@@ -626,6 +652,9 @@
       toast(msg('saved'));
       loadList(0);
       loadEntry(res.id);
+    }, function () {
+      setSaving(false);
+      toast(msg('failed'));
     });
   }
 
@@ -707,8 +736,12 @@
       rowIndex: [],
       current: null,
       entry: null,
-      editing: null
+      editing: null,
+      view: 0,
+      entryReq: 0,
+      saving: false
     };
+    ui.saveBtn = q('button[type="submit"]', ui.form);
     ui.selectGroupText = ui.listEmpty.textContent;
     ui.sharedEntries.addEventListener('click', selectShared);
     ui.more.addEventListener('click', function () {

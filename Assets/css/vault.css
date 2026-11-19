@@ -177,6 +177,36 @@
     box-sizing: border-box;
 }
 
+.vault-password-row {
+    display: flex;
+    gap: .5rem;
+    align-items: center;
+    max-width: 40rem;
+}
+
+.vault-password-row input[type="password"] {
+    flex: 1;
+    min-width: 0;
+}
+
+.vault-generator {
+    margin: .5rem 0;
+    max-width: 40rem;
+}
+
+.vault-generator label {
+    display: inline-block;
+    margin-right: .75rem;
+}
+
+.vault-generator input[type="number"] {
+    width: 5rem;
+}
+
+.vault-generator input[type="text"] {
+    width: 4rem;
+}
+
 .vault-edit-field {
     display: flex;
     gap: .5rem;

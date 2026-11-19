@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
+import { loadPage, flush } from './fake-dom.mjs';
 
 const SRC = readFileSync(fileURLToPath(new URL('../../Assets/js/vault-browser.js', import.meta.url)), 'utf8');
 
@@ -130,4 +131,108 @@ test('reveal fetches exactly one field through vault/field and masks it again', 
   await t.KBVault.reveal(7, 'password', node);
   assert.equal(t.calls.length, 1, 'hiding needs no request');
   assert.equal(node.textContent, '••••••••', 'the value is gone from the DOM');
+});
+
+// The page with the real templates (fake-dom.mjs). 'tree' and 'list' answer at once; every other call is held until
+// the test answers it, so it can make answers arrive late and out of order.
+function heldPage() {
+  const held = [];
+  const page = loadPage({
+    api: (action, body) => {
+      if (action === 'tree') {
+        return { ok: true, groups: [{ id: 1, parent_id: null, permission: 'owner', shared_by: null, name: 'G' }], shared_entries: false };
+      }
+      if (action === 'list') {
+        return { ok: true, entries: [10, 11].map((id) => ({ id, title: 'T' + id, username: 'u', url: '', updated_at: 0 })), next_offset: null };
+      }
+      return new Promise((resolve) => held.push({ action, body, resolve }));
+    },
+  });
+  const take = (action, id) => {
+    const i = held.findIndex((h) => h.action === action && (id === undefined || h.body.id === id));
+    assert.notEqual(i, -1, `a pending ${action} ${id ?? ''}`);
+    return held.splice(i, 1)[0];
+  };
+  const entry = (id) => ({ ok: true, entry: { id, title: 'T' + id, username: 'u', url: '', tags: [], expires_at: null, updated_at: 0,
+    version: 1, group_id: 1, permission: 'owner', secrets: { password: true, notes: false, otp: false }, fields: [] } });
+  return { ...page, held, take, entry };
+}
+
+test('a slow reveal or entry load never renders under another entry', async () => {
+  const { doc, take, entry, held } = heldPage();
+  await flush();
+  doc.querySelector('[data-group-id="1"]').click();
+  await flush();
+  const rows = () => doc.querySelectorAll('.vault-row');
+  const detail = doc.querySelector('[data-vault-detail]');
+  const title = detail.querySelector('[data-field="title"]');
+  const pw = detail.querySelector('[data-vault-value="password"]');
+
+  // Entry loads answered out of order: the last one clicked wins.
+  rows()[0].click();
+  rows()[1].click();
+  take('entry', 11).resolve(entry(11));
+  await flush();
+  take('entry', 10).resolve(entry(10));
+  await flush();
+  assert.equal(title.textContent, 'T11', 'the late answer for T10 is dropped');
+
+  // A reveal of T11's password that answers after T10 is shown is dropped.
+  detail.querySelector('[data-vault-reveal="password"]').click();
+  rows()[0].click();
+  take('entry', 10).resolve(entry(10));
+  await flush();
+  take('field', 11).resolve({ ok: true, value: 'pw-of-T11' });
+  await flush();
+  assert.equal(title.textContent, 'T10');
+  assert.equal(pw.textContent, '••••••••', "T11's password never shows under T10");
+  assert.equal(pw.getAttribute('data-revealed'), null);
+
+  // A reveal that answers while its entry is still shown lands.
+  detail.querySelector('[data-vault-reveal="password"]').click();
+  take('field', 10).resolve({ ok: true, value: 'pw-of-T10' });
+  await flush();
+  assert.equal(pw.textContent, 'pw-of-T10');
+
+  // Leaving the group while an entry loads: the detail stays closed.
+  rows()[1].click();
+  doc.querySelector('[data-group-id="1"]').click();
+  await flush();
+  take('entry', 11).resolve(entry(11));
+  await flush();
+  assert.equal(detail.hidden, true, 'no entry shown after the list changed');
+  assert.equal(pw.textContent, '••••••••');
+  assert.equal(held.length, 0);
+});
+
+test('save sends one request at a time and re-enables after the answer', async () => {
+  const { doc, take, entry, calls } = heldPage();
+  await flush();
+  doc.querySelector('[data-group-id="1"]').click();
+  await flush();
+  doc.querySelector('[data-vault-action="new-entry"]').click();
+  await flush();
+  const form = doc.querySelector('[data-vault-form="edit"]');
+  const submit = form.querySelector('button[type="submit"]');
+  assert.equal(form.hidden, false);
+  form.elements.title.value = 'New';
+  const saves = () => calls.filter((c) => c.action === 'save').length;
+
+  assert.equal(form.dispatch('submit').defaultPrevented, true);
+  form.dispatch('submit');
+  assert.equal(saves(), 1, 'a double submit sends one create');
+  assert.equal(submit.disabled, true, 'disabled while in flight');
+
+  take('save').resolve({ ok: false, reason: 'failed' });
+  await flush();
+  assert.equal(submit.disabled, false, 'enabled again after a refusal');
+  form.dispatch('submit');
+  assert.equal(saves(), 2, 'and a retry goes out');
+
+  take('save').resolve({ ok: true, id: 12, version: 1 });
+  await flush();
+  take('entry', 12).resolve(entry(12));
+  await flush();
+  assert.equal(submit.disabled, false, 'enabled again after a success');
+  assert.equal(form.hidden, true);
 });

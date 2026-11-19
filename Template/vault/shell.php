@@ -9,6 +9,7 @@
 </div>
 <?= $this->render('Vault:vault/app', ['state' => 'unlocked', 'client' => $client, 'https_ok' => $https_ok]) ?>
 <?= $this->asset->js('plugins/Vault/Assets/js/vault-browser.js') ?>
+<?= $this->asset->js('plugins/Vault/Assets/js/vault-generator.js') ?>
 <?php if ($failed_attempts >= \Kanboard\Plugin\Vault\Model\PrincipalModel::NOTIFY_AFTER): ?>
 <p class="alert alert-error vault-banner"><?= t('There were %d failed attempts to unlock your vault before this unlock. If they weren\'t yours, change your vault passphrase.', $failed_attempts) ?></p>
 <?php endif ?>

@@ -465,4 +465,53 @@ class EntryControllerTest extends Base
         $this->assertSame(303, $r->status);
         $this->assertStringNotContainsString(Fixtures::ENTRY_PASSWORD, $r->headers['Location'] ?? '');
     }
+
+    // T12 review M3: autocomplete="new-password" on a posted form with a username is the signal browsers use to offer
+    // saving the password, which would copy a vault secret into the browser's store. The form and every secret input
+    // say "off". Kills: new-password (or current-password) back on the password input; the form's own "off" removed.
+    public function testEditorKeepsSecretsOutOfTheBrowserPasswordStore(): void
+    {
+        $this->unlock($this->alice, Fixtures::PASSPHRASE);
+        $html = $this->call(VaultController::class, 'index', 'GET')->body;
+        $this->assertDoesNotMatchRegularExpression('~autocomplete="(new|current)-password"~', $html);
+        $doc = new DOMDocument();
+        @$doc->loadHTML($html);
+        $form = (new DOMXPath($doc))->query('//form[@data-vault-form="edit"]')->item(0);
+        $this->assertNotNull($form);
+        $this->assertSame('off', $form->getAttribute('autocomplete'), 'the form');
+        $password = (new DOMXPath($doc))->query('.//input[@name="password"]', $form)->item(0);
+        $this->assertSame(['password', 'off'], [$password->getAttribute('type'), $password->getAttribute('autocomplete')]);
+        foreach (['data-lpignore', 'data-1p-ignore', 'data-bwignore'] as $hint) {
+            $this->assertTrue($password->hasAttribute($hint), "$hint on the password input");
+        }
+    }
+
+    // Spec, UI → The generator and Assets: vault-generator.js loads with the unlocked shell only, and the editor has a
+    // generate button (type=button, so it never submits) next to the password, with the vendored wordlist's URL.
+    // Kills: the script not emitted; emitted on the locked page; the button submitting; the wordlist URL wrong.
+    public function testGeneratorLoadsWithTheUnlockedEditorOnly(): void
+    {
+        $this->aliceEntry();
+        $this->loginAs($this->alice);
+        $locked = $this->call(VaultController::class, 'index', 'GET')->body;
+        $this->assertStringContainsString('data-vault-form="unlock"', $locked);
+        $this->assertStringNotContainsString('vault-generator.js', $locked);
+
+        $this->unlock($this->alice, Fixtures::PASSPHRASE);
+        $html = $this->call(VaultController::class, 'index', 'GET')->body;
+        $this->assertMatchesRegularExpression('~<script [^>]*src="[^"]*plugins/Vault/Assets/js/vault-generator\.js\?\d+"~', $html);
+        $xp = new DOMXPath((function () use ($html) {
+            $d = new DOMDocument();
+            @$d->loadHTML($html);
+            return $d;
+        })());
+        $button = $xp->query('//form[@data-vault-form="edit"]//button[@data-vault-action="generate"]')->item(0);
+        $this->assertNotNull($button, 'the generate button is in the editor');
+        $this->assertSame('button', $button->getAttribute('type'));
+        $panel = $xp->query('//form[@data-vault-form="edit"]//*[@data-vault-generator]')->item(0);
+        $this->assertNotNull($panel);
+        $this->assertSame('vault-e-password', $panel->getAttribute('data-vault-gen-target'));
+        $this->assertStringEndsWith('plugins/Vault/Assets/vendor/eff_large_wordlist.txt', $panel->getAttribute('data-wordlist'));
+        $this->assertFileExists(__DIR__.'/../Assets/vendor/eff_large_wordlist.txt');
+    }
 }
