@@ -213,6 +213,8 @@ class VaultSessionTest extends Base
     {
         $plugin = new Plugin($this->container);
         $plugin->initialize();
+        // The plugin registers the production vaultSession; keep the fixture's (its injected PHP session id).
+        $this->container['vaultSession'] = fn ($c) => $this->session();
     }
 
     // Kanboard's logout dispatches session.destroy before it destroys the PHP session.

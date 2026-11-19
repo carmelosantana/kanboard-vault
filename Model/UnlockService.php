@@ -15,12 +15,15 @@ use Kanboard\Plugin\Vault\Crypto\Wraps;
 //
 // Key rotation, crash recovery (spec): while the principal has a vault_rotations row its old wraps are gone, so
 // the wrap tried is its pending passphrase wrap of sk2 (checked against new_pk). After it opens, the bridge gives
-// sk1, both keys are checked (RotationService::resume) and the rotation runs to the end before the session is
-// created with sk2. A crash during that leaves the rotation where it stopped, for the next unlock.
+// sk1, both keys are checked (RotationService::resume) and the session is created with both keys. The rotation then
+// runs on for at most ROTATION_BATCHES sweep batches after the Argon2 slot is released (R32/R33); what's left, or a
+// crash, leaves it where it stopped, for later requests (Housekeeping) or the next unlock.
 class UnlockService extends Base
 {
     public const IP_FAILURES = 30;
     public const IP_WINDOW = 600;
+    // R32: sweep batches a rotation gets at unlock, after the slot is released; the rest runs on later requests.
+    public const ROTATION_BATCHES = 10;
 
     private ArgonSlots $slots;
     private Closure $argon2;
@@ -29,9 +32,11 @@ class UnlockService extends Base
     private Closure $clock;
     private RotationService $rotation;
     private RecoveryService $recovery;
+    private int $rotationBatches;
 
-    public function __construct($container, ?ArgonSlots $slots = null, ?callable $argon2 = null, ?VaultSession $session = null, ?RateLimiter $limiter = null, ?callable $clock = null, ?RotationService $rotation = null, ?RecoveryService $recovery = null)
+    public function __construct($container, ?ArgonSlots $slots = null, ?callable $argon2 = null, ?VaultSession $session = null, ?RateLimiter $limiter = null, ?callable $clock = null, ?RotationService $rotation = null, ?RecoveryService $recovery = null, int $rotationBatches = self::ROTATION_BATCHES)
     {
+        $this->rotationBatches = max(1, $rotationBatches);
         parent::__construct($container);
         $this->slots = $slots ?? new ArgonSlots($container);
         $this->argon2 = Closure::fromCallable($argon2 ?? [Kdf::class, 'argon2id']);
@@ -66,41 +71,74 @@ class UnlockService extends Base
             throw new VaultException($this->slots->lastBusy() === ArgonSlots::BUSY_GLOBAL ? 'busy_global' : 'busy');
         }
         $sk = '';
+        $guess = null;
+        $streak = 0;
+        $keys = null;
         try {
             if ($this->limiter->backoffSeconds(self::userBucket($userId)) > 0) {
+                $this->noteRateLimited($userId, $ip);
                 throw new VaultException('rate_limited');
             }
             $ipBucket = self::ipBucket($ip);
             if (! $this->limiter->consume($ipBucket, self::IP_FAILURES, self::IP_FAILURES / self::IP_WINDOW)) {
+                $this->noteRateLimited(null, $ip);
                 throw new VaultException('rate_limited');
             }
 
             $wrap = $this->loadPassphraseWrap($userId, $prf);
             $sk = $this->open($wrap, $passphrase);
             if ($sk === null) {
-                (new FailedGuess($this->container, $this->limiter, $this->clock))->record($userId, self::userBucket($userId), $ip);
+                $guess = new FailedGuess($this->container, $this->limiter, $this->clock);
+                $streak = $guess->record($userId, self::userBucket($userId), $ip);
                 throw new VaultException('unlock_failed');
             }
 
             $this->recordSuccess($userId, $ipBucket, $ip);
             $this->upgradeKdf($wrap, $sk, $passphrase);
-            if (empty($wrap['resume'])) {
-                return $this->openSession($userId, $sk, $passphrase);
-            }
-            return $this->resumeRotation($userId, $sk);
+            [$sessionKey, $keys] = empty($wrap['resume']) ? $this->openSession($userId, $sk, $passphrase) : $this->resumeRotation($userId, $sk);
         } finally {
             if (is_string($sk)) {
                 sodium_memzero($sk);
             }
             $slot->release();
+            // R39: the five-failure email goes once the slot is free.
+            $guess?->notifyIfDue($userId, $streak);
+        }
+        if ($keys !== null) {
+            $this->continueRotation($userId, $keys);
+        }
+        return $sessionKey;
+    }
+
+    // R32/R33: a rotation the unlock resumed or started runs on here, after the Argon2 slot is released, for at
+    // most $rotationBatches sweep batches; the rest is left for later requests (Housekeeping). The unlock has
+    // succeeded, so a failure is logged (the exception class only) and the rotation stays pending.
+    private function continueRotation(int $userId, #[\SensitiveParameter] array $keys): void
+    {
+        try {
+            $this->rotation->advance($userId, $keys['sk1'], $keys['sk2'], $this->rotationBatches);
+        } catch (\Throwable $e) {
+            $this->logger->warning('Vault: key rotation for user '.$userId.' could not complete at unlock and stays pending ('.get_class($e).')');
+        } finally {
+            sodium_memzero($keys['sk1']);
+            sodium_memzero($keys['sk2']);
+        }
+    }
+
+    // R39: a refusal is audited per bucket and window (RateLimitAudit), never failing the refusal itself.
+    private function noteRateLimited(?int $targetUserId, string $ip): void
+    {
+        try {
+            (new RateLimitAudit($this->container, $this->clock))->note($targetUserId, $ip);
+        } catch (\Throwable $e) {
+            $this->logger->warning('Vault: a rate-limit refusal could not be audited ('.get_class($e).')');
         }
     }
 
     // R33: once resume has verified sk2 (and, through the bridge, sk1) the unlock succeeds. The session holds sk1
     // and sk2 as the initiating session does (enc_sk, enc_sk_next), so it serves sk2 and finish switches it over.
-    // The rotation then continues best-effort; a failure there is logged (the exception class only, never a
-    // message that could carry data) and the rotation stays pending for a later request.
-    private function resumeRotation(int $userId, #[\SensitiveParameter] string $sk2): string
+    // Returns [session_key, {sk1, sk2}]; the caller continues the rotation outside the slot and wipes both keys.
+    private function resumeRotation(int $userId, #[\SensitiveParameter] string $sk2): array
     {
         try {
             $keys = $this->rotation->resume($userId, $sk2);
@@ -108,23 +146,19 @@ class UnlockService extends Base
             throw new VaultException('unlock_failed');
         }
         try {
-            $sessionKey = $this->session->create($userId, $keys['sk1'], $keys['sk2']);
-            try {
-                $this->rotation->complete($userId, $keys['sk1'], $keys['sk2']);
-            } catch (\Throwable $e) {
-                $this->logger->warning('Vault: key rotation for user '.$userId.' could not complete at unlock and stays pending ('.get_class($e).')');
-            }
-            return $sessionKey;
-        } finally {
+            return [$this->session->create($userId, $keys['sk1'], $keys['sk2']), $keys];
+        } catch (\Throwable $e) {
             sodium_memzero($keys['sk1']);
             sodium_memzero($keys['sk2']);
+            throw $e;
         }
     }
 
     // Recovery-policy housekeeping (RecoveryService::reconcileAtUnlock): it may add the org wrap, or start a queued
-    // rotation, in which case the session holds both keys and the rotation runs to the end as at resume (R33). The
+    // rotation, in which case the session holds both keys and the rotation continues as at resume (R33). The
     // unlock has already succeeded, so a failure here is logged (the class only) and never fails it.
-    private function openSession(int $userId, #[\SensitiveParameter] string $sk, #[\SensitiveParameter] string $passphrase): string
+    // Returns [session_key, {sk1, sk2} or null].
+    private function openSession(int $userId, #[\SensitiveParameter] string $sk, #[\SensitiveParameter] string $passphrase): array
     {
         $sk2 = null;
         try {
@@ -133,18 +167,13 @@ class UnlockService extends Base
             $this->logger->warning('Vault: recovery policy housekeeping for user '.$userId.' failed at unlock ('.get_class($e).')');
         }
         if ($sk2 === null) {
-            return $this->session->create($userId, $sk);
+            return [$this->session->create($userId, $sk), null];
         }
         try {
-            $sessionKey = $this->session->create($userId, $sk, $sk2);
-            try {
-                $this->rotation->complete($userId, $sk, $sk2);
-            } catch (\Throwable $e) {
-                $this->logger->warning('Vault: key rotation for user '.$userId.' could not complete at unlock and stays pending ('.get_class($e).')');
-            }
-            return $sessionKey;
-        } finally {
+            return [$this->session->create($userId, $sk, $sk2), ['sk1' => $sk, 'sk2' => $sk2]];
+        } catch (\Throwable $e) {
             sodium_memzero($sk2);
+            throw $e;
         }
     }
 
@@ -227,7 +256,11 @@ class UnlockService extends Base
             $this->limiter->recordSuccess(self::userBucket($userId));
             $this->limiter->refund($ipBucket, self::IP_FAILURES, self::IP_FAILURES / self::IP_WINDOW);
             $ipTrunc = (new ClientIp($this->container))->truncate($ip);
-            AuditModel::of($this->container, $this->clock)->record('unlock', ['actor_user_id' => $userId, 'ip_trunc' => $ipTrunc === '' ? null : $ipTrunc]);
+            AuditModel::of($this->container, $this->clock)->record('unlock', [
+                'actor_user_id' => $userId,
+                'ip_trunc' => $ipTrunc === '' ? null : $ipTrunc,
+                'ua_family' => UaFamily::fromRequest($this->request),
+            ]);
         });
     }
 

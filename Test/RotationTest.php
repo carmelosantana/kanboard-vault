@@ -238,7 +238,7 @@ class RotationTest extends Base
         $this->assertTrue($this->wrapOpens($wraps[0], $this->alicePassphrase), 'control: the old passphrase opens before start');
 
         $this->crashAt('start');
-        $e = $this->thrown(fn () => $this->rotatingPrincipals()->changePassphrase($this->alice, $this->alicePassphrase, self::NEW_PASS, $sk1));
+        $e = $this->thrown(fn () => $this->rotatingPrincipals()->changePassphrase($this->alice, $this->alicePassphrase, self::NEW_PASS, $sk1, self::IP));
         $this->assertSame('injected crash', $e->getMessage());
         $this->assertSame('rotating', $this->principalRow($this->alice)['state']);
         $this->assertNotNull($this->row('SELECT * FROM vault_rotations WHERE user_id = ?', [$this->alice]));
@@ -263,7 +263,7 @@ class RotationTest extends Base
         $this->populate();
         $sk1 = $this->unlockFresh($this->alice, $this->alicePassphrase, 'php-session-A');
         $this->crashAt('start');
-        $this->thrown(fn () => $this->rotatingPrincipals()->changePassphrase($this->alice, $this->alicePassphrase, self::NEW_PASS, $sk1));
+        $this->thrown(fn () => $this->rotatingPrincipals()->changePassphrase($this->alice, $this->alicePassphrase, self::NEW_PASS, $sk1, self::IP));
         $this->pdo()->exec('DELETE FROM vault_sessions');
         $this->crashWhen = null;
 
@@ -304,7 +304,7 @@ class RotationTest extends Base
         $sk1 = $this->skFor($this->alice, $this->alicePassphrase);
         $this->crashAt('batch', $k);
         // A crash after start has committed is contained: the change took, the rotation is pending.
-        $this->assertSame(RotationService::PENDING, $this->rotatingPrincipals(2)->changePassphrase($this->alice, $this->alicePassphrase, self::NEW_PASS, $sk1));
+        $this->assertSame(RotationService::PENDING, $this->rotatingPrincipals(2)->changePassphrase($this->alice, $this->alicePassphrase, self::NEW_PASS, $sk1, self::IP));
         $batches = array_values(array_filter($this->hookLog, static fn (array $h): bool => $h[0] === 'batch'));
         $this->assertSame(range(0, $k), array_column($batches, 1));
 
@@ -340,7 +340,7 @@ class RotationTest extends Base
         $ex = $this->store()->createEntry($this->bob, $gx, ['title' => 'late entry', 'password' => 'late pw']);
         $sk1 = $this->skFor($this->alice, $this->alicePassphrase);
         $this->crashAt('start');
-        $this->thrown(fn () => $this->rotation()->requestManual($this->alice, $sk1, $this->alicePassphrase));
+        $this->thrown(fn () => $this->rotation()->requestManual($this->alice, $sk1, $this->alicePassphrase, self::IP));
         $this->crashWhen = null;
         $pending = $this->row("SELECT * FROM vault_wraps WHERE user_id = ? AND status = 'pending'", [$this->alice]);
         $rot = $this->row('SELECT * FROM vault_rotations WHERE user_id = ?', [$this->alice]);
@@ -375,7 +375,7 @@ class RotationTest extends Base
         $this->populate();
         $sk1 = $this->skFor($this->alice, $this->alicePassphrase);
         $this->crashAt('start');
-        $this->thrown(fn () => $this->rotation()->requestManual($this->alice, $sk1, $this->alicePassphrase));
+        $this->thrown(fn () => $this->rotation()->requestManual($this->alice, $sk1, $this->alicePassphrase, self::IP));
         $this->crashWhen = null;
         $pending = $this->row("SELECT * FROM vault_wraps WHERE user_id = ? AND status = 'pending'", [$this->alice]);
         $rot = $this->row('SELECT * FROM vault_rotations WHERE user_id = ?', [$this->alice]);
@@ -424,7 +424,7 @@ class RotationTest extends Base
         }
         $this->assertCount(11, $deks, 'control: the pre-rotation dump opens all 11 objects');
 
-        $this->assertSame(RotationService::ROTATED, $this->rotatingPrincipals()->changePassphrase($this->alice, $this->alicePassphrase, self::NEW_PASS, $sk1));
+        $this->assertSame(RotationService::ROTATED, $this->rotatingPrincipals()->changePassphrase($this->alice, $this->alicePassphrase, self::NEW_PASS, $sk1, self::IP));
         $post = $this->dump();
 
         $this->assertSame([], $post['vault_rotations'], 'the bridge is gone');
@@ -471,7 +471,7 @@ class RotationTest extends Base
         $this->assertSame(3, $this->countRows('SELECT COUNT(*) FROM vault_sessions'));
 
         $this->crashAt('start');
-        $this->thrown(fn () => $this->rotation()->requestManual($this->alice, $sk1, $this->alicePassphrase));
+        $this->thrown(fn () => $this->rotation()->requestManual($this->alice, $sk1, $this->alicePassphrase, self::IP));
         $this->crashWhen = null;
         $this->assertSame(1, $this->countRows('SELECT COUNT(*) FROM vault_sessions WHERE user_id = ?', [$this->alice]), 'only the initiating session is left');
         $this->assertSame(1, $this->countRows('SELECT COUNT(*) FROM vault_sessions WHERE user_id = ?', [$this->bob]), "bob's session is untouched");
@@ -506,7 +506,7 @@ class RotationTest extends Base
         $sk1 = $this->skFor($this->alice, $this->alicePassphrase);
         $oldDek = Sealer::openDek(base64_decode($this->row("SELECT sealed_dek FROM vault_keys WHERE object_type = 'entry' AND object_id = ? AND principal_id = ?", [$eb1, $this->alice])['sealed_dek']), $this->keypair($sk1), 'entry', $eb1, 1, $this->alice);
         $this->crashAt('start');
-        $this->thrown(fn () => $this->rotation()->requestManual($this->alice, $sk1, $this->alicePassphrase));
+        $this->thrown(fn () => $this->rotation()->requestManual($this->alice, $sk1, $this->alicePassphrase, self::IP));
         $this->crashWhen = null;
 
         $this->store()->updateEntry($this->bob, $eb1, 1, ['title' => 'b1 edited', 'password' => 'new secret'], $bobSk);
@@ -522,12 +522,12 @@ class RotationTest extends Base
     public function testRotateMyKeysRefusesAWrongPassphrase(): void
     {
         $sk1 = $this->skFor($this->alice, $this->alicePassphrase);
-        $this->assertVaultError('unlock_failed', fn () => $this->rotation()->requestManual($this->alice, $sk1, 'not the right passphrase'));
-        $this->assertVaultError('unlock_failed', fn () => $this->rotatingPrincipals()->changePassphrase($this->alice, 'not the right passphrase', self::NEW_PASS, $sk1));
+        $this->assertVaultError('unlock_failed', fn () => $this->rotation()->requestManual($this->alice, $sk1, 'not the right passphrase', self::IP));
+        $this->assertVaultError('unlock_failed', fn () => $this->rotatingPrincipals()->changePassphrase($this->alice, 'not the right passphrase', self::NEW_PASS, $sk1, self::IP));
         $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_rotations'));
         $this->assertSame('active', $this->principalRow($this->alice)['state']);
         $this->assertSame($sk1, $this->skFor($this->alice, $this->alicePassphrase));
-        $this->assertVaultError('passphrase_weak', fn () => $this->rotatingPrincipals()->changePassphrase($this->alice, $this->alicePassphrase, 'short', $sk1));
+        $this->assertVaultError('passphrase_weak', fn () => $this->rotatingPrincipals()->changePassphrase($this->alice, $this->alicePassphrase, 'short', $sk1, self::IP));
     }
 
     // resume checks both keys against old_pk and new_pk before using either. Kills: trusting the bridge
@@ -536,7 +536,7 @@ class RotationTest extends Base
     {
         $sk1 = $this->skFor($this->alice, $this->alicePassphrase);
         $this->crashAt('start');
-        $this->thrown(fn () => $this->rotation()->requestManual($this->alice, $sk1, $this->alicePassphrase));
+        $this->thrown(fn () => $this->rotation()->requestManual($this->alice, $sk1, $this->alicePassphrase, self::IP));
         $this->crashWhen = null;
         $rot = $this->row('SELECT * FROM vault_rotations WHERE user_id = ?', [$this->alice]);
         $pending = $this->row("SELECT * FROM vault_wraps WHERE user_id = ? AND status = 'pending'", [$this->alice]);
@@ -559,7 +559,7 @@ class RotationTest extends Base
     {
         $sk1 = $this->skFor($this->alice, $this->alicePassphrase);
         $this->crashAt('start');
-        $this->thrown(fn () => $this->rotation()->requestManual($this->alice, $sk1, $this->alicePassphrase));
+        $this->thrown(fn () => $this->rotation()->requestManual($this->alice, $sk1, $this->alicePassphrase, self::IP));
         $this->crashWhen = null;
         $pending = $this->row("SELECT * FROM vault_wraps WHERE user_id = ? AND status = 'pending'", [$this->alice]);
         $rot = $this->row('SELECT * FROM vault_rotations WHERE user_id = ?', [$this->alice]);
@@ -678,7 +678,7 @@ class RotationTest extends Base
         $this->populate();
         $sk1 = $this->skFor($this->alice, $this->alicePassphrase);
         $this->pdo()->prepare('UPDATE vault_entries SET crypto_v = 2 WHERE id = ?')->execute([$this->objs[2][1]]);
-        $this->assertSame(RotationService::PENDING, $this->rotatingPrincipals()->changePassphrase($this->alice, $this->alicePassphrase, self::NEW_PASS, $sk1));
+        $this->assertSame(RotationService::PENDING, $this->rotatingPrincipals()->changePassphrase($this->alice, $this->alicePassphrase, self::NEW_PASS, $sk1, self::IP));
         $this->assertNotNull($this->row('SELECT * FROM vault_rotations WHERE user_id = ?', [$this->alice]));
         $sk = $this->unlockFresh($this->alice, self::NEW_PASS, 'php-session-N');
         $this->assertSame(base64_decode($this->row('SELECT new_pk FROM vault_rotations WHERE user_id = ?', [$this->alice])['new_pk']), $this->pkOf($sk));
@@ -686,7 +686,7 @@ class RotationTest extends Base
         $this->assertVaultError('unlock_failed', fn () => $this->unlockService()->unlock($this->alice, $this->alicePassphrase, self::IP));
         // Rotate my keys behaves the same way once a rotation is no longer in progress; here it is, so it refuses
         // up front (before any start), which is a real failure.
-        $this->assertVaultError('rotation_in_progress', fn () => $this->rotation()->requestManual($this->alice, $sk, self::NEW_PASS));
+        $this->assertVaultError('rotation_in_progress', fn () => $this->rotation()->requestManual($this->alice, $sk, self::NEW_PASS, self::IP));
     }
 
     // R33: unlock succeeds once resume has verified sk2. The session works with sk2 and the rotation stays
@@ -756,7 +756,7 @@ class RotationTest extends Base
         }
         $pdo->exec('COMMIT');
 
-        $this->rotation(100)->requestManual($this->alice, $sk1, $this->alicePassphrase);
+        $this->rotation(100)->requestManual($this->alice, $sk1, $this->alicePassphrase, self::IP);
         $batches = array_values(array_filter($this->hookLog, static fn (array $h): bool => $h[0] === 'batch'));
         $this->assertCount(101, $batches);
         foreach ($batches as [, $k, $seconds]) {
@@ -764,5 +764,102 @@ class RotationTest extends Base
         }
         $this->assertSame(0, $this->oldGenRows($this->alice, 1));
         $this->assertSame(2, (int) $this->principalRow($this->alice)['key_gen']);
+    }
+
+    // T8 carry / R32: the sweep cursor persists, so bounded sweeps (one batch each, as after unlock) walk past
+    // objects kept for an integrity fault instead of re-reading them forever. Here the first two objects in
+    // (type, id) order are faulty. Kills: the cursor reset at every sweep() (left stays at 9 after the first call).
+    public function testBoundedSweepsProgressPastIntegrityFaults(): void
+    {
+        $this->populate();
+        [$sk1, $sk2] = $this->startedRotation();
+        foreach ([2, 3] as $i) {
+            $this->pdo()->prepare('UPDATE vault_entries SET crypto_v = 2 WHERE id = ?')->execute([$this->objs[$i][1]]);
+        }
+        $lefts = [];
+        for ($n = 0; $n < 6; $n++) {
+            $lefts[] = $this->rotation(2)->sweep($this->alice, $sk1, $sk2, 2, 1);
+        }
+        $this->assertSame(2, end($lefts), 'every healthy object was re-keyed: '.implode(',', $lefts));
+        $this->assertSame([11, 9, 7, 5, 3, 2], $lefts);
+        $rot = $this->row('SELECT sweep_type, sweep_id FROM vault_rotations WHERE user_id = ?', [$this->alice]);
+        $this->assertNotNull($rot['sweep_type'], 'the cursor is stored on the rotation');
+    }
+
+    // R37: an integrity fault the sweep keeps is audited as integrity_error (actor, object only), once per object
+    // per day however often the sweep passes it. Kills: no audit row; a row per pass; the wrong object or actor.
+    public function testIntegrityFaultIsAuditedOncePerDay(): void
+    {
+        $this->populate();
+        [$sk1, $sk2] = $this->startedRotation();
+        $e1 = $this->objs[2][1];
+        $this->pdo()->prepare('UPDATE vault_entries SET crypto_v = 2 WHERE id = ?')->execute([$e1]);
+        $this->pdo()->exec("DELETE FROM vault_audit");
+        $this->assertVaultError('integrity_error', fn () => $this->rotation()->complete($this->alice, $sk1, $sk2));
+        $this->assertVaultError('integrity_error', fn () => $this->rotation()->complete($this->alice, $sk1, $sk2));
+        $rows = $this->pdo()->query("SELECT * FROM vault_audit WHERE action = 'integrity_error'")->fetchAll(\PDO::FETCH_ASSOC);
+        $this->assertCount(1, $rows);
+        $this->assertSame([$this->alice, 'entry', $e1, null, null], [(int) $rows[0]['actor_user_id'], $rows[0]['object_type'], (int) $rows[0]['object_id'], $rows[0]['ip_trunc'], $rows[0]['target_user_id']]);
+        $this->now += 86400;
+        $this->assertVaultError('integrity_error', fn () => $this->rotation()->complete($this->alice, $sk1, $sk2));
+        $this->assertSame(2, $this->countRows("SELECT COUNT(*) FROM vault_audit WHERE action = 'integrity_error'"));
+    }
+
+    // T8 minor: the passphrase ceremony uses the caller's IP. A wrong current passphrase is audited with that IP
+    // (not ''), and the per-IP bucket is consumed: an exhausted IP is refused before any Argon2 while another IP
+    // still works. Kills: '' passed as the IP; the IP bucket skipped.
+    public function testPassphraseChangeUsesTheCallersIpBucket(): void
+    {
+        $sk1 = $this->skFor($this->alice, $this->alicePassphrase);
+        $this->assertVaultError('unlock_failed', fn () => $this->rotatingPrincipals()->changePassphrase($this->alice, 'not the right passphrase', self::NEW_PASS, $sk1, self::IP));
+        $row = $this->row("SELECT ip_trunc FROM vault_audit WHERE action = 'unlock_failed'");
+        $this->assertSame('203.0.113.0/24', $row['ip_trunc']);
+
+        $limiter = $this->limiter();
+        while ($limiter->consume(UnlockService::ipBucket('198.51.100.7'), UnlockService::IP_FAILURES, UnlockService::IP_FAILURES / UnlockService::IP_WINDOW)) {
+        }
+        $calls = $this->argonCalls;
+        $this->assertVaultError('rate_limited', fn () => $this->rotatingPrincipals()->changePassphrase($this->alice, $this->alicePassphrase, self::NEW_PASS, $sk1, '198.51.100.7'));
+        $this->assertSame($calls, $this->argonCalls, 'refused before Argon2');
+        $this->assertSame(RotationService::ROTATED, $this->rotatingPrincipals()->changePassphrase($this->alice, $this->alicePassphrase, self::NEW_PASS, $sk1, self::IP));
+    }
+
+    // T8 minor / T10 carry: a correct current passphrase is a success like an unlock: the back-off and the shared
+    // failure streak reset, and the IP token comes back. Kills: the streak or back-off left in place (a later
+    // single failure would then email early or stay locked out).
+    public function testCorrectCurrentPassphraseResetsBackoffAndStreak(): void
+    {
+        $sk1 = $this->skFor($this->alice, $this->alicePassphrase);
+        for ($i = 0; $i < 3; $i++) {
+            $this->assertVaultError('unlock_failed', fn () => $this->rotation()->requestManual($this->alice, $sk1, 'not the right passphrase', self::IP));
+        }
+        $this->assertSame(3, $this->countRows("SELECT CAST(tokens AS INTEGER) FROM vault_rate WHERE bucket = 'unlock:streak:".$this->alice."'"));
+        $this->assertSame(1, $this->countRows("SELECT COUNT(*) FROM vault_rate WHERE bucket = ?", [UnlockService::userBucket($this->alice)]));
+        $ipBefore = (float) $this->row('SELECT tokens FROM vault_rate WHERE bucket = ?', [UnlockService::ipBucket(self::IP)])['tokens'];
+
+        $this->assertSame(RotationService::ROTATED, $this->rotation()->requestManual($this->alice, $sk1, $this->alicePassphrase, self::IP));
+        $this->assertSame(0, $this->countRows("SELECT COUNT(*) FROM vault_rate WHERE bucket = 'unlock:streak:".$this->alice."'"));
+        $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_rate WHERE bucket = ?', [UnlockService::userBucket($this->alice)]));
+        $this->assertEqualsWithDelta($ipBefore, (float) $this->row('SELECT tokens FROM vault_rate WHERE bucket = ?', [UnlockService::ipBucket(self::IP)])['tokens'], 1e-6, 'the IP token is refunded');
+    }
+
+    // R32: the sweep after a passphrase change runs after the principal's Argon2 slot is released, so another
+    // request of the same user isn't refused as busy meanwhile. Kills: complete() inside the slot.
+    public function testCeremonySweepRunsOutsideTheArgonSlot(): void
+    {
+        $this->populate();
+        $sk1 = $this->skFor($this->alice, $this->alicePassphrase);
+        $free = [];
+        $this->crashWhen = function (string $p, int $k) use (&$free): bool {
+            if ($p === 'batch') {
+                $slot = $this->slots()->acquire($this->alice);
+                $free[] = $slot !== null;
+                $slot?->release();
+            }
+            return false;
+        };
+        $this->assertSame(RotationService::ROTATED, $this->rotatingPrincipals(2)->changePassphrase($this->alice, $this->alicePassphrase, self::NEW_PASS, $sk1, self::IP));
+        $this->assertNotEmpty($free);
+        $this->assertSame([true], array_values(array_unique($free)));
     }
 }

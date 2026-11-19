@@ -154,7 +154,7 @@ class LogHygieneTest extends Base
             }
         }, 1);
         $this->assertSame(RotationService::PENDING, (new PrincipalModel($this->container, $this->slots(), $this->argon(), $this->clock(), $stalling))
-            ->changePassphrase($this->alice, Fixtures::NEW_PASSPHRASE, Fixtures::PASSPHRASE, $sk));
+            ->changePassphrase($this->alice, Fixtures::NEW_PASSPHRASE, Fixtures::PASSPHRASE, $sk, self::IP));
         $sk = $this->unlockAs($this->alice, Fixtures::PASSPHRASE, 'sid-alice-2');
         $this->generated[] = $sk;
         $this->assertSame(Fixtures::UPDATED_PASSWORD, $s->readField($this->alice, $e, 'password', $sk));

@@ -18,6 +18,7 @@ use Kanboard\Core\Base;
 //   orphaned rows      R8(b): grants (through removeSource), key rows and re-key queue rows whose object is gone.
 //   sessions, challenges, share reservations and shares past their expiry (each share expiry is audited for its
 //                      creator), and audit rows past the retention setting.
+//   rate-limit windows R39: the rate_limited row of every closed window (RateLimitAudit::flush).
 class Purger extends Base
 {
     public const INTERVAL = 60;
@@ -58,6 +59,7 @@ class Purger extends Base
         $counts += $this->expiredRows($now);
         $counts['shares'] = $this->expiredShares($now);
         $counts['audit'] = $this->auditPastRetention($now);
+        $counts['rate_limited'] = (new RateLimitAudit($this->container, static fn (): int => $now))->flush();
         return $counts;
     }
 

@@ -509,7 +509,7 @@ class RecoveryTest extends Base
         $this->recovery()->createCode($this->alice, $sk1);
 
         $principals = new PrincipalModel($this->container, $this->slots(), $this->argon(), fn () => $this->now, $this->rotation());
-        $this->assertSame(RotationService::ROTATED, $principals->changePassphrase($this->alice, $this->alicePassphrase, self::NEW_PASS, $sk1));
+        $this->assertSame(RotationService::ROTATED, $principals->changePassphrase($this->alice, $this->alicePassphrase, self::NEW_PASS, $sk1, self::IP));
         $sk2 = $this->skFor($this->alice, self::NEW_PASS);
         $org = $this->wraps($this->alice, 'org');
         $this->assertCount(1, $org);
@@ -518,7 +518,7 @@ class RecoveryTest extends Base
         $this->assertSame(['recovery_code_reset'], $this->recovery()->takeNotices($this->alice));
 
         $this->addHardwareKey($this->alice, $sk2);
-        $this->assertVaultError('rotation_needs_factors', fn () => $principals->changePassphrase($this->alice, self::NEW_PASS, 'yet another long passphrase', $sk2));
+        $this->assertVaultError('rotation_needs_factors', fn () => $principals->changePassphrase($this->alice, self::NEW_PASS, 'yet another long passphrase', $sk2, self::IP));
     }
 
     // Admin settings: typed defaults, validation, and a policy_change audit row per change. The policy key goes

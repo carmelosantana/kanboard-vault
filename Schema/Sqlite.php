@@ -1,7 +1,7 @@
 <?php
 namespace Kanboard\Plugin\Vault\Schema;
 
-const VERSION = 2;
+const VERSION = 3;
 
 // Binary values are base64 TEXT; timestamps are Unix seconds.
 // Ownership references to users(id) cascade; provenance columns (created_by, granted_by, audit actor/target) are SET NULL.
@@ -263,6 +263,44 @@ function version_2($pdo)
         PRIMARY KEY(object_type, object_id, principal_id, principal_key_gen),
         FOREIGN KEY(principal_id) REFERENCES vault_principals(user_id) ON DELETE CASCADE
     )', 'principal_id');
+}
+
+// R39: actor_kind gains 'system', for an action with no actor in a web request (a share expiry or a rate-limit
+// summary written by the opportunistic purge). R32: vault_rotations keeps the sweep cursor, so bounded sweeps
+// make progress past objects kept for an integrity fault. SQLite can't alter a CHECK, so vault_audit is rebuilt
+// with its rows, ids and AUTOINCREMENT counter.
+function version_3($pdo)
+{
+    $seq = $pdo->query("SELECT seq FROM sqlite_sequence WHERE name = 'vault_audit'")->fetchColumn();
+    $pdo->exec("CREATE TABLE vault_audit_v3 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at INTEGER NOT NULL,
+        actor_user_id INTEGER,
+        actor_kind TEXT NOT NULL CHECK (actor_kind IN ('human', 'agent', 'public', 'cli', 'system')),
+        action TEXT NOT NULL,
+        object_type TEXT,
+        object_id INTEGER,
+        share_hash TEXT,
+        target_user_id INTEGER,
+        ip_trunc TEXT,
+        ua_family TEXT,
+        via TEXT NOT NULL CHECK (via IN ('ui', 'api', 'cli')),
+        count INTEGER,
+        FOREIGN KEY(actor_user_id) REFERENCES users(id) ON DELETE SET NULL,
+        FOREIGN KEY(target_user_id) REFERENCES users(id) ON DELETE SET NULL
+    )");
+    $pdo->exec('INSERT INTO vault_audit_v3 SELECT * FROM vault_audit');
+    $pdo->exec('DROP TABLE vault_audit');
+    $pdo->exec('ALTER TABLE vault_audit_v3 RENAME TO vault_audit');
+    if ($seq !== false && $seq !== null) {
+        $pdo->prepare("UPDATE sqlite_sequence SET seq = ? WHERE name = 'vault_audit' AND seq < ?")->execute([(int) $seq, (int) $seq]);
+        if ($pdo->query("SELECT COUNT(*) FROM sqlite_sequence WHERE name = 'vault_audit'")->fetchColumn() == 0) {
+            $pdo->prepare("INSERT INTO sqlite_sequence (name, seq) VALUES ('vault_audit', ?)")->execute([(int) $seq]);
+        }
+    }
+
+    $pdo->exec('ALTER TABLE vault_rotations ADD COLUMN sweep_type TEXT');
+    $pdo->exec('ALTER TABLE vault_rotations ADD COLUMN sweep_id INTEGER');
 }
 
 // Copies $table into "<table>_v2" (created by $createSql) for rows whose $principalColumn names a principal,

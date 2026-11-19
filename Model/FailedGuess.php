@@ -12,8 +12,9 @@ use Kanboard\Core\Base;
 // row (streakBucket). Any successful unlock or recovery-code use resets it (resetStreak), so a stale back-off bucket
 // can neither bring the notice forward nor push the count past the point where it fires. The user is emailed each
 // time the streak reaches a multiple of PrincipalModel::NOTIFY_AFTER: the spec says "after 5 consecutive failures,
-// the user is notified" and is silent on more, so 10, 15, ... notify again rather than going quiet. The email goes
-// after the commit and never fails the caller.
+// the user is notified" and is silent on more, so 10, 15, ... notify again rather than going quiet. record() only
+// counts; the caller sends the email with notifyIfDue() once it has released its Argon2 slot (R39), so a slow mail
+// server never holds a slot. The email never fails the caller.
 class FailedGuess extends Base
 {
     private RateLimiter $limiter;
@@ -44,10 +45,11 @@ class FailedGuess extends Base
         $db->execute('DELETE FROM vault_rate WHERE bucket = ?', [self::streakBucket($userId)]);
     }
 
-    // $ip is the client address ('' when there is none), stored truncated.
-    public function record(int $userId, string $bucket, string $ip): void
+    // $ip is the client address ('' when there is none), stored truncated. Returns the streak after this failure
+    // (0 for an unknown user), for notifyIfDue().
+    public function record(int $userId, string $bucket, string $ip): int
     {
-        $streak = (new VaultLock($this->container))->exclusive(function () use ($userId, $bucket, $ip): int {
+        return (new VaultLock($this->container))->exclusive(function () use ($userId, $bucket, $ip): int {
             $this->limiter->recordFailure($bucket);
             $db = new VaultDb($this->container);
             // An unknown user id is still throttled, but has no users row for the audit's foreign key or a notice.
@@ -56,6 +58,7 @@ class FailedGuess extends Base
             AuditModel::of($this->container, $this->clock)->record('unlock_failed', [
                 'actor_user_id' => $known ? $userId : null,
                 'ip_trunc' => $ipTrunc === '' ? null : $ipTrunc,
+                'ua_family' => UaFamily::fromRequest($this->request),
             ]);
             if (! $known) {
                 return 0;
@@ -65,6 +68,12 @@ class FailedGuess extends Base
             $db->insert('vault_rate', ['bucket' => self::streakBucket($userId), 'tokens' => $n, 'updated_at' => (int) ($this->clock)()], null);
             return $n;
         });
+    }
+
+    // Emails the user when $streak (from record()) has reached a multiple of NOTIFY_AFTER. Call it after the
+    // Argon2 slot is released.
+    public function notifyIfDue(int $userId, int $streak): void
+    {
         if ($streak > 0 && $streak % PrincipalModel::NOTIFY_AFTER === 0) {
             try {
                 Notifier::of($this->container)->unlockFailures($userId);

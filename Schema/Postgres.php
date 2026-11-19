@@ -1,7 +1,7 @@
 <?php
 namespace Kanboard\Plugin\Vault\Schema;
 
-const VERSION = 2;
+const VERSION = 3;
 
 // Binary values are base64 TEXT; timestamps are Unix seconds.
 // Ownership references to users(id) cascade; provenance columns (created_by, granted_by, audit actor/target) are SET NULL.
@@ -228,4 +228,14 @@ function version_2($pdo)
     $pdo->exec('ALTER TABLE vault_keys DROP CONSTRAINT IF EXISTS vault_keys_principal_id_fkey');
     $pdo->exec('DELETE FROM vault_keys WHERE principal_id NOT IN (SELECT user_id FROM vault_principals)');
     $pdo->exec('ALTER TABLE vault_keys ADD CONSTRAINT vault_keys_principal_fk FOREIGN KEY(principal_id) REFERENCES vault_principals(user_id) ON DELETE CASCADE');
+}
+
+// R39: actor_kind gains 'system'; R32: vault_rotations keeps the sweep cursor (see Sqlite.php version_3). The v1
+// column CHECK carries Postgres's default name; no IF EXISTS, so a missing constraint fails the migration loudly.
+function version_3($pdo)
+{
+    $pdo->exec('ALTER TABLE vault_audit DROP CONSTRAINT vault_audit_actor_kind_check');
+    $pdo->exec("ALTER TABLE vault_audit ADD CONSTRAINT vault_audit_actor_kind_check CHECK (actor_kind IN ('human', 'agent', 'public', 'cli', 'system'))");
+
+    $pdo->exec('ALTER TABLE vault_rotations ADD COLUMN sweep_type VARCHAR(16), ADD COLUMN sweep_id INTEGER');
 }

@@ -74,14 +74,16 @@ class AuditTest extends Base
             'bad_vault_key' => ['actor_user_id', 'ip_trunc'],
             'org_recovery' => ['target_user_id'],
             'policy_change' => ['actor_user_id'],
+            // R37 (spec addendum at T25): an integrity fault the rotation sweep keeps, operator-visible.
+            'integrity_error' => $objectCols,
         ];
         $norm = static function (array $t): array {
             ksort($t);
             return array_map(static function (array $c): array { sort($c); return $c; }, $t);
         };
         $this->assertSame($norm($expected), $norm(AuditModel::ALLOW));
-        // The spec's Actions table lists exactly these 27.
-        $this->assertCount(27, AuditModel::ALLOW);
+        // The spec's Actions table lists these 27, plus integrity_error (R37).
+        $this->assertCount(28, AuditModel::ALLOW);
     }
 
     public static function actions(): array
@@ -130,7 +132,7 @@ class AuditTest extends Base
     // Kills: an unknown action accepted (written with an empty allowlist, or with no check at all).
     public function testUnknownActionThrows(): void
     {
-        foreach (['', 'reveal', 'move', 'integrity_error', 'UNLOCK', 'unlock '] as $action) {
+        foreach (['', 'reveal', 'move', 'integrity', 'UNLOCK', 'unlock '] as $action) {
             try {
                 $this->audit()->record($action, []);
                 $this->fail("accepted action '$action'");
@@ -149,7 +151,7 @@ class AuditTest extends Base
             ['detail_json', ['detail_json' => '{}']],
             ['id', ['id' => 5]],
             ['created_at', ['created_at' => 5]],
-            ['actor_kind', ['actor_kind' => 'system']],
+            ['actor_kind', ['actor_kind' => 'robot']],
             ['via', ['via' => 'cron']],
             ['object_type', ['actor_user_id' => 1, 'object_type' => 'share', 'object_id' => 1]],
             ['object_id type', ['actor_user_id' => 1, 'object_type' => 'entry', 'object_id' => '1']],
@@ -177,8 +179,12 @@ class AuditTest extends Base
             ->execute([$this->bob, $this->bob]);
         $this->audit(null, 'api')->record('lock', ['actor_user_id' => $this->bob]);
         $this->audit(null, 'api')->record('lock', ['actor_user_id' => $this->alice]);
+        // R39: no actor in a web request is the system (a purge's share expiry, a rate-limit summary), not a human.
+        $this->audit(null, 'ui')->record('share_expire', ['target_user_id' => $this->alice, 'share_hash' => str_repeat('ab', 16)]);
+        $this->audit(null, null)->record('share_expire', ['target_user_id' => $this->alice, 'share_hash' => str_repeat('ab', 16)]);
+        $this->audit(null, 'ui')->record('share_expire', ['target_user_id' => $this->alice, 'share_hash' => str_repeat('ab', 16), 'actor_kind' => 'public']);
         $got = array_map(static fn (array $r): array => [$r['actor_kind'], $r['via']], $this->auditRows());
-        $this->assertSame([['human', 'api'], ['cli', 'cli'], ['cli', 'cli'], ['agent', 'api'], ['human', 'api']], $got);
+        $this->assertSame([['human', 'api'], ['cli', 'cli'], ['cli', 'cli'], ['agent', 'api'], ['human', 'api'], ['system', 'ui'], ['cli', 'cli'], ['public', 'ui']], $got);
     }
 
     // Recording inside the vault lock is part of the transaction: a rollback leaves no audit row. Kills: record()
@@ -358,7 +364,7 @@ class AuditTest extends Base
         $g = $s->createGroup($this->alice, null, ['name' => 'g']);
         $s->createEntry($this->alice, $g, Fixtures::entry());
         $sk = $this->skFor($this->alice, Fixtures::PASSPHRASE);
-        $this->assertSame(RotationService::ROTATED, $this->principals()->changePassphrase($this->alice, Fixtures::PASSPHRASE, Fixtures::NEW_PASSPHRASE, $sk));
+        $this->assertSame(RotationService::ROTATED, $this->principals()->changePassphrase($this->alice, Fixtures::PASSPHRASE, Fixtures::NEW_PASSPHRASE, $sk, self::IP));
         $rotate = $this->auditRows('rotate');
         $this->assertCount(1, $rotate);
         $this->assertSame([$this->alice, 2], [(int) $rotate[0]['actor_user_id'], (int) $rotate[0]['count']]);
@@ -379,7 +385,7 @@ class AuditTest extends Base
         $tries = [
             'vault_entries' => fn () => $this->store()->createEntry($this->alice, $g, Fixtures::entry()),
             'vault_grants' => fn () => $this->grants()->grant($this->alice, 'group', $g, $this->bob, 'read', null, $sk),
-            'vault_rotations' => fn () => $this->principals()->changePassphrase($this->alice, Fixtures::PASSPHRASE, Fixtures::NEW_PASSPHRASE, $sk),
+            'vault_rotations' => fn () => $this->principals()->changePassphrase($this->alice, Fixtures::PASSPHRASE, Fixtures::NEW_PASSPHRASE, $sk, self::IP),
             'vault_sessions' => fn () => $this->unlockService()->unlock($this->alice, Fixtures::PASSPHRASE, self::IP),
         ];
         foreach ($tries as $table => $fn) {

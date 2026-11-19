@@ -123,7 +123,9 @@ class VaultSession extends Base
     // The unlocked sk for the current user in this UI session, or null. The caller wipes it after use. While a
     // key rotation is in progress the row also holds enc_sk_next (sk2), and that is the key returned: sk2 opens
     // both key generations (the old one through the rotation bridge), sk1 only the old one.
-    public function secretKey(): ?string
+    // $sessionKey: the raw key unlock() just returned, for the rest of the unlocking request (its cookie only
+    // reaches the next request); otherwise the cookie's.
+    public function secretKey(#[\SensitiveParameter] ?string $sessionKey = null): ?string
     {
         $sidHash = $this->sidHash();
         $userId = (int) $this->userSession->getId();
@@ -150,7 +152,7 @@ class VaultSession extends Base
             $this->lock($userId, $sidHash);
             return null;
         }
-        $sessionKey = $this->cookieKey();
+        $sessionKey = $sessionKey === null ? $this->cookieKey() : (strlen($sessionKey) === self::KEY_BYTES ? $sessionKey : null);
         if ($sessionKey === null) {
             return null;
         }

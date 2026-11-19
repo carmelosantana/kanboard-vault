@@ -53,8 +53,9 @@ class Rekeyer extends Base
         });
     }
 
-    // Processes up to $max queue items the holder has a key row for, in one exclusive transaction. Returns the
-    // number of queue rows cleared (re-keyed, stale or orphaned); items the holder can't open stay queued.
+    // Clears up to $max queue items the holder has a key row for, in one exclusive transaction. Returns the number
+    // of queue rows cleared (re-keyed, stale or orphaned). Items the holder can't re-key stay queued and are skipped
+    // (T7 minor), so they can't block the rest; at most MAX_DRAIN items are examined per call.
     public function drainQueue(int $holderId, #[\SensitiveParameter] string $holderSk, int $max = 50): int
     {
         $max = max(1, min(self::MAX_DRAIN, $max));
@@ -63,15 +64,27 @@ class Rekeyer extends Base
             if ($this->currentPrincipal($db, $holderId, $holderSk) === null) {
                 throw new VaultException('not_found');
             }
-            $items = $db->fetchAll(
-                'SELECT q.object_type, q.object_id FROM vault_rekey_queue q WHERE EXISTS (SELECT 1 FROM vault_keys k'
-                .' WHERE k.object_type = q.object_type AND k.object_id = q.object_id AND k.principal_id = ?) ORDER BY q.id LIMIT '.$max,
-                [$holderId]
-            );
             $cleared = 0;
-            foreach ($items as $item) {
-                if ($this->processQueued($db, (string) $item['object_type'], (int) $item['object_id'], $holderId, $holderSk)) {
-                    $cleared++;
+            $examined = 0;
+            $lastId = 0;
+            while ($cleared < $max && $examined < self::MAX_DRAIN) {
+                $items = $db->fetchAll(
+                    'SELECT q.id, q.object_type, q.object_id FROM vault_rekey_queue q WHERE q.id > ? AND EXISTS (SELECT 1 FROM vault_keys k'
+                    .' WHERE k.object_type = q.object_type AND k.object_id = q.object_id AND k.principal_id = ?) ORDER BY q.id LIMIT '.$max,
+                    [$lastId, $holderId]
+                );
+                if ($items === []) {
+                    break;
+                }
+                foreach ($items as $item) {
+                    $lastId = (int) $item['id'];
+                    $examined++;
+                    if ($this->processQueued($db, (string) $item['object_type'], (int) $item['object_id'], $holderId, $holderSk)) {
+                        $cleared++;
+                    }
+                    if ($cleared >= $max || $examined >= self::MAX_DRAIN) {
+                        break 2;
+                    }
                 }
             }
             return $cleared;

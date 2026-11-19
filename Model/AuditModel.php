@@ -20,7 +20,7 @@ use Throwable;
 //
 // actor_kind and via: a column given by the caller wins, then this model's context (constructor), then the
 // process: a CLI process is cli/cli; a web request is api for JSON-RPC, ui otherwise, and the actor is an agent
-// when its principal is one, human otherwise.
+// when its principal is one, the system when there is no actor (R39), human otherwise.
 class AuditModel extends Base
 {
     private const SESSION = ['actor_user_id', 'ip_trunc', 'ua_family'];
@@ -55,10 +55,15 @@ class AuditModel extends Base
         'bad_vault_key' => ['actor_user_id', 'ip_trunc'],
         'org_recovery' => ['target_user_id'],
         'policy_change' => ['actor_user_id'],
+        // R37 (spec addendum at T25): an object the rotation sweep keeps for an integrity fault, so it is
+        // operator-visible (R31's safety relies on it).
+        'integrity_error' => self::OBJECT,
     ];
     // The columns an action may fill; id, created_at, action, actor_kind and via are on every row.
     public const COLUMNS = ['actor_user_id', 'object_type', 'object_id', 'share_hash', 'target_user_id', 'ip_trunc', 'ua_family', 'count'];
-    public const ACTOR_KINDS = ['human', 'agent', 'public', 'cli'];
+    // 'system' (R39, spec addendum at T25): an action with no actor in a web request, such as a share expiry or a
+    // rate-limit summary written by the opportunistic purge.
+    public const ACTOR_KINDS = ['human', 'agent', 'public', 'cli', 'system'];
     public const VIAS = ['ui', 'api', 'cli'];
     // "App admins see policy_change, org_recovery and aggregate counts."
     public const ADMIN_ACTIONS = ['policy_change', 'org_recovery'];
@@ -219,13 +224,11 @@ class AuditModel extends Base
         if ($via === 'cli') {
             return 'cli';
         }
-        if ($actorId !== null) {
-            $p = $this->vdb()->fetchOne('SELECT kind FROM vault_principals WHERE user_id = ?', [$actorId]);
-            if ($p !== null && $p['kind'] === 'agent') {
-                return 'agent';
-            }
+        if ($actorId === null) {
+            return 'system';
         }
-        return 'human';
+        $p = $this->vdb()->fetchOne('SELECT kind FROM vault_principals WHERE user_id = ?', [$actorId]);
+        return $p !== null && $p['kind'] === 'agent' ? 'agent' : 'human';
     }
 
     // The viewer's agents by Agents' roster, behind a class_exists guard; none when Agents is absent or its table

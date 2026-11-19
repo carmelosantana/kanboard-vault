@@ -1,7 +1,7 @@
 <?php
 namespace Kanboard\Plugin\Vault\Schema;
 
-const VERSION = 2;
+const VERSION = 3;
 
 // Binary values are base64 TEXT (entry and group ciphertext LONGTEXT); timestamps are Unix seconds.
 // Ownership references to users(id) cascade; provenance columns (created_by, granted_by, audit actor/target) are SET NULL.
@@ -230,6 +230,28 @@ function version_2($pdo)
     drop_user_fk($pdo, 'vault_keys', 'principal_id');
     $pdo->exec('DELETE FROM vault_keys WHERE principal_id NOT IN (SELECT user_id FROM vault_principals)');
     $pdo->exec('ALTER TABLE vault_keys ADD CONSTRAINT vault_keys_principal_fk FOREIGN KEY(principal_id) REFERENCES vault_principals(user_id) ON DELETE CASCADE');
+}
+
+// R39: actor_kind gains 'system'; R32: vault_rotations keeps the sweep cursor (see Sqlite.php version_3).
+// MySQL names a column CHECK itself (vault_audit_chk_N) and MariaDB names it after the column, so the CHECK on
+// actor_kind is found by its clause and dropped by name. It throws if there is none, rather than leaving the old
+// list or no list in place. MODIFY drops MariaDB's column-level CHECK too.
+function version_3($pdo)
+{
+    $stmt = $pdo->prepare("SELECT CONSTRAINT_NAME FROM information_schema.CHECK_CONSTRAINTS
+        WHERE CONSTRAINT_SCHEMA = DATABASE() AND CHECK_CLAUSE LIKE '%actor_kind%' AND CHECK_CLAUSE LIKE '%human%'");
+    $stmt->execute();
+    $names = $stmt->fetchAll(\PDO::FETCH_COLUMN);
+    if ($names === []) {
+        throw new \RuntimeException('Vault schema v3: the actor_kind CHECK on vault_audit was not found');
+    }
+    foreach ($names as $name) {
+        $pdo->exec('ALTER TABLE vault_audit DROP CONSTRAINT `'.str_replace('`', '', (string) $name).'`');
+    }
+    $pdo->exec('ALTER TABLE vault_audit MODIFY actor_kind VARCHAR(16) NOT NULL');
+    $pdo->exec("ALTER TABLE vault_audit ADD CONSTRAINT vault_audit_actor_kind_chk CHECK (actor_kind IN ('human', 'agent', 'public', 'cli', 'system'))");
+
+    $pdo->exec('ALTER TABLE vault_rotations ADD COLUMN sweep_type VARCHAR(16) NULL, ADD COLUMN sweep_id INT NULL');
 }
 
 function drop_user_fk($pdo, string $table, string $column): void

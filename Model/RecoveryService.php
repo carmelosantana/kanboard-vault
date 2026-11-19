@@ -141,12 +141,16 @@ class RecoveryService extends Base
         }
         $limiter = new RateLimiter($this->container, null, $this->clock);
         $secret = $kek = $sk1 = $sk2 = $ikm = $newKek = '';
+        $guess = null;
+        $streak = 0;
         try {
             if ($limiter->backoffSeconds(self::userBucket($userId)) > 0) {
+                (new RateLimitAudit($this->container, $this->clock))->note($userId, $ip);
                 throw new VaultException('rate_limited');
             }
             $ipBucket = self::ipBucket($ip);
             if (! $limiter->consume($ipBucket, self::IP_FAILURES, self::IP_FAILURES / self::IP_WINDOW)) {
+                (new RateLimitAudit($this->container, $this->clock))->note(null, $ip);
                 throw new VaultException('rate_limited');
             }
             $wrap = $this->recoveryWrap($userId);
@@ -162,7 +166,8 @@ class RecoveryService extends Base
             if ($sk1 === '') {
                 // Audited as unlock_failed (the table has no recovery failure) and counted toward the five-failure
                 // notice with the unlock failures.
-                (new FailedGuess($this->container, $limiter, $this->clock))->record($userId, self::userBucket($userId), $ip);
+                $guess = new FailedGuess($this->container, $limiter, $this->clock);
+                $streak = $guess->record($userId, self::userBucket($userId), $ip);
                 throw new VaultException('unlock_failed');
             }
             $this->lock()->exclusive(function () use ($limiter, $userId): void {
@@ -184,7 +189,11 @@ class RecoveryService extends Base
                     throw new VaultException('unlock_failed');
                 }
                 $sk2 = $this->replaceFactors($db, $userId, $sk1, $newKek, $salt, []);
-                ($this->audit)('recovery_used', ['actor_user_id' => $userId, 'ip_trunc' => (new ClientIp($this->container))->truncate($ip) ?: null]);
+                ($this->audit)('recovery_used', [
+                    'actor_user_id' => $userId,
+                    'ip_trunc' => (new ClientIp($this->container))->truncate($ip) ?: null,
+                    'ua_family' => UaFamily::fromRequest($this->request),
+                ]);
                 return $sk2;
             });
             return $this->completeContained($userId, $sk1, $sk2);
@@ -196,6 +205,8 @@ class RecoveryService extends Base
             sodium_memzero($ikm);
             sodium_memzero($newKek);
             $slot->release();
+            // R39: the five-failure email goes once the slot is free.
+            $guess?->notifyIfDue($userId, $streak);
         }
     }
 

@@ -455,6 +455,26 @@ class GrantTest extends Base
         $this->assertSame('q', $this->title($this->dave, $e, $this->daveSk));
     }
 
+    // T7 minor: drainQueue skips items this holder can't re-key and goes on to the ones it can, so one stuck item
+    // can't block the holder's queue. Kills: the LIMIT taken over every item the holder has a key row on (the
+    // expired item first in the queue would use up max = 1 and nothing would be cleared).
+    public function testDrainContinuesPastItemsTheHolderCannotRekey(): void
+    {
+        $g1 = $this->group(null, 'g1');
+        $g2 = $this->group(null, 'g2');
+        $e1 = $this->entry($g1, 'stuck');
+        $e2 = $this->entry($g2, 'ok');
+        $this->grant('group', $g1, $this->carol, 'read', $this->now + 5);
+        $this->grant('group', $g2, $this->carol);
+        $this->pdo()->prepare("INSERT INTO vault_rekey_queue (object_type, object_id, expected_key_epoch, created_at) VALUES ('entry', ?, 1, ?), ('entry', ?, 1, ?)")
+            ->execute([$e1, $this->now, $e2, $this->now]);
+        $this->now += 5;
+        $this->assertSame(1, $this->rekeyer()->drainQueue($this->carol, $this->carolSk, 1));
+        $this->assertSame(1, $this->queued('entry', $e1), 'the item carol cannot re-key stays');
+        $this->assertNull($this->queued('entry', $e2));
+        $this->assertSame(2, $this->epoch('entry', $e2));
+    }
+
     // The highest live permission wins across sources. Kills: first-source-wins and direct-only resolution.
     public function testHighestPermissionWins(): void
     {

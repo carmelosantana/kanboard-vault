@@ -89,7 +89,7 @@ class SchemaTest extends Base
 
         $src = file_get_contents(__DIR__.'/../Schema/Sqlite.php');
         $this->assertSame(0, preg_match('/\bid INTEGER PRIMARY KEY,/', $src), 'every SQLite surrogate key is AUTOINCREMENT');
-        $this->assertSame(9, substr_count($src, 'id INTEGER PRIMARY KEY AUTOINCREMENT'), 'v1 tables plus the v2 rebuild of vault_grants');
+        $this->assertSame(10, substr_count($src, 'id INTEGER PRIMARY KEY AUTOINCREMENT'), 'v1 tables plus the v2 rebuild of vault_grants and the v3 rebuild of vault_audit');
     }
 
     // R26: deleting a user no longer deletes the principal (the purge must first turn its grants and key rows into
@@ -194,11 +194,11 @@ class SchemaTest extends Base
         $tables = array_merge(['vault_meta'], array_keys(self::ROWS));
         foreach (['Sqlite', 'Mysql', 'Postgres'] as $d) {
             $src = file_get_contents(__DIR__."/../Schema/$d.php");
-            $this->assertStringContainsString('const VERSION = 2;', $src, $d);
+            $this->assertStringContainsString('const VERSION = 3;', $src, $d);
             $this->assertStringContainsString('function version_1($pdo)', $src, $d);
             $this->assertStringContainsString('function version_2($pdo)', $src, $d);
             // Comments mention constraints too; count code only.
-            [$v1, $v2] = explode('function version_2($pdo)', preg_replace('#^\s*//.*$#m', '', $src));
+            [$v1, $v2] = explode('function version_2($pdo)', explode('function version_3($pdo)', preg_replace('#^\s*//.*$#m', '', $src))[0]);
             foreach ($tables as $t) {
                 $this->assertStringContainsString("CREATE TABLE IF NOT EXISTS $t (", $v1, "$d: $t");
             }
@@ -219,5 +219,62 @@ class SchemaTest extends Base
         $this->assertStringContainsString("REFERENCED_TABLE_NAME = 'users'", file_get_contents(__DIR__.'/../Schema/Mysql.php'));
         $mysql = file_get_contents(__DIR__.'/../Schema/Mysql.php');
         $this->assertSame(2, substr_count($mysql, 'ciphertext LONGTEXT NOT NULL'), 'entry and group ciphertext are LONGTEXT');
+    }
+
+    // v3 (R39, R32): actor_kind gains 'system' (an actor-less action in a web request) and vault_rotations keeps
+    // the sweep cursor. A v2 install keeps its audit rows, ids and AUTOINCREMENT counter. Kills: the CHECK left
+    // without 'system' (the insert throws), the cursor columns missing, the rebuild dropping rows or the counter.
+    public function testVersion3AllowsSystemActorAndKeepsTheSweepCursor(): void
+    {
+        require_once __DIR__.'/../Schema/Sqlite.php';
+        $pdo = $this->container['db']->getConnection();
+        \Kanboard\Plugin\Vault\Schema\version_1($pdo);
+        \Kanboard\Plugin\Vault\Schema\version_2($pdo);
+        $db = $this->container['db'];
+        foreach ([1, 2, 3] as $i) {
+            $db->table('vault_audit')->insert(['created_at' => $i] + self::ROWS['vault_audit']);
+        }
+        $db->table('vault_audit')->eq('id', 3)->remove();
+        $refused = false;
+        try {
+            $pdo->exec("INSERT INTO vault_audit (created_at, actor_kind, action, via) VALUES (1, 'system', 'share_expire', 'ui')");
+        } catch (\PDOException) {
+            $refused = true;
+        }
+        $this->assertTrue($refused, 'control: v2 refuses actor_kind system');
+
+        \Kanboard\Plugin\Vault\Schema\version_3($pdo);
+
+        $this->assertSame([1, 2], array_map('intval', $db->table('vault_audit')->asc('id')->findAllByColumn('id')));
+        $pdo->exec("INSERT INTO vault_audit (created_at, actor_kind, action, via) VALUES (1, 'system', 'share_expire', 'ui')");
+        $this->assertSame(4, (int) $pdo->lastInsertId(), 'the AUTOINCREMENT counter survived the rebuild');
+        $bad = false;
+        try {
+            $pdo->exec("INSERT INTO vault_audit (created_at, actor_kind, action, via) VALUES (1, 'robot', 'share_expire', 'ui')");
+        } catch (\PDOException) {
+            $bad = true;
+        }
+        $this->assertTrue($bad, 'the CHECK still refuses unknown kinds');
+        $cols = array_column($pdo->query('PRAGMA table_info(vault_rotations)')->fetchAll(\PDO::FETCH_ASSOC), 'name');
+        $this->assertContains('sweep_type', $cols);
+        $this->assertContains('sweep_id', $cols);
+        $fks = $pdo->query('PRAGMA foreign_key_list(vault_audit)')->fetchAll(\PDO::FETCH_ASSOC);
+        $this->assertCount(2, array_filter($fks, static fn ($f) => $f['table'] === 'users' && $f['on_delete'] === 'SET NULL'));
+    }
+
+    // The three dialects declare the same v3 change. MySQL and Postgres drop the old CHECK by name and fail loudly
+    // (no IF EXISTS) if it isn't there. Real-DB runs belong to T24/T25 (R35).
+    public function testAllThreeDialectsDeclareVersion3(): void
+    {
+        foreach (['Sqlite', 'Mysql', 'Postgres'] as $d) {
+            $src = preg_replace('#^\s*//.*$#m', '', file_get_contents(__DIR__."/../Schema/$d.php"));
+            $v3 = explode('function version_3($pdo)', $src)[1] ?? '';
+            $this->assertStringContainsString("'human', 'agent', 'public', 'cli', 'system'", $v3, $d);
+            $this->assertStringContainsString('sweep_type', $v3, $d);
+            $this->assertStringContainsString('sweep_id', $v3, $d);
+            if ($d !== 'Sqlite') {
+                $this->assertStringNotContainsString('IF EXISTS', $v3, "$d drops the old CHECK loudly");
+            }
+        }
     }
 }

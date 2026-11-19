@@ -70,20 +70,24 @@ class RotationService extends Base
     }
 
     // "Rotate my keys": the same passphrase, a new keypair. The passphrase is checked first.
-    public function requestManual(int $userId, #[\SensitiveParameter] string $sk, #[\SensitiveParameter] string $passphrase): string
+    public function requestManual(int $userId, #[\SensitiveParameter] string $sk, #[\SensitiveParameter] string $passphrase, string $ip): string
     {
-        return $this->rotateWithPassphrase($userId, $sk, $passphrase, $passphrase);
+        return $this->rotateWithPassphrase($userId, $sk, $passphrase, $passphrase, $ip);
     }
 
     // The passphrase ceremony (passphrase change, Rotate my keys). The surviving factor is the new passphrase,
     // under a fresh salt at the default KDF parameters. The current passphrase must open the principal's active
     // passphrase wrap to exactly $sk, so a hijacked unlocked session can't change it, and a mistyped one can't
-    // lock the user out; failures count against the unlock back-off. Principals with other kinds of wrap
-    // (hardware keys, recovery, agent) are refused here: their ceremonies must present those factors (T9/T20).
+    // lock the user out. It is throttled like an unlock, with the caller's IP ($ip, from ClientIp): the principal's
+    // back-off and the per-IP bucket are checked before any Argon2; a wrong current passphrase is a failed guess;
+    // a correct one resets the back-off and the failure streak and gives the IP token back (T8/T10 carries).
+    // Principals with other kinds of wrap (hardware keys, recovery, agent) are refused here: their ceremonies must
+    // present those factors (T9/T20).
     // Only failures before start() commits are thrown. After it, the change has happened (the old passphrase
-    // opens nothing), so the rest of the rotation is contained as at unlock (R33): ROTATED when it finished,
-    // PENDING when it stopped (logged with the exception class only; the next unlock or request continues it).
-    public function rotateWithPassphrase(int $userId, #[\SensitiveParameter] string $sk, #[\SensitiveParameter] string $currentPassphrase, #[\SensitiveParameter] string $newPassphrase): string
+    // opens nothing), so the rest of the rotation runs after the Argon2 slot is released (R32) and is contained as
+    // at unlock (R33): ROTATED when it finished, PENDING when it stopped (logged with the exception class only; the
+    // next unlock or request continues it).
+    public function rotateWithPassphrase(int $userId, #[\SensitiveParameter] string $sk, #[\SensitiveParameter] string $currentPassphrase, #[\SensitiveParameter] string $newPassphrase, string $ip): string
     {
         $slot = $this->slots->acquire($userId);
         if ($slot === null) {
@@ -91,8 +95,16 @@ class RotationService extends Base
         }
         $limiter = new RateLimiter($this->container, null, $this->clock);
         $ikm = $kek = $opened = $sk2 = '';
+        $guess = null;
+        $streak = 0;
         try {
             if ($limiter->backoffSeconds(UnlockService::userBucket($userId)) > 0) {
+                (new RateLimitAudit($this->container, $this->clock))->note($userId, $ip);
+                throw new VaultException('rate_limited');
+            }
+            $ipBucket = UnlockService::ipBucket($ip);
+            if (! $limiter->consume($ipBucket, UnlockService::IP_FAILURES, UnlockService::IP_FAILURES / UnlockService::IP_WINDOW)) {
+                (new RateLimitAudit($this->container, $this->clock))->note(null, $ip);
                 throw new VaultException('rate_limited');
             }
             $db = $this->vdb();
@@ -126,11 +138,17 @@ class RotationService extends Base
                 $opened = '';
             }
             if ($opened === '' || ! hash_equals($opened, $sk)) {
-                (new FailedGuess($this->container, $limiter, $this->clock))->record($userId, UnlockService::userBucket($userId), '');
+                $guess = new FailedGuess($this->container, $limiter, $this->clock);
+                $streak = $guess->record($userId, UnlockService::userBucket($userId), $ip);
                 throw new VaultException('unlock_failed');
             }
             sodium_memzero($ikm);
             sodium_memzero($kek);
+            $this->lock()->exclusive(function () use ($limiter, $userId): void {
+                $limiter->recordSuccess(UnlockService::userBucket($userId));
+                FailedGuess::resetStreak($this->vdb(), $userId);
+            });
+            $limiter->refund($ipBucket, UnlockService::IP_FAILURES, UnlockService::IP_FAILURES / UnlockService::IP_WINDOW);
 
             $newSalt = random_bytes(SODIUM_CRYPTO_PWHASH_SALTBYTES);
             $ikm = ($this->argon2)($newPassphrase, $newSalt, Kdf::DEFAULT_OPS, Kdf::DEFAULT_MEM);
@@ -142,19 +160,45 @@ class RotationService extends Base
                 'kdf_ops' => Kdf::DEFAULT_OPS,
                 'kdf_mem' => Kdf::DEFAULT_MEM,
             ]]);
-            try {
-                $this->complete($userId, $sk, $sk2);
-                return self::ROTATED;
-            } catch (Throwable $e) {
-                $this->logger->warning('Vault: key rotation for user '.$userId.' started but could not complete and stays pending ('.get_class($e).')');
-                return self::PENDING;
-            }
+        } catch (Throwable $e) {
+            sodium_memzero($sk2);
+            throw $e;
         } finally {
             sodium_memzero($ikm);
             sodium_memzero($kek);
             sodium_memzero($opened);
-            sodium_memzero($sk2);
             $slot->release();
+            // R39: the five-failure email goes once the slot is free.
+            $guess?->notifyIfDue($userId, $streak);
+        }
+        try {
+            $this->complete($userId, $sk, $sk2);
+            return self::ROTATED;
+        } catch (Throwable $e) {
+            $this->logger->warning('Vault: key rotation for user '.$userId.' started but could not complete and stays pending ('.get_class($e).')');
+            return self::PENDING;
+        } finally {
+            sodium_memzero($sk2);
+        }
+    }
+
+    // R32/R33: continues a rotation for at most $maxBatches sweep batches, then finishes it when no old-generation
+    // row is left. Returns the objects still left (0: the rotation is finished, or there was none). Callers hold no
+    // Argon2 slot; unlock and Housekeeping use it so a large rotation spreads over requests.
+    public function advance(int $userId, #[\SensitiveParameter] string $sk1, #[\SensitiveParameter] string $sk2, int $maxBatches): int
+    {
+        $left = $this->sweep($userId, $sk1, $sk2, $this->batch, max(1, $maxBatches));
+        if ($left > 0) {
+            return $left;
+        }
+        try {
+            $this->finish($userId);
+            return 0;
+        } catch (VaultException $e) {
+            if ($e->errorCode() === 'rotation_incomplete') {
+                return 1;
+            }
+            throw $e;
         }
     }
 
@@ -250,35 +294,48 @@ class RotationService extends Base
         }
     }
 
-    // Phase sweep, in batches of $batch objects, one exclusive transaction each, one pass in (type, id) order
-    // until no object is left or $maxBatches batches ran. Returns the number of objects still holding an
-    // old-generation row for the principal (0 also when no rotation is in progress). Objects kept for an
-    // integrity fault during this call are listed by integrityErrors().
+    // Phase sweep, in batches of $batch objects, one exclusive transaction each, in (type, id) order from the
+    // rotation's stored cursor (sweep_type, sweep_id), until no object is left or $maxBatches batches ran. The cursor
+    // is saved with each batch, so bounded sweeps make progress past objects kept for an integrity fault (R32);
+    // when it reaches the end with objects still left it starts over once per call. Returns the number of objects
+    // still holding an old-generation row for the principal (0 also when no rotation is in progress). Objects kept
+    // for an integrity fault during this call are listed by integrityErrors() and audited (R37).
     public function sweep(int $userId, #[\SensitiveParameter] string $sk1, #[\SensitiveParameter] string $sk2, int $batch = self::DEFAULT_BATCH, ?int $maxBatches = null): int
     {
         $batch = max(1, $batch);
         $this->integrityErrors = [];
-        $cursor = null;
-        for ($k = 0; ; $k++) {
+        $restarted = false;
+        $k = 0;
+        while (true) {
             $t0 = microtime(true);
-            $result = $this->lock()->exclusive(fn (): ?array => $this->sweepBatch($userId, $sk1, $sk2, $batch, $cursor));
+            $result = $this->lock()->exclusive(fn (): ?array => $this->sweepBatch($userId, $sk1, $sk2, $batch));
             if ($result === null) {
                 return 0;
             }
-            [$processed, $left, $cursor, $faults] = $result;
-            array_push($this->integrityErrors, ...$faults);
+            [$processed, $left, $fromStart, $faults] = $result;
+            foreach ($faults as $f) {
+                if (! in_array($f, $this->integrityErrors, true)) {
+                    $this->integrityErrors[] = $f;
+                }
+            }
             if ($processed === 0) {
+                // The cursor was past the last object (sweepBatch reset it): go round once more from the start.
+                if ($left > 0 && ! $fromStart && ! $restarted) {
+                    $restarted = true;
+                    continue;
+                }
                 return $left;
             }
             $this->fire('batch', $k, microtime(true) - $t0);
-            if ($left === 0 || ($maxBatches !== null && $k + 1 >= $maxBatches)) {
+            $k++;
+            if ($left === 0 || ($maxBatches !== null && $k >= $maxBatches)) {
                 return $left;
             }
         }
     }
 
     // The objects the last sweep() kept at the old generation because their DEK opens but their payload or
-    // crypto_v doesn't (R31). For T10 to audit as integrity events.
+    // crypto_v doesn't (R31). Each is audited as integrity_error by the sweep (R37).
     /** @return list<array{0:string,1:int}> */
     public function integrityErrors(): array
     {
@@ -372,9 +429,9 @@ class RotationService extends Base
         }
     }
 
-    // One sweep batch inside the exclusive lock: [processed, left, cursor, integrity faults], or null without a
-    // rotation. The bridge must open with sk2 to exactly sk1, or the batch aborts (rolls back) before any change.
-    private function sweepBatch(int $userId, #[\SensitiveParameter] string $sk1, #[\SensitiveParameter] string $sk2, int $batch, ?array $cursor): ?array
+    // One sweep batch inside the exclusive lock, from the stored cursor: [processed, left, started at the beginning,
+    // integrity faults], or null without a rotation. With nothing past the cursor it resets the cursor. The bridge must open with sk2 to exactly sk1, or the batch aborts (rolls back) before any change.
+    private function sweepBatch(int $userId, #[\SensitiveParameter] string $sk1, #[\SensitiveParameter] string $sk2, int $batch): ?array
     {
         $db = $this->vdb();
         $rekeyer = $this->rekeyer();
@@ -402,6 +459,9 @@ class RotationService extends Base
             throw new RuntimeException('Vault: the rotation bridge does not open to the current key; the sweep stops');
         }
         $gen = $principal['key_gen'];
+        $stored = $db->fetchOne('SELECT sweep_type, sweep_id FROM vault_rotations WHERE user_id = ?', [$userId]);
+        $cursor = $stored === null || $stored['sweep_type'] === null ? null : [(string) $stored['sweep_type'], (int) $stored['sweep_id']];
+        $fromStart = $cursor === null;
         $after = $cursor === null ? '' : ' AND (object_type > ? OR (object_type = ? AND object_id > ?))';
         $objects = $db->fetchAll(
             'SELECT DISTINCT object_type, object_id FROM vault_keys WHERE principal_id = ? AND principal_key_gen = ?'.$after
@@ -413,11 +473,31 @@ class RotationService extends Base
             $cursor = [(string) $o['object_type'], (int) $o['object_id']];
             if (! $this->sweepObject($db, $cursor[0], $cursor[1], $userId, $gen, $sk1, $sk2)) {
                 $faults[] = $cursor;
+                $this->auditIntegrityError($db, $userId, $cursor[0], $cursor[1]);
             }
         }
+        if ($objects === []) {
+            $cursor = null;
+        }
         $left = $this->oldGenerationLeft($db, $userId, $gen);
-        $db->execute('UPDATE vault_rotations SET phase = ? WHERE user_id = ?', [$left === 0 ? 'finish' : 'sweep', $userId]);
-        return [count($objects), $left, $cursor, $faults];
+        $db->execute(
+            'UPDATE vault_rotations SET phase = ?, sweep_type = ?, sweep_id = ? WHERE user_id = ?',
+            [$left === 0 ? 'finish' : 'sweep', $cursor[0] ?? null, $cursor[1] ?? null, $userId]
+        );
+        return [count($objects), $left, $fromStart, $faults];
+    }
+
+    // R37: an object kept for an integrity fault is audited as integrity_error (actor, object), at most once per
+    // object and actor a day however often bounded sweeps pass it. Inside the batch's transaction.
+    private function auditIntegrityError(VaultDb $db, int $userId, string $type, int $id): void
+    {
+        $seen = $db->fetchOne(
+            "SELECT id FROM vault_audit WHERE action = 'integrity_error' AND actor_user_id = ? AND object_type = ? AND object_id = ? AND created_at > ?",
+            [$userId, $type, $id, $this->now() - 86400]
+        );
+        if ($seen === null) {
+            AuditModel::of($this->container, $this->clock)->record('integrity_error', ['actor_user_id' => $userId, 'object_type' => $type, 'object_id' => $id]);
+        }
     }
 
     // Re-checks live access, then re-keys the object with the rotating principal as the holder (sk2 reaches both
