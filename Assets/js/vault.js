@@ -101,6 +101,11 @@
     var button = form.querySelector('button[type="submit"]');
     form.addEventListener('submit', function (ev) {
       ev.preventDefault();
+      // No submit button (the unlock form of a user with two or more keys): Enter must not post a passphrase-only
+      // unlock, which would count as a failed guess. vault-webauthn.js turns it into the key ceremony.
+      if (!form.querySelector('button[type="submit"]')) {
+        return;
+      }
       var data = {};
       Array.prototype.forEach.call(form.querySelectorAll('input[name]'), function (input) {
         data[input.name] = input.value;

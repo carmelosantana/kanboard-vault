@@ -40,11 +40,14 @@ function credential(id, { prf = [9, 9, 9], enabled = true, kind = 'get' } = {}) 
   };
 }
 
-function load(page, { api, create, get, confirm = () => true, extra = '' } = {}) {
+function load(page, { api, create, get, confirm = () => true, extra = '', withVaultJs = false } = {}) {
   const doc = new Doc();
   const calls = [];
   const browser = [];
-  parseInto(doc, doc.body, `<div id="vault-app" data-messages='${JSON.stringify(MESSAGES)}'></div>${template(page)}${extra}`);
+  const fetches = [];
+  // withVaultJs: the page's real vault.js loads first (as app.php does) and posts through fetch.
+  const app = withVaultJs ? ` data-csrf="t" data-endpoints='{"unlock":"/vault/unlock","hw_challenge":"/vault/hw/challenge"}'` : '';
+  parseInto(doc, doc.body, `<div id="vault-app"${app} data-messages='${JSON.stringify(MESSAGES)}'></div>${template(page)}${extra}`);
   const window = {
     document: doc,
     btoa,
@@ -59,11 +62,13 @@ function load(page, { api, create, get, confirm = () => true, extra = '' } = {})
     },
     location: { reload: () => calls.push({ action: 'reload' }) },
     KBVault: { api: (action, body) => { calls.push({ action, body: JSON.parse(JSON.stringify(body)) }); return Promise.resolve(api(action, body)); } },
+    URLSearchParams,
+    fetch: (url, opts) => { fetches.push({ url, body: String(opts.body) }); return Promise.resolve({ json: () => Promise.resolve({ ok: false, reason: 'failed' }) }); },
   };
   const ctx = vm.createContext({ window, Uint8Array, Promise, Math });
-  const files = page === 'security' ? ['vault-webauthn.js', 'vault-security.js'] : ['vault-webauthn.js'];
+  const files = page === 'security' ? ['vault-webauthn.js', 'vault-security.js'] : withVaultJs ? ['vault.js', 'vault-webauthn.js'] : ['vault-webauthn.js'];
   for (const f of files) vm.runInContext(readFileSync(path(`Assets/js/${f}`), 'utf8'), ctx, { filename: f });
-  return { doc, calls, browser, window };
+  return { doc, calls, browser, window, fetches };
 }
 
 const K1 = { id: b64u([1, 2, 3]), label: 'Desk', prf_salt: b64u([4, 5, 6]) };
@@ -120,6 +125,31 @@ test('unlock asks for a fresh unlock challenge and evaluates each key with its o
   await flush(20);
   assert.deepEqual(second.calls.map((c) => c.action), ['hw_challenge']);
   assert.equal(second.doc.querySelector('[data-vault-form="unlock"]').querySelector('.vault-error').textContent, 'No PRF.');
+});
+
+// Review M1: with two or more keys the unlock form has no submit button, but Enter in its one field still submits it
+// (implicit submission). That must start the key ceremony, never post a passphrase-only unlock (a counted failure).
+// Kills: vault.js posting a form with no submit button; Enter not routed to the key ceremony; the native submit left
+// to happen.
+test('Enter in the two-key unlock form runs the key ceremony and posts no passphrase-only unlock', async () => {
+  const { doc, fetches } = load('locked', { withVaultJs: true, get: () => credential([1, 2, 3], { prf: [42] }) });
+  const form = doc.querySelector('[data-vault-form="unlock"]');
+  const submit = form.querySelector('button[type="submit"]');
+  submit.parentNode.removeChild(submit); // as rendered for hw_keys >= 2
+  form.querySelector('input[name="passphrase"]').value = 'my vault passphrase';
+  const ev = form.dispatch('submit');
+  await flush(20);
+  assert.equal(ev.defaultPrevented, true, 'no native submit');
+  assert.deepEqual(fetches.map((f) => f.url), ['/vault/hw/challenge'], 'the ceremony starts; nothing goes to /vault/unlock');
+  assert.match(fetches[0].body, /purpose=unlock/);
+
+  // One key: the submit button stays and Enter is a passphrase unlock, as before.
+  const one = load('locked', { withVaultJs: true, get: () => credential([1, 2, 3], { prf: [42] }) });
+  const f1 = one.doc.querySelector('[data-vault-form="unlock"]');
+  f1.querySelector('input[name="passphrase"]').value = 'pw';
+  assert.equal(f1.dispatch('submit').defaultPrevented, true);
+  await flush(20);
+  assert.deepEqual(one.fetches.map((f) => f.url), ['/vault/unlock']);
 });
 
 // Spec / R30: the second key's ceremony asks the new key for its PRF output (with the salt the server gave) and the

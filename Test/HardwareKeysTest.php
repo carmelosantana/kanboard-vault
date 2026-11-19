@@ -611,6 +611,120 @@ class HardwareKeysTest extends Base
         $this->unlockWithKey($b, Fixtures::NEW_PASSPHRASE, null, 'sid-b');
     }
 
+    // Every wrap of alice's as it is stored now: a refused ceremony must leave these byte for byte.
+    private function wrapSnapshot(): array
+    {
+        $s = $this->pdo()->prepare('SELECT id, method, credential_id, status, key_gen, nonce, wrapped_sk FROM vault_wraps WHERE user_id = ? ORDER BY id');
+        $s->execute([$this->alice]);
+        return $s->fetchAll(\PDO::FETCH_ASSOC);
+    }
+
+    // An assertion whose PRF output is not the key's (a salt bug, a different UV choice, a tampered body): the
+    // signature still verifies, since the PRF output isn't signed.
+    private static function wrongPrf(array $assertion): array
+    {
+        $assertion['prf'] = random_bytes(32);
+        return $assertion;
+    }
+
+    // Review I1: the second key deletes the bare passphrase wrap, so key A's PRF must be proved against A's own wrap
+    // first, or a wrong PRF leaves a vault no factor opens. Kills: the passphrase proved with the bare wrap only.
+    public function testWrongPrfForFirstKeyIsRefusedBeforeTheBareWrapGoes(): void
+    {
+        $a = new SoftAuthenticator(-8);
+        $this->register($a, [], Fixtures::PASSPHRASE, null, 'A');
+        $before = $this->wrapSnapshot();
+        $b = new SoftAuthenticator(-7);
+        $reg = $this->registration($b, [$a], 'B');
+        $reg['others'][0] = self::wrongPrf($reg['others'][0]);
+        $this->assertVaultError('unlock_failed', fn () => $this->hw()->registerKey($this->alice, $this->sk, $reg, Fixtures::PASSPHRASE, self::IP));
+        $this->assertSame([1, 1, $before], [$this->keyRows(), $this->keyGen(), $this->wrapSnapshot()], 'nothing changed: A, the bare wrap, key_gen');
+        $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_rotations'));
+        $this->unlockService()->unlock($this->alice, Fixtures::PASSPHRASE, self::IP);
+
+        // The happy path still works.
+        $this->register($b, [$a], Fixtures::PASSPHRASE, null, 'B');
+        $this->assertSame([2, 2, []], [$this->keyRows(), $this->keyGen(), $this->wraps('passphrase')]);
+        $this->unlockWithKey($a, Fixtures::PASSPHRASE, null, 'sid-a');
+        $this->unlockWithKey($b, Fixtures::PASSPHRASE, null, 'sid-b');
+    }
+
+    // Review I1, rotate(): every presented key is proved against its own wrap before start() replaces them all. Kills:
+    // only the first key proved (a wrong PRF for a later key would leave it an unopenable wrap); the one-key case
+    // proved with the bare wrap only.
+    public function testWrongPrfForAnyKeyInRotationIsRefused(): void
+    {
+        $a = new SoftAuthenticator(-8);
+        $this->register($a, [], Fixtures::PASSPHRASE, null, 'A');
+        $before = $this->wrapSnapshot();
+        $this->assertVaultError('unlock_failed', fn () => $this->hw()->rotate($this->alice, $this->sk, Fixtures::PASSPHRASE, '', [self::wrongPrf($this->assertion($a, 'ceremony'))], self::IP));
+        $this->assertSame([1, $before], [$this->keyGen(), $this->wrapSnapshot()], 'one key: nothing changed');
+
+        $b = new SoftAuthenticator(-7);
+        $this->register($b, [$a], Fixtures::PASSPHRASE, null, 'B');
+        $gen = $this->keyGen();
+        $before = $this->wrapSnapshot();
+        foreach ([[false, true], [true, false]] as [$wrongA, $wrongB]) {
+            $list = [$this->assertion($a, 'ceremony'), $this->assertion($b, 'ceremony')];
+            if ($wrongA) {
+                $list[0] = self::wrongPrf($list[0]);
+            }
+            if ($wrongB) {
+                $list[1] = self::wrongPrf($list[1]);
+            }
+            $this->assertVaultError('unlock_failed', fn () => $this->hw()->rotate($this->alice, $this->sk, Fixtures::PASSPHRASE, '', $list, self::IP));
+            $this->assertSame([$gen, $before], [$this->keyGen(), $this->wrapSnapshot()], 'every wrap survives');
+            $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_rotations'));
+        }
+
+        // The happy path still works, and each key opens afterwards.
+        $this->assertSame(RotationService::ROTATED, $this->hw()->rotate($this->alice, $this->sk, Fixtures::PASSPHRASE, '', [$this->assertion($a, 'ceremony'), $this->assertion($b, 'ceremony')], self::IP));
+        $this->assertSame($gen + 1, $this->keyGen());
+        $this->unlockWithKey($a, Fixtures::PASSPHRASE, null, 'sid-a');
+        $this->unlockWithKey($b, Fixtures::PASSPHRASE, null, 'sid-b');
+    }
+
+    // Review M3: between the checks and the write, another request removes one key and adds another (same count,
+    // same key_gen, since removing the last key doesn't rotate). The write must see a different set of credentials
+    // and refuse. Kills: recheck comparing the count only; rotate() writing without a recheck.
+    public function testConcurrentKeySwapIsAConflict(): void
+    {
+        $a = new SoftAuthenticator(-8);
+        $this->register($a, [], Fixtures::PASSPHRASE, null, 'A');
+        $c = new SoftAuthenticator(-7);
+        // The swap runs at Argon2 call $at: after the proofs, before the write.
+        $swap = function (SoftAuthenticator $gone, int $at) use (&$c): callable {
+            $inner = $this->argon();
+            $calls = 0;
+            return function (...$args) use ($inner, &$calls, $at, $gone, &$c) {
+                if (++$calls === $at) {
+                    $this->pdo()->prepare('DELETE FROM vault_wraps WHERE user_id = ? AND credential_id = ?')->execute([$this->alice, $gone->id()]);
+                    $this->pdo()->prepare('DELETE FROM vault_webauthn WHERE user_id = ? AND credential_id = ?')->execute([$this->alice, $gone->id()]);
+                    $this->insertKeyFor($this->alice, $c);
+                }
+                return $inner(...$args);
+            };
+        };
+
+        $b = new SoftAuthenticator(-7);
+        $hw = new HardwareKeys($this->container, $this->slots(), $swap($a, 2), $this->clock(), $this->rotation());
+        $this->assertVaultError('conflict', fn () => $hw->registerKey($this->alice, $this->sk, $this->registration($b, [$a], 'B'), Fixtures::PASSPHRASE, self::IP));
+        $this->assertSame([1, 0], [$this->keyGen(), $this->countRows('SELECT COUNT(*) FROM vault_rotations')], 'no rotation with a deleted key');
+        $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_webauthn WHERE credential_id = ?', [$b->id()]));
+
+        // rotate(): the same swap between the checks and start().
+        $this->pdo()->prepare('DELETE FROM vault_webauthn WHERE user_id = ? AND credential_id = ?')->execute([$this->alice, $c->id()]);
+        $a2 = new SoftAuthenticator(-8);
+        $this->register($a2, [], Fixtures::PASSPHRASE, null, 'A2');
+        $d = new SoftAuthenticator(-8);
+        $this->register($d, [$a2], Fixtures::PASSPHRASE, null, 'D');
+        $gen = $this->keyGen();
+        $c = new SoftAuthenticator(-7);
+        $hw = new HardwareKeys($this->container, $this->slots(), $swap($d, 3), $this->clock(), $this->rotation());
+        $this->assertVaultError('conflict', fn () => $hw->rotate($this->alice, $this->sk, Fixtures::PASSPHRASE, '', [$this->assertion($a2, 'ceremony'), $this->assertion($d, 'ceremony')], self::IP));
+        $this->assertSame([$gen, 0], [$this->keyGen(), $this->countRows('SELECT COUNT(*) FROM vault_rotations')]);
+    }
+
     // R54: a user with hardware keys gives a fresh assertion (with the passphrase) to create a recovery code; without
     // one it's refused, and the assertion must open that key's wrap with the passphrase. Kills: the hook left empty; an
     // assertion accepted without the passphrase check.

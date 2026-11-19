@@ -213,6 +213,13 @@
     }
     var out = form.querySelector('.vault-error');
     var pass = form.querySelector('input[name="passphrase"]');
+    // Two or more keys: the form has no submit button, so Enter (implicit submission) runs the key ceremony.
+    form.addEventListener('submit', function (ev) {
+      if (!form.querySelector('button[type="submit"]')) {
+        ev.preventDefault();
+        button.click();
+      }
+    });
     bindButton(button, out, function () {
       var passphrase = pass ? pass.value : '';
       return assertion('unlock', null).then(function (a) {

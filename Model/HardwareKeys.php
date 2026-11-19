@@ -222,20 +222,21 @@ class HardwareKeys extends Base
                     if (($n === 1 && count($checked['keys']) !== 1) || ($n > 1 && $checked['keys'] === [])) {
                         return ['status' => 'needs_factors'];
                     }
-                    return ['status' => 'ok', 'n' => $n, 'p' => $p, 'reg' => $reg, 'new_count' => $new['count'], 'new_prf' => $assert['prf'], 'others' => $checked['keys']];
+                    return ['status' => 'ok', 'n' => $n, 'ids' => $this->idsIn($db, $userId), 'p' => $p, 'reg' => $reg, 'new_count' => $new['count'], 'new_prf' => $assert['prf'], 'others' => $checked['keys']];
                 });
                 self::raise($v);
                 $n = $v['n'];
+                $ids = $v['ids'];
                 $p = $v['p'];
                 $rawId = $v['reg']['cred']['credential_id'];
                 $credId = self::b64u($rawId);
-                // Prove the passphrase: the bare passphrase wrap while it exists, else an existing key's wrap.
-                $bare = $this->wrapOf($userId, 'passphrase', '', $p['key_gen']);
-                if ($bare !== null || $v['others'] === []) {
-                    $this->proveFactor($userId, $ip, $limiter, $bare, $passphrase, ['passphrase'], $sk, $p['public_key']);
+                // Prove the passphrase: the bare passphrase wrap for the first key; else with an existing key's own
+                // wrap, which proves that key's PRF output too (review I1: the second key's rotation deletes the bare
+                // wrap and re-wraps under the first key's PRF, so a wrong one must be refused before anything changes).
+                if ($v['others'] === []) {
+                    $this->proveFactor($userId, $ip, $limiter, $this->wrapOf($userId, 'passphrase', '', $p['key_gen']), $passphrase, ['passphrase'], $sk, $p['public_key']);
                 } else {
-                    $o = $v['others'][0];
-                    $this->proveFactor($userId, $ip, $limiter, $this->wrapOf($userId, 'passphrase+prf', $o['credential_id'], $p['key_gen']), $passphrase, ['prf', $o['raw_id'], $o['prf']], $sk, $p['public_key']);
+                    $this->proveKey($userId, $ip, $limiter, $v['others'][0], $passphrase, $sk, $p);
                 }
                 $row = [
                     'user_id' => $userId,
@@ -254,9 +255,9 @@ class HardwareKeys extends Base
                     // rotates; the surviving factors are both keys, each with the passphrase.
                     $factors[] = $this->prfFactor($passphrase, $v['others'][0]['credential_id'], $v['others'][0]['raw_id'], $v['others'][0]['prf']);
                     $factors[] = $this->prfFactor($passphrase, $credId, $rawId, $v['new_prf']);
-                    $sk2 = $this->lock()->exclusive(function () use ($userId, $sk, $p, $n, $row, $factors): string {
+                    $sk2 = $this->lock()->exclusive(function () use ($userId, $sk, $p, $ids, $row, $factors): string {
                         $db = $this->vdb();
-                        $this->recheck($db, $userId, $sk, $p['key_gen'], $n, $row['credential_id']);
+                        $this->recheck($db, $userId, $sk, $p['key_gen'], $ids, $row['credential_id']);
                         $db->insert('vault_webauthn', $row);
                         AuditModel::of($this->container, $this->clock)->record('hw_key_add', ['actor_user_id' => $userId]);
                         return $this->rotation()->start($userId, $sk, $factors);
@@ -264,9 +265,9 @@ class HardwareKeys extends Base
                     return;
                 }
                 $kek = $this->prfFactor($passphrase, $credId, $rawId, $v['new_prf']);
-                $this->lock()->exclusive(function () use ($userId, $sk, $p, $n, $row, $kek, $credId): void {
+                $this->lock()->exclusive(function () use ($userId, $sk, $p, $ids, $row, $kek, $credId): void {
                     $db = $this->vdb();
-                    $this->recheck($db, $userId, $sk, $p['key_gen'], $n, $credId);
+                    $this->recheck($db, $userId, $sk, $p['key_gen'], $ids, $credId);
                     $db->insert('vault_webauthn', $row);
                     $this->insertWrap($db, $userId, $sk, $kek, $p['key_gen']);
                     AuditModel::of($this->container, $this->clock)->record('hw_key_add', ['actor_user_id' => $userId]);
@@ -299,6 +300,7 @@ class HardwareKeys extends Base
         $rp = $this->rpBinding();
         $db = $this->vdb();
         $keys = array_column($this->keys($userId), 'credential_id');
+        sort($keys);
         $n = count($keys);
         if (! in_array($credentialId, $keys, true)) {
             throw new VaultException('not_found');
@@ -317,9 +319,9 @@ class HardwareKeys extends Base
             $other = ['credential_id' => $a['credential_id'], 'raw_id' => $out['raw_id'], 'prf' => $a['prf']];
         }
         if ($n - 1 >= self::REQUIRED_KEYS) {
-            $this->lock()->exclusive(function () use ($userId, $credentialId, $n): void {
+            $this->lock()->exclusive(function () use ($userId, $credentialId, $keys): void {
                 $db = $this->vdb();
-                $this->requireState($db, $userId, $n);
+                $this->requireState($db, $userId, $keys);
                 $this->deleteKey($db, $userId, $credentialId);
             });
             return;
@@ -329,18 +331,18 @@ class HardwareKeys extends Base
         }
         $kek = '';
         try {
-            $this->inSlot($userId, $ip, function (RateLimiter $limiter) use ($userId, $credentialId, $sk, $passphrase, $ip, $n, $other, &$kek): void {
+            $this->inSlot($userId, $ip, function (RateLimiter $limiter) use ($userId, $credentialId, $sk, $passphrase, $ip, $keys, $other, &$kek): void {
                 $p = $this->lock()->shared(fn (): array => $this->principal($this->vdb(), $userId, $sk));
                 if ($other !== null) {
                     // One key stays: prove the passphrase with it, then give the passphrase its own wrap back.
-                    $this->proveFactor($userId, $ip, $limiter, $this->wrapOf($userId, 'passphrase+prf', $other['credential_id'], $p['key_gen']), $passphrase, ['prf', $other['raw_id'], $other['prf']], $sk, $p['public_key']);
+                    $this->proveKey($userId, $ip, $limiter, $other, $passphrase, $sk, $p);
                     $kek = $this->passphraseFactor($passphrase);
                 } else {
                     $this->proveFactor($userId, $ip, $limiter, $this->wrapOf($userId, 'passphrase', '', $p['key_gen']), $passphrase, ['passphrase'], $sk, $p['public_key']);
                 }
-                $this->lock()->exclusive(function () use ($userId, $credentialId, $sk, $p, $n, $kek): void {
+                $this->lock()->exclusive(function () use ($userId, $credentialId, $sk, $p, $keys, $kek): void {
                     $db = $this->vdb();
-                    $this->recheck($db, $userId, $sk, $p['key_gen'], $n, null);
+                    $this->recheck($db, $userId, $sk, $p['key_gen'], $keys, null);
                     if (is_array($kek) && $this->wrapIn($db, $userId, 'passphrase', '', $p['key_gen']) === null) {
                         $this->insertWrap($db, $userId, $sk, $kek, $p['key_gen']);
                     }
@@ -380,16 +382,14 @@ class HardwareKeys extends Base
                     if ($all === [] || $presented !== $all) {
                         return ['status' => 'needs_factors'];
                     }
-                    return ['status' => 'ok', 'p' => $p, 'keys' => $checked['keys']];
+                    return ['status' => 'ok', 'p' => $p, 'ids' => $all, 'keys' => $checked['keys']];
                 });
                 self::raise($v);
                 $p = $v['p'];
-                $bare = $this->wrapOf($userId, 'passphrase', '', $p['key_gen']);
-                $first = $v['keys'][0];
-                if ($bare !== null) {
-                    $this->proveFactor($userId, $ip, $limiter, $bare, $passphrase, ['passphrase'], $sk, $p['public_key']);
-                } else {
-                    $this->proveFactor($userId, $ip, $limiter, $this->wrapOf($userId, 'passphrase+prf', $first['credential_id'], $p['key_gen']), $passphrase, ['prf', $first['raw_id'], $first['prf']], $sk, $p['public_key']);
+                // Review I1: start() replaces every wrap, so each key's PRF output is proved against that key's own
+                // wrap first (each proof also proves the passphrase). A wrong one refuses before anything changes.
+                foreach ($v['keys'] as $k) {
+                    $this->proveKey($userId, $ip, $limiter, $k, $passphrase, $sk, $p);
                 }
                 $next = $newPassphrase === '' ? $passphrase : $newPassphrase;
                 if ($newPassphrase !== '') {
@@ -401,7 +401,10 @@ class HardwareKeys extends Base
                 if (count($v['keys']) < self::REQUIRED_KEYS) {
                     $factors[] = $this->passphraseFactor($next);
                 }
-                $sk2 = $this->rotation()->start($userId, $sk, $factors);
+                $sk2 = $this->lock()->exclusive(function () use ($userId, $sk, $p, $v, $factors): string {
+                    $this->recheck($this->vdb(), $userId, $sk, $p['key_gen'], $v['ids'], null);
+                    return $this->rotation()->start($userId, $sk, $factors);
+                });
             });
         } catch (Throwable $e) {
             sodium_memzero($sk2);
@@ -673,24 +676,42 @@ class HardwareKeys extends Base
         return ['public_key' => $pk, 'key_gen' => (int) $row['key_gen']];
     }
 
-    // Before a write: nothing changed since the checks (same key generation, same number of keys, the id unused).
-    private function recheck(VaultDb $db, int $userId, #[\SensitiveParameter] string $sk, int $keyGen, int $n, ?string $newCredentialId): void
+    // Before a write: nothing changed since the checks (same key generation, the same set of credentials, the new id
+    // unused). The set, not the count: a concurrent remove plus add keeps the count (review M3).
+    /** @param list<string> $ids sorted */
+    private function recheck(VaultDb $db, int $userId, #[\SensitiveParameter] string $sk, int $keyGen, array $ids, ?string $newCredentialId): void
     {
         $p = $this->principal($db, $userId, $sk);
-        if ($p['key_gen'] !== $keyGen || $this->countIn($db, $userId) !== $n
+        if ($p['key_gen'] !== $keyGen || $this->idsIn($db, $userId) !== $ids
             || ($newCredentialId !== null && $db->fetchOne('SELECT id FROM vault_webauthn WHERE credential_id = ?', [$newCredentialId]) !== null)) {
             throw new VaultException('conflict');
         }
     }
 
-    private function requireState(VaultDb $db, int $userId, int $n): void
+    /** @param list<string> $ids sorted */
+    private function requireState(VaultDb $db, int $userId, array $ids): void
     {
-        if ($this->countIn($db, $userId) !== $n) {
+        if ($this->idsIn($db, $userId) !== $ids) {
             throw new VaultException('conflict');
         }
         if ($db->fetchOne('SELECT user_id FROM vault_rotations WHERE user_id = ?', [$userId]) !== null) {
             throw new VaultException('rotation_in_progress');
         }
+    }
+
+    /** @return list<string> the user's credential ids, sorted */
+    private function idsIn(VaultDb $db, int $userId): array
+    {
+        $ids = array_map('strval', array_column($db->fetchAll('SELECT credential_id FROM vault_webauthn WHERE user_id = ?', [$userId]), 'credential_id'));
+        sort($ids);
+        return $ids;
+    }
+
+    // The passphrase and this key's PRF output together open this key's own wrap to exactly $sk (one Argon2).
+    /** @param array{credential_id:string,raw_id:string,prf:string} $key @param array{public_key:string,key_gen:int} $p */
+    private function proveKey(int $userId, string $ip, RateLimiter $limiter, #[\SensitiveParameter] array $key, #[\SensitiveParameter] string $passphrase, #[\SensitiveParameter] string $sk, array $p): void
+    {
+        $this->proveFactor($userId, $ip, $limiter, $this->wrapOf($userId, 'passphrase+prf', $key['credential_id'], $p['key_gen']), $passphrase, ['prf', $key['raw_id'], $key['prf']], $sk, $p['public_key']);
     }
 
     private function deleteKey(VaultDb $db, int $userId, string $credentialId): void
