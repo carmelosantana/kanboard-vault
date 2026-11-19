@@ -11,6 +11,7 @@ use Kanboard\Plugin\Vault\Console\OrgRecoverCommand;
 use Kanboard\Plugin\Vault\Console\PurgeCommand;
 use Kanboard\Plugin\Vault\Model\AuditModel;
 use Kanboard\Plugin\Vault\Model\GrantModel;
+use Kanboard\Plugin\Vault\Model\HardwareKeys;
 use Kanboard\Plugin\Vault\Model\Housekeeping;
 use Kanboard\Plugin\Vault\Model\Notifier;
 use Kanboard\Plugin\Vault\Model\ObjectStore;
@@ -45,6 +46,7 @@ class Plugin extends Base
         $this->container['vaultRotation'] = static fn ($c): RotationService => new RotationService($c);
         $this->container['vaultRecovery'] = static fn ($c): RecoveryService => new RecoveryService($c);
         $this->container['vaultShares'] = static fn ($c): ShareModel => new ShareModel($c);
+        $this->container['vaultHardwareKeys'] = static fn ($c): HardwareKeys => new HardwareKeys($c);
 
         // The page and its POST endpoints (spec: UI). No template:layout:js or :css: Vault's own templates load
         // vault.js and vault.css, so nothing of Vault's runs on other pages.
@@ -52,6 +54,13 @@ class Plugin extends Base
         $this->route->addRoute('vault/unlock', 'VaultController', 'unlock', 'Vault');
         $this->route->addRoute('vault/lock', 'VaultController', 'lock', 'Vault');
         $this->route->addRoute('vault/enrol', 'VaultController', 'enrol', 'Vault');
+        // The locked page's "Forgot passphrase?" flow (R52).
+        $this->route->addRoute('vault/recover', 'VaultController', 'recover', 'Vault');
+        // Hardware keys (WebAuthn PRF): the page, challenges, add, remove, rotate with every key, unlock with a key.
+        $this->route->addRoute('vault/hwkeys', 'HardwareKeyController', 'index', 'Vault');
+        foreach (['challenge', 'register', 'remove', 'rotate', 'unlock'] as $action) {
+            $this->route->addRoute('vault/hwkeys/'.$action, 'HardwareKeyController', $action, 'Vault');
+        }
         foreach (['tree', 'list', 'entry', 'field', 'save', 'move', 'delete'] as $action) {
             $this->route->addRoute('vault/'.$action, 'EntryController', $action, 'Vault');
         }

@@ -6,6 +6,7 @@ use Kanboard\Core\Http\Response;
 use InvalidArgumentException;
 use Kanboard\Plugin\Vault\Model\ClientIp;
 use Kanboard\Plugin\Vault\Model\GrantModel;
+use Kanboard\Plugin\Vault\Model\HardwareKeys;
 use Kanboard\Plugin\Vault\Model\ObjectStore;
 use Kanboard\Plugin\Vault\Model\Housekeeping;
 use Kanboard\Plugin\Vault\Model\PrincipalModel;
@@ -24,7 +25,9 @@ use Throwable;
 //                      Cache-Control no-store.
 //   requirePostCsrf()  state changes and secret-returning requests are POSTs carrying Kanboard's CSRF token.
 //   requireUnlocked()  the session's sk (sk2 while a rotation runs), or the locked view / a JSON "locked". It is
-//                      called before any vault lock is taken (R18).
+//                      called before any vault lock is taken (R18). While an admin requires hardware keys and the
+//                      user has fewer than two, only the hardware-key page is open (hw_enrolment_required, or a
+//                      redirect there): spec, Hardware keys → Enrolment.
 //   handle()           runs every action, the page included: the opportunistic purge first, then the action; any
 //                      failure goes to fail() with VaultFailure::map's fixed reason (no stack, no detail; T6/R28).
 //   succeed()/fail()   answer vault.js (X-Requested-With) with JSON, and a native form POST (no JS) with a redirect
@@ -58,7 +61,16 @@ abstract class BaseVaultController extends BaseController
     {
         $sk = $this->vaultSession()->secretKey();
         if ($sk !== null) {
-            return $sk;
+            if ($this->hwEnrolmentExempt() || ! $this->hardwareKeys()->enrolmentRequired($this->userId())) {
+                return $sk;
+            }
+            sodium_memzero($sk);
+            if ($this->request->isAjax()) {
+                $this->fail(403, 'hw_enrolment_required');
+            } else {
+                $this->redirectTo(['HardwareKeyController', 'index'], []);
+            }
+            throw new ResponseSent();
         }
         if ($this->request->isAjax()) {
             $this->fail(401, 'locked');
@@ -67,6 +79,12 @@ abstract class BaseVaultController extends BaseController
             $this->redirectTo(['VaultController', 'index'], []);
         }
         throw new ResponseSent();
+    }
+
+    // The hardware-key page is the one place a user who must still enrol keys may go (HardwareKeyController).
+    protected function hwEnrolmentExempt(): bool
+    {
+        return false;
     }
 
     // Requests that create or return a long-lived secret (a passphrase, a recovery code, an agent's vault key) need HTTPS,
@@ -129,11 +147,17 @@ abstract class BaseVaultController extends BaseController
             }
             $response->json(['ok' => false, 'reason' => $reason], $status);
         } elseif ($this->request->isPost()) {
-            $this->redirectToPage(['vault_error' => $reason]);
+            $this->redirectToPage(['vault_error' => $reason] + $this->failParams());
         } else {
             $this->respond()->html('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Vault</title></head><body><p>'
                 .htmlspecialchars(t('Something went wrong. Try again.'), ENT_QUOTES, 'UTF-8').'</p></body></html>', $status);
         }
+    }
+
+    // Extra fixed parameters a failed native form POST returns with (VaultController: back to the recovery form).
+    protected function failParams(): array
+    {
+        return [];
     }
 
     // The page a native form POST of this controller returns to: [controller, action].
@@ -147,7 +171,7 @@ abstract class BaseVaultController extends BaseController
         $this->redirectTo($this->returnRoute(), $codes);
     }
 
-    private function redirectTo(array $route, array $codes): void
+    protected function redirectTo(array $route, array $codes): void
     {
         $this->respond()->withStatusCode(303)->redirect($this->helper->url->to($route[0], $route[1], ['plugin' => 'Vault'] + $codes));
     }
@@ -164,7 +188,10 @@ abstract class BaseVaultController extends BaseController
     protected function clientConfig(): array
     {
         $url = fn (string $action, string $controller = 'VaultController'): string => $this->helper->url->to($controller, $action, ['plugin' => 'Vault']);
-        $endpoints = ['unlock' => $url('unlock'), 'lock' => $url('lock'), 'enrol' => $url('enrol')];
+        $endpoints = ['unlock' => $url('unlock'), 'lock' => $url('lock'), 'enrol' => $url('enrol'), 'recover' => $url('recover')];
+        foreach (['challenge', 'register', 'remove', 'rotate', 'unlock'] as $action) {
+            $endpoints['hw_'.$action] = $url($action, 'HardwareKeyController');
+        }
         foreach (['tree', 'list', 'entry', 'field', 'save', 'move', 'delete'] as $action) {
             $endpoints[$action] = $url($action, 'EntryController');
         }
@@ -232,6 +259,23 @@ abstract class BaseVaultController extends BaseController
             'confirm_reenrol' => t('Re-enrol this agent? Its current vault key stops working, and what other people shared with it is unshared.'),
             'key_shown' => t('Copy this key into the agent\'s settings now. It won\'t be shown again.'),
             'key_cleared' => t('The key is cleared from this page.'),
+            'recovered' => t('Your passphrase is reset. Unlock your vault with the new passphrase.'),
+            'recovered_pending' => t('Your passphrase is reset. Unlock your vault with the new passphrase; re-encrypting it finishes then.'),
+            'application_url_required' => t('Hardware keys need Kanboard\'s Application URL set to an https:// address. Ask your administrator.'),
+            'rp_id_mismatch' => t('Your hardware keys are registered for a different web address than this one. Open Kanboard at the address you added them on, or remove the keys and add them again there.'),
+            'hw_key_invalid' => t('The hardware key could not be verified. Try again.'),
+            'hw_keys_required' => t('Hardware keys are required: you need at least two.'),
+            'hw_key_limit' => t('You have the most hardware keys allowed.'),
+            'hw_enrolment_required' => t('Add two hardware keys before you use your vault.'),
+            'hw_assertion_required' => t('Touch one of your hardware keys to confirm.'),
+            'hw_unsupported' => t('This browser can\'t use hardware keys.'),
+            'hw_prf_unsupported' => t('This key can\'t be used: it doesn\'t support the PRF extension.'),
+            'hw_cancelled' => t('The hardware key request was cancelled or timed out.'),
+            'hw_touch' => t('Touch your hardware key.'),
+            'hw_touch_other' => t('Now touch this hardware key:'),
+            'hw_added' => t('Hardware key added.'),
+            'hw_removed' => t('Hardware key removed.'),
+            'confirm_hw_remove' => t('Remove this hardware key?'),
         ];
     }
 
@@ -243,6 +287,11 @@ abstract class BaseVaultController extends BaseController
     protected function rotationService(): RotationService
     {
         return isset($this->container['vaultRotation']) ? $this->container['vaultRotation'] : new RotationService($this->container);
+    }
+
+    protected function hardwareKeys(): HardwareKeys
+    {
+        return isset($this->container['vaultHardwareKeys']) ? $this->container['vaultHardwareKeys'] : new HardwareKeys($this->container);
     }
 
     protected function recoveryService(): RecoveryService

@@ -7,9 +7,17 @@ use Kanboard\Plugin\Vault\Crypto\CryptoException;
 use Kanboard\Plugin\Vault\Crypto\Kdf;
 use Kanboard\Plugin\Vault\Crypto\Wraps;
 
-// Passphrase unlock (spec: Unlocked sessions, Throttling). Order of work (R15):
+// Passphrase unlock, and passphrase-plus-key unlock (spec: Unlocked sessions, Throttling, Hardware keys → Unlock).
+// Order of work (R15):
 //   transport check → the principal's Argon2 slot (busy: 429 / busy_global: 503) → per-principal back-off →
-//   per-IP failure bucket → Argon2 → unwrap and public-key check → record the outcome → KDF upgrade → session.
+//   per-IP failure bucket → [$prf: the relying party, then the fresh assertion, verified against a single-use
+//   'unlock' challenge and the user's own credential (HardwareKeys)] → Argon2 → unwrap and public-key check →
+//   record the outcome → KDF upgrade → session.
+// With $prf the wrap is that key's passphrase+prf wrap and its KEK takes the PRF output with the passphrase:
+// BLAKE2b(key = Argon2id(passphrase), msg = enc("kek", "prf", credential id, PRF output)). The PRF output is used only
+// after the assertion verified, so a replayed PRF value without a fresh assertion opens nothing. A failed assertion
+// is a failed guess like a wrong passphrase (the same buckets); a key pinned to another relying party is reported
+// plainly (rp_id_mismatch). Roster agents and agent principals never unlock this way either.
 // Every failed guess, whatever the cause, is the one generic VaultException('unlock_failed'); each runs the
 // same Argon2 work so timing doesn't separate them either.
 //
@@ -34,8 +42,11 @@ class UnlockService extends Base
     private RecoveryService $recovery;
     private int $rotationBatches;
 
-    public function __construct($container, ?ArgonSlots $slots = null, ?callable $argon2 = null, ?VaultSession $session = null, ?RateLimiter $limiter = null, ?callable $clock = null, ?RotationService $rotation = null, ?RecoveryService $recovery = null, int $rotationBatches = self::ROTATION_BATCHES)
+    private ?HardwareKeys $hardwareKeys;
+
+    public function __construct($container, ?ArgonSlots $slots = null, ?callable $argon2 = null, ?VaultSession $session = null, ?RateLimiter $limiter = null, ?callable $clock = null, ?RotationService $rotation = null, ?RecoveryService $recovery = null, int $rotationBatches = self::ROTATION_BATCHES, ?HardwareKeys $hardwareKeys = null)
     {
+        $this->hardwareKeys = $hardwareKeys;
         $this->rotationBatches = max(1, $rotationBatches);
         parent::__construct($container);
         $this->slots = $slots ?? new ArgonSlots($container);
@@ -85,8 +96,9 @@ class UnlockService extends Base
                 throw new VaultException('rate_limited');
             }
 
-            $wrap = $this->loadPassphraseWrap($userId, $prf);
-            $sk = $this->open($wrap, $passphrase);
+            $context = ['passphrase'];
+            $wrap = $prf === null ? $this->loadPassphraseWrap($userId) : $this->loadPrfWrap($userId, $prf, $ip, $context);
+            $sk = $this->open($wrap, $passphrase, $context);
             if ($sk === null) {
                 $guess = new FailedGuess($this->container, $this->limiter, $this->clock);
                 $streak = $guess->record($userId, self::userBucket($userId), $ip);
@@ -94,11 +106,14 @@ class UnlockService extends Base
             }
 
             $this->recordSuccess($userId, $ipBucket, $ip);
-            $this->upgradeKdf($wrap, $sk, $passphrase);
+            $this->upgradeKdf($wrap, $sk, $passphrase, $context);
             [$sessionKey, $keys] = empty($wrap['resume']) ? $this->openSession($userId, $sk, $passphrase) : $this->resumeRotation($userId, $sk);
         } finally {
             if (is_string($sk)) {
                 sodium_memzero($sk);
+            }
+            if (isset($context[2]) && is_string($context[2])) {
+                sodium_memzero($context[2]);
             }
             $slot->release();
             // R39: the five-failure email goes once the slot is free.
@@ -177,13 +192,45 @@ class UnlockService extends Base
         }
     }
 
-    // The wrap to try, or null when there is none to try (unknown, disabled or unenrolled user, or a PRF
-    // unlock, which needs hardware-key wraps that don't exist yet). Null still costs one Argon2 run.
-    private function loadPassphraseWrap(int $userId, ?array $prf): ?array
+    // The wrap to try, or null when there is none to try (unknown, disabled or unenrolled user). Null still costs one
+    // Argon2 run.
+    private function loadPassphraseWrap(int $userId): ?array
     {
-        if ($prf !== null) {
+        return $this->loadWrap($userId, 'passphrase', null);
+    }
+
+    // The key's passphrase+prf wrap, after its fresh assertion verified; null (a failed guess) when the assertion
+    // doesn't verify or the user can't unlock. $context becomes the KEK context: ("prf", raw credential id, PRF output).
+    // rp_id_mismatch and application_url_required are thrown: they are configuration, not guesses.
+    private function loadPrfWrap(int $userId, #[\SensitiveParameter] array $prf, string $ip, array &$context): ?array
+    {
+        $principal = (new VaultDb($this->container))->fetchOne('SELECT kind FROM vault_principals WHERE user_id = ?', [$userId]);
+        // No key at all reads like any other failure; only a user with keys learns about the relying party.
+        if ($principal === null || $principal['kind'] !== 'human' || AgentRoster::of($this->container)->isAgent($userId)
+            || $this->hardwareKeys()->count($userId) === 0) {
             return null;
         }
+        try {
+            $v = $this->hardwareKeys()->verifyAssertion($userId, 'unlock', $prf, $ip);
+        } catch (VaultException $e) {
+            if (in_array($e->errorCode(), ['rp_id_mismatch', 'application_url_required'], true)) {
+                throw $e;
+            }
+            return null;
+        }
+        $context = ['prf', $v['raw_id'], $v['prf']];
+        return $this->loadWrap($userId, 'passphrase+prf', (string) $v['row']['credential_id']);
+    }
+
+    private function hardwareKeys(): HardwareKeys
+    {
+        return $this->hardwareKeys ??= new HardwareKeys($this->container, $this->slots, $this->argon2, $this->clock, $this->rotation);
+    }
+
+    // The active wrap of $method (and credential) at the principal's key_gen, or, mid-rotation, its pending wrap of
+    // sk2 at key_gen + 1 checked against new_pk, marked to resume.
+    private function loadWrap(int $userId, string $method, ?string $credentialId): ?array
+    {
         $db = new VaultDb($this->container);
         $principal = $db->fetchOne(
             'SELECT p.kind, p.public_key, p.key_gen FROM vault_principals p JOIN users u ON u.id = p.user_id WHERE p.user_id = ? AND u.is_active = 1',
@@ -194,12 +241,14 @@ class UnlockService extends Base
         if ($principal === null || $principal['kind'] !== 'human' || AgentRoster::of($this->container)->isAgent($userId)) {
             return null;
         }
+        $byKey = $credentialId === null ? '' : ' AND credential_id = ?';
+        $params = fn (int $gen): array => $credentialId === null ? [$userId, $method, $gen] : [$userId, $method, $gen, $credentialId];
         $rotation = $db->fetchOne('SELECT new_pk FROM vault_rotations WHERE user_id = ?', [$userId]);
         if ($rotation !== null) {
             // Mid-rotation: only sk2's pending wrap (key_gen + 1), checked against new_pk, and only to resume.
             $wrap = $db->fetchOne(
-                "SELECT * FROM vault_wraps WHERE user_id = ? AND method = 'passphrase' AND status = 'pending' AND key_gen = ? ORDER BY id LIMIT 1",
-                [$userId, (int) $principal['key_gen'] + 1]
+                "SELECT * FROM vault_wraps WHERE user_id = ? AND method = ? AND status = 'pending' AND key_gen = ?".$byKey.' ORDER BY id LIMIT 1',
+                $params((int) $principal['key_gen'] + 1)
             );
             if ($wrap === null) {
                 return null;
@@ -209,8 +258,8 @@ class UnlockService extends Base
             return $wrap;
         }
         $wrap = $db->fetchOne(
-            "SELECT * FROM vault_wraps WHERE user_id = ? AND method = 'passphrase' AND status = 'active' AND key_gen = ? ORDER BY id LIMIT 1",
-            [$userId, (int) $principal['key_gen']]
+            "SELECT * FROM vault_wraps WHERE user_id = ? AND method = ? AND status = 'active' AND key_gen = ?".$byKey.' ORDER BY id LIMIT 1',
+            $params((int) $principal['key_gen'])
         );
         if ($wrap === null) {
             return null;
@@ -219,8 +268,9 @@ class UnlockService extends Base
         return $wrap;
     }
 
-    // sk, or null for any failure. Crypto error labels never leave this method (R12).
-    private function open(?array $wrap, #[\SensitiveParameter] string $passphrase): ?string
+    // sk, or null for any failure. Crypto error labels never leave this method (R12). $context: the KEK context,
+    // ("passphrase") or ("prf", raw credential id, PRF output).
+    private function open(?array $wrap, #[\SensitiveParameter] string $passphrase, #[\SensitiveParameter] array $context): ?string
     {
         $ikm = $kek = '';
         try {
@@ -232,7 +282,7 @@ class UnlockService extends Base
                 return null;
             }
             $ikm = ($this->argon2)($passphrase, $salt, (int) $wrap['kdf_ops'], (int) $wrap['kdf_mem']);
-            $kek = Kdf::kek($ikm, 'passphrase');
+            $kek = Kdf::kek($ikm, ...$context);
             return Wraps::unwrap(self::wrapRow($wrap), $kek, $pk);
         } catch (CryptoException) {
             return null;
@@ -266,8 +316,10 @@ class UnlockService extends Base
         });
     }
 
-    // Re-derives a wrap below the default KDF parameters, in place: same row id (so the same AD), new salt.
-    private function upgradeKdf(array $wrap, #[\SensitiveParameter] string $sk, #[\SensitiveParameter] string $passphrase): void
+    // Re-derives a wrap below the default KDF parameters, in place: same row id (so the same AD), new salt, the same
+    // KEK context (a key's wrap keeps its PRF part). Each wrap keeps its own parameters, so the other keys' wraps are
+    // upgraded when they are next used.
+    private function upgradeKdf(array $wrap, #[\SensitiveParameter] string $sk, #[\SensitiveParameter] string $passphrase, #[\SensitiveParameter] array $context): void
     {
         $ops = (int) $wrap['kdf_ops'];
         $mem = (int) $wrap['kdf_mem'];
@@ -280,10 +332,10 @@ class UnlockService extends Base
         $ikm = $kek = '';
         try {
             $ikm = ($this->argon2)($passphrase, $salt, $ops, $mem);
-            $kek = Kdf::kek($ikm, 'passphrase');
+            $kek = Kdf::kek($ikm, ...$context);
             $wrapId = (int) $wrap['id'];
             $userId = (int) $wrap['user_id'];
-            $new = Wraps::wrap($sk, $kek, $userId, 'passphrase', '', $wrapId);
+            $new = Wraps::wrap($sk, $kek, $userId, (string) $wrap['method'], (string) ($wrap['credential_id'] ?? ''), $wrapId);
             (new VaultLock($this->container))->exclusive(function () use ($new, $wrap, $wrapId, $salt, $ops, $mem): void {
                 // Only if the row is still the one we opened; otherwise someone changed it and theirs stands.
                 (new VaultDb($this->container))->execute(

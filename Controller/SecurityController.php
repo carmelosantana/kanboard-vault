@@ -1,6 +1,7 @@
 <?php
 namespace Kanboard\Plugin\Vault\Controller;
 
+use Kanboard\Plugin\Vault\Model\HardwareKeys;
 use Kanboard\Plugin\Vault\Model\RotationService;
 use Kanboard\Plugin\Vault\Model\VaultException;
 use Kanboard\Plugin\Vault\Model\VaultFailure;
@@ -12,7 +13,8 @@ use Kanboard\Plugin\Vault\Model\VaultSettings;
 //                              personal recovery code. Locked: back to the Vault page.
 //   POST vault/passphrase      {current, passphrase, confirm}: PrincipalModel::changePassphrase.
 //   POST vault/rotate          {passphrase}: RotationService::requestManual (same passphrase, new keypair).
-//   POST vault/recovery-code   {passphrase}: re-proves the passphrase (R54), then RecoveryService::createCode:
+//   POST vault/recovery-code   {passphrase[, assertion]}: re-proves the passphrase (R54; with hardware keys, together
+//                              with a fresh assertion), then RecoveryService::createCode:
 //                              {ok, code}, shown once by vault-security.js, which asks for group 3 back before it
 //                              clears the code from the page.
 //
@@ -50,6 +52,7 @@ class SecurityController extends BaseVaultController
             'error' => $this->codeMessage('vault_error', $client['messages']),
             'notice' => in_array($notice, self::NOTICES, true) ? $client['messages'][$notice === 'rotated' ? 'passphrase_changed' : 'rotation_pending'] : '',
             'codes_allowed' => $policy !== VaultSettings::POLICY_NONE,
+            'hw_keys' => $this->hardwareKeys()->count($this->userId()),
             'code' => (string) ($extra['code'] ?? ''),
         ]));
     }
@@ -88,8 +91,9 @@ class SecurityController extends BaseVaultController
             if ((string) (new VaultSettings($this->container))->get(VaultSettings::POLICY) === VaultSettings::POLICY_NONE) {
                 throw new VaultException('policy_forbids');
             }
-            $this->rotationService()->confirmPassphrase($userId, $sk, (string) $this->request->getRawValue('passphrase'), $this->clientIp());
-            $this->requireFreshHardwareKey($userId);
+            if (! $this->requireFreshHardwareKey($userId, $sk)) {
+                $this->rotationService()->confirmPassphrase($userId, $sk, (string) $this->request->getRawValue('passphrase'), $this->clientIp());
+            }
             $code = $this->recoveryService()->createCode($userId, $sk);
             if ($this->request->isAjax()) {
                 $this->answer(['code' => $code]);
@@ -99,10 +103,22 @@ class SecurityController extends BaseVaultController
         });
     }
 
-    // T20 hook (R54): a user with hardware keys must also present a fresh assertion before a new recovery code is
-    // made. Until T20 adds hardware keys this has nothing to check.
-    protected function requireFreshHardwareKey(int $userId): void
+    // R54: a user with hardware keys must also present a fresh assertion ('assertion', from a 'ceremony' challenge)
+    // before a new recovery code is made: HardwareKeys::confirm checks it and the passphrase together (that key's wrap
+    // must open to exactly $sk), throttled like the passphrase check. hw_assertion_required, before any Argon2, when
+    // none was sent. Returns false for a user without keys (the passphrase check alone applies).
+    protected function requireFreshHardwareKey(int $userId, #[\SensitiveParameter] string $sk): bool
     {
+        $hw = $this->hardwareKeys();
+        if ($hw->count($userId) === 0) {
+            return false;
+        }
+        $raw = (string) $this->request->getRawValue('assertion');
+        if ($raw === '') {
+            throw new VaultException('hw_assertion_required');
+        }
+        $hw->confirm($userId, $sk, (string) $this->request->getRawValue('passphrase'), HardwareKeys::parseAssertion($raw), $this->clientIp());
+        return true;
     }
 
     protected function returnRoute(): array

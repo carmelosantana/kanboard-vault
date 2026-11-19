@@ -41,11 +41,24 @@ final class CoseKey
             }
         } elseif ($keys === [-2, -1, 1, 3] && $map[1] === 1 && $map[3] === self::EDDSA && $map[-1] === 6) {
             $x = $bytes32($map[-2]);
-            if ($x !== null) {
+            if ($x !== null && self::isEd25519Point($x)) {
                 return new self(self::EDDSA, $x, '');
             }
         }
         throw new WebAuthnException('cose_invalid');
+    }
+
+    // T19 M3: an Ed25519 key must be a canonical point of the main subgroup, not of small order. libsodium's conversion
+    // to X25519 checks exactly that and fails otherwise, so a bad key can't register.
+    private static function isEd25519Point(string $x): bool
+    {
+        try {
+            $mont = sodium_crypto_sign_ed25519_pk_to_curve25519($x);
+            sodium_memzero($mont);
+            return true;
+        } catch (\SodiumException) {
+            return false;
+        }
     }
 
     // The DER SubjectPublicKeyInfo of this key.

@@ -6,7 +6,8 @@
  *       ok (ROTATED or PENDING) is a success: the answer's message (PENDING says the re-encryption finishes at the
  *       next unlock), else the page's own; offer_recovery_code reveals the "create a new code" hint (R36). Any
  *       failure shows the message for its fixed reason. The password inputs are cleared either way.
- *   [data-vault-form="recovery"]  {passphrase} (R54: the current passphrase is re-proved). After a confirm (it
+ *   [data-vault-form="recovery"]  {passphrase} (R54: the current passphrase is re-proved; with data-vault-hw="1" a
+ *       fresh hardware-key assertion from window.KBVaultWebAuthn goes with it). After a confirm (it
  *       replaces any code), asks for a code and shows it once. [data-vault-action="recovery-confirm"] clears it from the page only when the typed text is group 3
  *       of the code (spec: Recovery).
  */
@@ -127,7 +128,20 @@
       create.disabled = true;
       var body = { passphrase: pass.value };
       pass.value = '';
-      win.KBVault.api('recovery_code', body).then(function (res) {
+      // R54: with hardware keys a fresh assertion goes with the passphrase (vault-webauthn.js).
+      var hw = form.getAttribute('data-vault-hw') === '1';
+      var withKey = !hw ? Promise.resolve(body) : (win.KBVaultWebAuthn
+        ? win.KBVaultWebAuthn.assertion('ceremony').then(function (a) {
+          body.assertion = a;
+          return body;
+        })
+        : Promise.reject({ reason: 'hw_unsupported' }));
+      withKey.then(function (b) {
+        return win.KBVault.api('recovery_code', b);
+      }, function (err) {
+        var reason = err && typeof err.reason === 'string' ? err.reason : 'hw_cancelled';
+        return { ok: false, reason: reason };
+      }).then(function (res) {
         var g = res && res.ok && typeof res.code === 'string' ? group3(res.code) : null;
         if (g === null) {
           clear();

@@ -321,6 +321,12 @@ class VaultSession extends Base
 
     // R20: the plain-HTTP dev exception needs BOTH the explicit opt-in VAULT_DEV_INSECURE_LOCALHOST=1 and an
     // exact localhost Host. Host alone fails open behind a reverse proxy or tunnel whose origin is localhost.
+    // The opted-in plain-HTTP dev stack (R20), for the relying-party binding too (HardwareKeys, the settings page).
+    public function devLocalhost(): bool
+    {
+        return $this->isInsecureDev();
+    }
+
     private function isInsecureDev(): bool
     {
         return getenv(self::DEV_OPT_IN) === '1' && $this->isLocalhost();

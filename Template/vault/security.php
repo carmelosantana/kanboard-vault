@@ -13,6 +13,9 @@
 </div>
 <?= $this->render('Vault:vault/app', ['state' => 'unlocked', 'client' => $client, 'https_ok' => $https_ok]) ?>
 <?= $this->asset->js('plugins/Vault/Assets/js/vault-generator.js') ?>
+<?php if (! empty($hw_keys)): ?>
+<?= $this->asset->js('plugins/Vault/Assets/js/vault-webauthn.js') ?>
+<?php endif ?>
 <?= $this->asset->js('plugins/Vault/Assets/js/vault-security.js') ?>
 <?php if ($notice !== ''): ?>
 <p class="alert alert-success vault-banner" role="status"><?= $this->text->e($notice) ?></p>
@@ -20,6 +23,11 @@
 <?php if ($error !== ''): ?>
 <p class="alert alert-error vault-banner" role="alert"><?= $this->text->e($error) ?></p>
 <?php endif ?>
+
+<section class="vault-card vault-section">
+    <h3><?= t('Hardware keys') ?></h3>
+    <p><?= t('Add security keys so unlocking needs your passphrase and a key. With keys, change your passphrase or rotate your keys on the hardware key page.') ?> <?= $this->url->link(t('Manage hardware keys'), 'HardwareKeyController', 'index', ['plugin' => 'Vault'], false, '', '', false, '', false) ?></p>
+</section>
 
 <section class="vault-card vault-section">
     <h3><?= t('Change passphrase') ?></h3>
@@ -57,7 +65,8 @@
     <p class="alert alert-info" data-vault-recovery-offer hidden><?= t('Your old recovery code no longer works. Create a new one if you want one.') ?></p>
     <p><?= t('A recovery code resets your passphrase if you forget it, and it bypasses hardware keys. It is shown once. Creating one replaces any code you have.') ?></p>
     <?php // R54: the current passphrase is asked again; posts natively too (fix C1), never through a URL. ?>
-    <form class="vault-form" data-vault-form="recovery" method="post" action="<?= $this->url->href('SecurityController', 'recoveryCode', ['plugin' => 'Vault']) ?>">
+    <?php // R54: with hardware keys, vault-webauthn.js adds a fresh assertion (data-vault-hw); that needs JavaScript. ?>
+    <form class="vault-form" data-vault-form="recovery" method="post" action="<?= $this->url->href('SecurityController', 'recoveryCode', ['plugin' => 'Vault']) ?>" <?= empty($hw_keys) ? '' : 'data-vault-hw="1"' ?>>
         <input type="hidden" name="csrf_token" value="<?= $this->text->e($client['csrf']) ?>">
         <label for="vault-recovery-passphrase"><?= t('Your passphrase') ?></label>
         <input type="password" id="vault-recovery-passphrase" name="passphrase" required autocomplete="current-password">

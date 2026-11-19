@@ -39,6 +39,14 @@ final class VaultFailure
         'agent_read_only' => [422, 'agent_read_only'],
         'owner_not_enrolled' => [409, 'owner_not_enrolled'],
         'agents_unavailable' => [409, 'agents_unavailable'],
+        // Hardware keys (T20). rp_id_mismatch is said plainly (spec: "unlock reports a mismatch plainly").
+        'application_url_required' => [409, 'application_url_required'],
+        'rp_id_mismatch' => [409, 'rp_id_mismatch'],
+        'hw_key_invalid' => [400, 'hw_key_invalid'],
+        'hw_keys_required' => [409, 'hw_keys_required'],
+        'hw_key_limit' => [409, 'hw_key_limit'],
+        'hw_enrolment_required' => [403, 'hw_enrolment_required'],
+        'hw_assertion_required' => [403, 'hw_assertion_required'],
     ];
 
     /** @return array{0:int,1:string} [status, reason] */

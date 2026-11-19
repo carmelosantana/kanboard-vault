@@ -48,7 +48,7 @@ class SettingsController extends BaseVaultController
                 'csrf' => $this->token->getReusableCSRFToken(),
                 'effective_idle' => intdiv($session->idleTimeout(), 60),
                 'session_minutes' => intdiv($session->sessionLifetimeSeconds(), 60),
-                'relying_party' => VaultSettings::relyingParty((string) $this->configModel->get('application_url')),
+                'relying_party' => VaultSettings::relyingParty((string) $this->configModel->get('application_url'), $this->vaultSession()->devLocalhost()),
                 'checks' => (new DeploymentChecks($this->container))->run($this->request),
                 'mapped_cidrs' => array_values(array_filter($settings->trustedProxies(), [ClientIp::class, 'isMappedCidr'])),
                 'integrity' => AuditModel::of($this->container)->integrityFaults($this->userId()),

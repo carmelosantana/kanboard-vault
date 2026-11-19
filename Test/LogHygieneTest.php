@@ -5,12 +5,14 @@ require_once __DIR__.'/Support/ServiceFixture.php';
 use Kanboard\Core\Log\File;
 use Kanboard\Core\Log\Logger;
 use Kanboard\Plugin\Vault\Crypto\RecoveryCode;
+use Kanboard\Plugin\Vault\Model\HardwareKeys;
 use Kanboard\Plugin\Vault\Model\PrincipalModel;
 use Kanboard\Plugin\Vault\Model\Purger;
 use Kanboard\Plugin\Vault\Model\RotationService;
 use Kanboard\Plugin\Vault\Model\ShareModel;
 use Kanboard\Plugin\Vault\Model\VaultSettings;
 use Kanboard\Plugin\Vault\Test\Support\Fixtures;
+use Kanboard\Plugin\Vault\Test\Support\SoftAuthenticator;
 use KanboardTests\units\Base;
 
 // Spec: Audit, logging rules. "No secret, passphrase, vault key, PRF output, share key, burn capability or decrypted
@@ -101,6 +103,15 @@ class LogHygieneTest extends Base
         }
     }
 
+    // A fresh assertion by $key for a challenge the server issued, its PRF output (for the stored salt) kept as a needle.
+    private function hwAssertion(HardwareKeys $hw, SoftAuthenticator $key, string $purpose): array
+    {
+        $salt = base64_decode((string) $this->row('SELECT prf_salt FROM vault_webauthn WHERE credential_id = ?', [$key->id()])['prf_salt']);
+        $a = $key->get($hw->challenge($this->alice, $purpose), 'https://kb.example', 'kb.example', $salt);
+        $this->generated[] = $a['prf'];
+        return $a;
+    }
+
     private function runEveryService(): void
     {
         $principals = $this->principals();
@@ -175,6 +186,31 @@ class LogHygieneTest extends Base
         $sk = $this->unlockAs($this->alice, Fixtures::PASSPHRASE, 'sid-alice-2');
         $this->generated[] = $sk;
         $this->assertSame(Fixtures::UPDATED_PASSWORD, $s->readField($this->alice, $e, 'password', $sk));
+
+        // Hardware keys (T10 carry: the PRF path). Two keys (the second rotates), a PRF unlock with a wrong passphrase,
+        // a replayed assertion and a good one, the R54 confirm, a rotation with every key. Each PRF output is a needle.
+        $this->container['configModel']->save(['application_url' => 'https://kb.example/']);
+        $this->container['memoryCache']->flush();
+        $hw = new HardwareKeys($this->container, $this->slots(), $this->argon(), $this->clock(), $this->rotation());
+        $keys = [new SoftAuthenticator(-8), new SoftAuthenticator(-7)];
+        foreach ($keys as $i => $key) {
+            $c = $hw->challenge($this->alice, 'register');
+            $create = $key->create($c, 'https://kb.example', 'kb.example');
+            $others = array_map(fn (SoftAuthenticator $k) => $this->hwAssertion($hw, $k, 'ceremony'), array_slice($keys, 0, $i));
+            $new = $key->get($hw->challenge($this->alice, 'ceremony'), 'https://kb.example', 'kb.example', HardwareKeys::prfSaltFor($c));
+            $this->generated[] = $new['prf'];
+            $hw->registerKey($this->alice, $sk, ['label' => 'key '.$i, 'create' => $create, 'assert' => $new, 'others' => $others], Fixtures::PASSPHRASE, self::IP);
+            $sk = (string) $this->session()->secretKey();
+            $this->generated[] = $sk;
+        }
+        $this->assertVaultError('unlock_failed', fn () => $this->unlockService()->unlock($this->alice, Fixtures::WRONG_PASSPHRASE, self::IP, $this->hwAssertion($hw, $keys[0], 'unlock')));
+        $replayed = $this->hwAssertion($hw, $keys[1], 'unlock');
+        $this->unlockService()->unlock($this->alice, Fixtures::PASSPHRASE, self::IP, $replayed);
+        $this->assertVaultError('unlock_failed', fn () => $this->unlockService()->unlock($this->alice, Fixtures::PASSPHRASE, self::IP, $replayed));
+        $this->sendCookieBack();
+        $sk = (string) $this->session()->secretKey();
+        $hw->confirm($this->alice, $sk, Fixtures::PASSPHRASE, $this->hwAssertion($hw, $keys[0], 'ceremony'), self::IP);
+        $this->assertSame(RotationService::ROTATED, $hw->rotate($this->alice, $sk, Fixtures::PASSPHRASE, '', [$this->hwAssertion($hw, $keys[0], 'ceremony'), $this->hwAssertion($hw, $keys[1], 'ceremony')], self::IP));
 
         // Org recovery, settings, purge, delete, lock.
         $this->assertSame(RotationService::ROTATED, $this->recovery()->orgRecover('alice-the-auditor', $orgSecret, Fixtures::NEW_PASSPHRASE));

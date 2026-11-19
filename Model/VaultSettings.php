@@ -108,10 +108,12 @@ class VaultSettings extends Base
     }
 
     // Spec, Hardware keys: the relying party is Kanboard's Application URL. Its normalised origin and host (rp_id)
-    // when it is https://, or http://localhost (the dev stack); null otherwise (hardware keys are then refused).
-    // Read-only: it is shown on the admin page and pinned on each credential (T20), never set here.
+    // when it is https://, or http://localhost on the dev stack; null otherwise (hardware keys are then refused).
+    // R20: http://localhost counts only when $devLocalhost says the request is the opted-in dev stack
+    // (VaultSession::devLocalhost: VAULT_DEV_INSECURE_LOCALHOST=1 and a localhost Host).
+    // Read-only: it is shown on the admin page and pinned on each credential (HardwareKeys), never set here.
     /** @return array{origin:string, rp_id:string}|null */
-    public static function relyingParty(string $applicationUrl): ?array
+    public static function relyingParty(string $applicationUrl, bool $devLocalhost = false): ?array
     {
         $u = parse_url(trim($applicationUrl));
         if (! is_array($u) || ! isset($u['scheme'], $u['host']) || isset($u['user']) || isset($u['pass'])) {
@@ -119,7 +121,7 @@ class VaultSettings extends Base
         }
         $scheme = strtolower($u['scheme']);
         $host = strtolower($u['host']);
-        if ($scheme !== 'https' && ! ($scheme === 'http' && $host === 'localhost')) {
+        if ($scheme !== 'https' && ! ($scheme === 'http' && $host === 'localhost' && $devLocalhost)) {
             return null;
         }
         $default = $scheme === 'https' ? 443 : 80;
