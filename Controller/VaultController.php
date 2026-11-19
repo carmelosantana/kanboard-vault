@@ -110,10 +110,14 @@ class VaultController extends BaseVaultController
     /** @return array{csrf:string, endpoints:array<string,string>, idle_ms:int, messages:array<string,string>} */
     private function clientConfig(): array
     {
-        $url = fn (string $action): string => $this->helper->url->to('VaultController', $action, ['plugin' => 'Vault']);
+        $url = fn (string $action, string $controller = 'VaultController'): string => $this->helper->url->to($controller, $action, ['plugin' => 'Vault']);
+        $endpoints = ['unlock' => $url('unlock'), 'lock' => $url('lock'), 'enrol' => $url('enrol')];
+        foreach (['tree', 'list', 'entry', 'field', 'save', 'move', 'delete'] as $action) {
+            $endpoints[$action] = $url($action, 'EntryController');
+        }
         return [
             'csrf' => $this->token->getReusableCSRFToken(),
-            'endpoints' => ['unlock' => $url('unlock'), 'lock' => $url('lock'), 'enrol' => $url('enrol')],
+            'endpoints' => $endpoints,
             'idle_ms' => $this->vaultSession()->idleTimeout() * 1000,
             'messages' => [
                 'working' => t('Working…'),
@@ -127,6 +131,20 @@ class VaultController extends BaseVaultController
                 'already_enrolled' => t('Your vault is already set up. Reload the page.'),
                 'forbidden' => t('The page expired. Reload it and try again.'),
                 'failed' => t('Something went wrong. Try again.'),
+                'locked' => t('Your vault is locked.'),
+                'not_found' => t('Not found, or you no longer have access.'),
+                'conflict' => t('This entry was changed elsewhere. Reload it, then edit again.'),
+                'payload_invalid' => t('Some values are not valid.'),
+                'payload_too_large' => t('This entry is too large.'),
+                'invalid_move' => t('It can\'t be moved there.'),
+                'integrity_error' => t('This item can\'t be decrypted.'),
+                'copied' => t('Copied — clears in 30 s'),
+                'saved' => t('Saved.'),
+                'confirm_delete' => t('Delete this for everyone it is shared with? This can\'t be undone.'),
+                'group_name' => t('Group name'),
+                'no_entries' => t('No entries.'),
+                'shared_entries' => t('Entries shared with me'),
+                'from' => t('from'),
             ],
         ];
     }

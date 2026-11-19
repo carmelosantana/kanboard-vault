@@ -1,10 +1,14 @@
 <div class="page-header vault-header">
     <h2><?= t('Vault') ?></h2>
     <ul class="vault-toolbar">
+        <li><input type="search" class="vault-search" data-vault-search placeholder="<?= t('Search…') ?>" aria-label="<?= t('Search') ?>"></li>
+        <li><button type="button" class="btn" data-vault-action="new-entry"><i class="fa fa-plus" aria-hidden="true"></i> <?= t('Entry') ?></button></li>
+        <li><button type="button" class="btn" data-vault-action="new-group"><i class="fa fa-folder" aria-hidden="true"></i> <?= t('Group') ?></button></li>
         <li><button type="button" class="btn" data-vault-action="lock"><i class="fa fa-lock" aria-hidden="true"></i> <?= t('Lock') ?></button></li>
     </ul>
 </div>
 <?= $this->render('Vault:vault/app', ['state' => 'unlocked', 'client' => $client, 'https_ok' => $https_ok]) ?>
+<?= $this->asset->js('plugins/Vault/Assets/js/vault-browser.js') ?>
 <?php if ($failed_attempts >= \Kanboard\Plugin\Vault\Model\PrincipalModel::NOTIFY_AFTER): ?>
 <p class="alert alert-error vault-banner"><?= t('There were %d failed attempts to unlock your vault before this unlock. If they weren\'t yours, change your vault passphrase.', $failed_attempts) ?></p>
 <?php endif ?>
@@ -18,7 +22,11 @@
     <?php endif ?>
 <?php endforeach ?>
 <div class="vault-panes" data-vault-panes>
-    <nav class="vault-tree" aria-label="<?= t('Groups') ?>"></nav>
-    <section class="vault-list" aria-label="<?= t('Entries') ?>"></section>
-    <section class="vault-detail" aria-label="<?= t('Entry') ?>"></section>
+    <?= $this->render('Vault:vault/tree') ?>
+    <?= $this->render('Vault:vault/list') ?>
+    <section class="vault-detail" aria-label="<?= t('Entry') ?>">
+        <?= $this->render('Vault:vault/detail') ?>
+        <?= $this->render('Vault:vault/edit', ['client' => $client]) ?>
+    </section>
 </div>
+<p class="vault-toast" data-vault-toast role="status" hidden></p>

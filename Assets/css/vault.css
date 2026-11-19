@@ -65,6 +65,143 @@
     border-top: 1px solid var(--border, #ddd);
 }
 
+.vault-tree {
+    padding: .5rem;
+}
+
+.vault-tree-head {
+    margin: .75rem .25rem .25rem;
+    font-size: .8rem;
+    text-transform: uppercase;
+    color: var(--muted-foreground, #777);
+}
+
+.vault-tree-list {
+    margin: 0;
+    padding-left: .75rem;
+    list-style: none;
+}
+
+.vault-node {
+    display: block;
+    width: 100%;
+    padding: .25rem .5rem;
+    border: 0;
+    border-radius: var(--radius, 6px);
+    background: none;
+    text-align: left;
+    cursor: pointer;
+}
+
+.vault-node:hover,
+.vault-node.is-active,
+.vault-row:hover,
+.vault-row.is-active {
+    background: var(--accent, #f0f4f8);
+}
+
+.vault-list-head,
+.vault-detail-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: .5rem;
+    padding: .5rem .75rem;
+}
+
+.vault-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.vault-table th,
+.vault-table td {
+    padding: .35rem .75rem;
+    text-align: left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 18rem;
+}
+
+.vault-row {
+    cursor: pointer;
+}
+
+.vault-detail {
+    padding: .5rem .75rem;
+}
+
+.vault-fields {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: .35rem 1rem;
+    margin: .5rem 0;
+}
+
+.vault-fields dt {
+    font-weight: 600;
+}
+
+.vault-fields dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+.vault-secret {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.vault-notes[data-revealed] {
+    white-space: pre-wrap;
+}
+
+.vault-icon {
+    padding: 0 .25rem;
+    border: 0;
+    background: none;
+    cursor: pointer;
+    color: var(--muted-foreground, #555);
+}
+
+.vault-muted {
+    padding: .5rem .75rem;
+    color: var(--muted-foreground, #777);
+}
+
+.vault-editor input[type="text"],
+.vault-editor input[type="password"],
+.vault-editor textarea {
+    width: 100%;
+    max-width: 40rem;
+    box-sizing: border-box;
+}
+
+.vault-edit-field {
+    display: flex;
+    gap: .5rem;
+    align-items: center;
+    margin: .25rem 0;
+}
+
+.vault-toast {
+    position: fixed;
+    right: 1rem;
+    bottom: 1rem;
+    padding: .5rem 1rem;
+    border-radius: var(--radius, 6px);
+    background: var(--foreground, #333);
+    color: var(--background, #fff);
+}
+
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+}
+
 @media (max-width: 768px) {
     .vault-panes {
         grid-template-columns: 1fr;

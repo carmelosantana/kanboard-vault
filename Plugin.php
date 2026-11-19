@@ -8,8 +8,10 @@ use Kanboard\Plugin\Vault\Console\OrgKeygenCommand;
 use Kanboard\Plugin\Vault\Console\OrgRecoverCommand;
 use Kanboard\Plugin\Vault\Console\PurgeCommand;
 use Kanboard\Plugin\Vault\Model\AuditModel;
+use Kanboard\Plugin\Vault\Model\GrantModel;
 use Kanboard\Plugin\Vault\Model\Housekeeping;
 use Kanboard\Plugin\Vault\Model\Notifier;
+use Kanboard\Plugin\Vault\Model\ObjectStore;
 use Kanboard\Plugin\Vault\Model\PrincipalModel;
 use Kanboard\Plugin\Vault\Model\UnlockService;
 use Kanboard\Plugin\Vault\Model\VaultSession;
@@ -33,6 +35,8 @@ class Plugin extends Base
         $this->container['vaultUnlock'] = static fn ($c): UnlockService => new UnlockService($c);
         $this->container['vaultPrincipals'] = static fn ($c): PrincipalModel => new PrincipalModel($c);
         $this->container['vaultHousekeeping'] = static fn ($c): Housekeeping => new Housekeeping($c);
+        $this->container['vaultStore'] = static fn ($c): ObjectStore => new ObjectStore($c);
+        $this->container['vaultGrants'] = static fn ($c): GrantModel => new GrantModel($c);
 
         // The page and its POST endpoints (spec: UI). No template:layout:js or :css: Vault's own templates load
         // vault.js and vault.css, so nothing of Vault's runs on other pages.
@@ -40,6 +44,9 @@ class Plugin extends Base
         $this->route->addRoute('vault/unlock', 'VaultController', 'unlock', 'Vault');
         $this->route->addRoute('vault/lock', 'VaultController', 'lock', 'Vault');
         $this->route->addRoute('vault/enrol', 'VaultController', 'enrol', 'Vault');
+        foreach (['tree', 'list', 'entry', 'field', 'save', 'move', 'delete'] as $action) {
+            $this->route->addRoute('vault/'.$action, 'EntryController', $action, 'Vault');
+        }
         $this->hook->on('template:header:dropdown', ['template' => 'Vault:header/dropdown']);
         $this->hook->on('template:dashboard:sidebar', ['template' => 'Vault:dashboard/sidebar']);
 

@@ -208,46 +208,138 @@ class ObjectStore extends Base
     // value. Ordered by id; $limit is capped at LIST_LIMIT.
     public function listEntries(int $actorId, int $groupId, #[\SensitiveParameter] string $sk, int $offset = 0, int $limit = self::LIST_LIMIT): array
     {
+        return $this->listPage($actorId, $groupId, $sk, $offset, $limit)['entries'];
+    }
+
+    // One page of entry metadata (listEntries' rows) and whether more follow. $groupId null lists the entries shared
+    // with the actor one by one (a live direct grant) whose group the actor can't read; a group's page needs read on
+    // the group. Ordered by id; $limit is capped at LIST_LIMIT.
+    /** @return array{entries: list<array<string,mixed>>, more: bool} */
+    public function listPage(int $actorId, ?int $groupId, #[\SensitiveParameter] string $sk, int $offset = 0, int $limit = self::LIST_LIMIT): array
+    {
         $offset = max(0, $offset);
         $limit = max(1, min(self::LIST_LIMIT, $limit));
         return $this->lock()->shared(function () use ($actorId, $groupId, $sk, $offset, $limit): array {
             $db = $this->vdb();
-            // Opening the group's DEK proves the caller can read the group with this sk.
-            $groupDek = $this->dekFor($db, 'group', $this->fetchObject($db, 'group', $groupId), $actorId, $sk);
-            sodium_memzero($groupDek);
-            $rows = $db->fetchAll(
-                'SELECT * FROM vault_entries WHERE group_id = ? ORDER BY id LIMIT '.$limit.' OFFSET '.$offset,
-                [$groupId]
-            );
-            $out = [];
-            foreach ($rows as $row) {
-                // R23: only entries the caller is entitled to (live grants) are listed. An entitled entry that
-                // fails to decrypt is shown as integrity_error, with no data, rather than failing the page.
-                if ($this->effectivePermission('entry', (int) $row['id'], $actorId, $row) === null) {
-                    continue;
-                }
-                $meta = $this->entryMeta($row);
-                try {
-                    $p = $this->decryptFor($db, 'entry', $row, $actorId, $sk);
-                } catch (VaultException) {
-                    $out[] = ['id' => $meta['id'], 'group_id' => $meta['group_id'], 'integrity_error' => true];
-                    continue;
-                }
-                $out[] = [
-                    'id' => $meta['id'],
-                    'group_id' => $meta['group_id'],
-                    'title' => $p['title'] ?? '',
-                    'username' => $p['username'] ?? '',
-                    'url' => $p['url'] ?? '',
-                    'field_names' => array_map(static fn (array $f): string => (string) $f['name'], $p['fields'] ?? []),
-                    'expires_at' => $p['expires_at'] ?? null,
-                    'version' => $meta['version'],
-                    'updated_at' => $meta['updated_at'],
-                ];
-                unset($p);
+            $window = ' ORDER BY e.id LIMIT '.($limit + 1).' OFFSET '.$offset;
+            if ($groupId !== null) {
+                // Opening the group's DEK proves the caller can read the group with this sk.
+                $groupDek = $this->dekFor($db, 'group', $this->fetchObject($db, 'group', $groupId), $actorId, $sk);
+                sodium_memzero($groupDek);
+                $rows = $db->fetchAll('SELECT e.* FROM vault_entries e WHERE e.group_id = ?'.$window, [$groupId]);
+            } else {
+                $rows = $db->fetchAll(
+                    "SELECT e.* FROM vault_entries e JOIN vault_grants g ON g.subject_type = 'entry' AND g.subject_id = e.id
+                     WHERE g.grantee_id = ? AND (g.expires_at IS NULL OR g.expires_at > ?)".$window,
+                    [$actorId, $this->now()]
+                );
             }
-            return $out;
+            $more = count($rows) > $limit;
+            $out = [];
+            foreach (array_slice($rows, 0, $limit) as $row) {
+                if ($groupId === null && $this->effectivePermission('group', (int) $row['group_id'], $actorId) !== null) {
+                    continue; // listed with its group
+                }
+                $item = $this->listRow($db, $row, $actorId, $sk);
+                if ($item !== null) {
+                    $out[] = $item;
+                }
+            }
+            return ['entries' => $out, 'more' => $more];
         });
+    }
+
+    // The groups the actor sees in the tree: their own, and every group another owner shared with them (a live grant
+    // on it or an ancestor), with the actor's permission. A group whose parent the actor can't see is a root
+    // (parent_id null). R23: only groups the actor is entitled to; one that fails to decrypt is an integrity_error row
+    // with no name. shared_entries says whether listPage(null) has anything. Ordered by id.
+    /** @return array{groups: list<array<string,mixed>>, shared_entries: bool} */
+    public function tree(int $actorId, #[\SensitiveParameter] string $sk): array
+    {
+        return $this->lock()->shared(function () use ($actorId, $sk): array {
+            $db = $this->vdb();
+            $now = $this->now();
+            $ids = array_map(static fn (array $r): int => (int) $r['id'], $db->fetchAll('SELECT id FROM vault_groups WHERE owner_id = ?', [$actorId]));
+            $roots = $db->fetchAll(
+                "SELECT subject_id FROM vault_grants WHERE subject_type = 'group' AND grantee_id = ? AND (expires_at IS NULL OR expires_at > ?)",
+                [$actorId, $now]
+            );
+            foreach ($roots as $r) {
+                $ids = array_merge($ids, ...$this->resolver()->subtreeLevels((int) $r['subject_id']));
+            }
+            $ids = array_values(array_unique($ids));
+            sort($ids);
+            $rows = [];
+            foreach ($ids as $id) {
+                $row = $this->fetchObject($db, 'group', $id);
+                $perm = $row === null ? null : $this->effectivePermission('group', $id, $actorId, $row);
+                if ($perm !== null) {
+                    $rows[$id] = [$row, $perm];
+                }
+            }
+            $groups = [];
+            foreach ($rows as $id => [$row, $perm]) {
+                $parent = $row['parent_id'] === null || ! isset($rows[(int) $row['parent_id']]) ? null : (int) $row['parent_id'];
+                $item = ['id' => $id, 'parent_id' => $parent, 'permission' => $perm, 'owner_id' => (int) $row['owner_id']];
+                try {
+                    $item['name'] = (string) ($this->decryptFor($db, 'group', $row, $actorId, $sk)['name'] ?? '');
+                } catch (VaultException) {
+                    $item['integrity_error'] = true;
+                }
+                $groups[] = $item;
+            }
+            $shared = $db->fetchAll(
+                "SELECT e.group_id FROM vault_entries e JOIN vault_grants g ON g.subject_type = 'entry' AND g.subject_id = e.id
+                 WHERE g.grantee_id = ? AND (g.expires_at IS NULL OR g.expires_at > ?)",
+                [$actorId, $now]
+            );
+            $sharedEntries = false;
+            foreach ($shared as $r) {
+                if ($this->effectivePermission('group', (int) $r['group_id'], $actorId) === null) {
+                    $sharedEntries = true;
+                    break;
+                }
+            }
+            return ['groups' => $groups, 'shared_entries' => $sharedEntries];
+        });
+    }
+
+    // The actor's permission on an object ('owner'|'edit'|'read'|null), for the UI only: what to offer. Every write
+    // checks it again inside its own lock.
+    public function permission(int $actorId, string $type, int $id): ?string
+    {
+        if (! in_array($type, self::TYPES, true)) {
+            throw new InvalidArgumentException('Vault: unknown object type');
+        }
+        return $this->lock()->shared(fn (): ?string => $this->effectivePermission($type, $id, $actorId));
+    }
+
+    // One list row. R23: an entry the caller isn't entitled to (live grants) is left out (null); an entitled one that
+    // fails to decrypt is shown as integrity_error, with no data, rather than failing the page.
+    private function listRow(VaultDb $db, array $row, int $actorId, #[\SensitiveParameter] string $sk): ?array
+    {
+        if ($this->effectivePermission('entry', (int) $row['id'], $actorId, $row) === null) {
+            return null;
+        }
+        $meta = $this->entryMeta($row);
+        try {
+            $p = $this->decryptFor($db, 'entry', $row, $actorId, $sk);
+        } catch (VaultException) {
+            return ['id' => $meta['id'], 'group_id' => $meta['group_id'], 'integrity_error' => true];
+        }
+        $out = [
+            'id' => $meta['id'],
+            'group_id' => $meta['group_id'],
+            'title' => $p['title'] ?? '',
+            'username' => $p['username'] ?? '',
+            'url' => $p['url'] ?? '',
+            'field_names' => array_map(static fn (array $f): string => (string) $f['name'], $p['fields'] ?? []),
+            'expires_at' => $p['expires_at'] ?? null,
+            'version' => $meta['version'],
+            'updated_at' => $meta['updated_at'],
+        ];
+        unset($p);
+        return $out;
     }
 
     // Owner only, and the owner must be unlocked: $sk must be the actor's current key (R25). A group takes

@@ -1,6 +1,7 @@
 <?php
 require_once 'tests/units/Base.php';
 require_once __DIR__.'/Support/ServiceFixture.php';
+require_once __DIR__.'/Support/VaultTestResponse.php';
 
 use Kanboard\Controller\DashboardController;
 use Kanboard\Core\Http\Request;
@@ -17,43 +18,6 @@ use Kanboard\Plugin\Vault\Model\VaultSettings;
 use Kanboard\Plugin\Vault\Plugin;
 use Kanboard\Plugin\Vault\Test\Support\Fixtures;
 use KanboardTests\units\Base;
-
-// Captures what a controller sends instead of emitting headers.
-class VaultTestResponse extends Response
-{
-    public array $headers = [];
-    public int $status = 200;
-    public string $body = '';
-    public bool $sent = false;
-
-    public function withHeader($header, $value)
-    {
-        $this->headers[$header] = $value;
-        return parent::withHeader($header, $value);
-    }
-
-    public function withStatusCode($statusCode)
-    {
-        $this->status = (int) $statusCode;
-        return parent::withStatusCode($statusCode);
-    }
-
-    public function withBody($body)
-    {
-        $this->body = (string) $body;
-        return parent::withBody($body);
-    }
-
-    public function send()
-    {
-        $this->sent = true;
-    }
-
-    public function json_(): array
-    {
-        return json_decode($this->body, true) ?? [];
-    }
-}
 
 // Spec: UI → States, Assets and headers, Unlocked sessions; carries R18, R21, R22, R28, T6, T7, T9.
 class VaultControllerTest extends Base
