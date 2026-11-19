@@ -81,22 +81,41 @@ class UnlockService extends Base
             }
 
             $this->recordSuccess($userId, $ipBucket);
-            if (! empty($wrap['resume'])) {
-                $keys = $this->rotation->resume($userId, $sk);
-                try {
-                    $this->rotation->complete($userId, $keys['sk1'], $keys['sk2']);
-                } finally {
-                    sodium_memzero($keys['sk1']);
-                    sodium_memzero($keys['sk2']);
-                }
-            }
             $this->upgradeKdf($wrap, $sk, $passphrase);
-            return $this->session->create($userId, $sk);
+            if (empty($wrap['resume'])) {
+                return $this->session->create($userId, $sk);
+            }
+            return $this->resumeRotation($userId, $sk);
         } finally {
             if (is_string($sk)) {
                 sodium_memzero($sk);
             }
             $slot->release();
+        }
+    }
+
+    // R33: once resume has verified sk2 (and, through the bridge, sk1) the unlock succeeds. The session holds sk1
+    // and sk2 as the initiating session does (enc_sk, enc_sk_next), so it serves sk2 and finish switches it over.
+    // The rotation then continues best-effort; a failure there is logged (the exception class only, never a
+    // message that could carry data) and the rotation stays pending for a later request.
+    private function resumeRotation(int $userId, #[\SensitiveParameter] string $sk2): string
+    {
+        try {
+            $keys = $this->rotation->resume($userId, $sk2);
+        } catch (VaultException) {
+            throw new VaultException('unlock_failed');
+        }
+        try {
+            $sessionKey = $this->session->create($userId, $keys['sk1'], $keys['sk2']);
+            try {
+                $this->rotation->complete($userId, $keys['sk1'], $keys['sk2']);
+            } catch (\Throwable $e) {
+                $this->logger->warning('Vault: key rotation for user '.$userId.' could not complete at unlock and stays pending ('.get_class($e).')');
+            }
+            return $sessionKey;
+        } finally {
+            sodium_memzero($keys['sk1']);
+            sodium_memzero($keys['sk2']);
         }
     }
 

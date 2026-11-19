@@ -79,13 +79,14 @@ class VaultSession extends Base
     }
 
     // Stores sk for this UI session and sets the cookie. Returns the raw 32-byte session_key.
-    // The caller keeps (and wipes) its own copy of sk.
-    public function create(int $userId, #[\SensitiveParameter] string $sk): string
+    // The caller keeps (and wipes) its own copy of sk. $nextSk (a rotation resumed at unlock) is stored as
+    // enc_sk_next under the same session_key and AD, as start does for the initiating session.
+    public function create(int $userId, #[\SensitiveParameter] string $sk, #[\SensitiveParameter] ?string $nextSk = null): string
     {
         if (! $this->transportAllowed()) {
             throw new VaultException('https_required');
         }
-        if (strlen($sk) !== SODIUM_CRYPTO_BOX_SECRETKEYBYTES || $userId <= 0) {
+        if (strlen($sk) !== SODIUM_CRYPTO_BOX_SECRETKEYBYTES || $userId <= 0 || ($nextSk !== null && strlen($nextSk) !== SODIUM_CRYPTO_BOX_SECRETKEYBYTES)) {
             throw new InvalidArgumentException('Vault session: bad secret key or user');
         }
         $sidHash = $this->sidHash();
@@ -105,6 +106,11 @@ class VaultSession extends Base
             'idle_expires_at' => min($now + $this->idleTimeout(), $now + self::ABSOLUTE_TIMEOUT),
             'abs_expires_at' => $now + self::ABSOLUTE_TIMEOUT,
         ];
+        if ($nextSk !== null) {
+            $next = Aead::seal($nextSk, $sessionKey, self::ad($sidHash, $userId, $now));
+            $row['nonce_next'] = base64_encode($next['nonce']);
+            $row['enc_sk_next'] = base64_encode($next['ct']);
+        }
         $this->vaultLock()->exclusive(function () use ($row): void {
             $db = new VaultDb($this->container);
             $db->execute('DELETE FROM vault_sessions WHERE sid_hash = ?', [$row['sid_hash']]);

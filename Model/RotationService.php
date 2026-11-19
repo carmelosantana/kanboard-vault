@@ -7,6 +7,7 @@ use Kanboard\Core\Base;
 use Kanboard\Plugin\Vault\Crypto\Bridge;
 use Kanboard\Plugin\Vault\Crypto\CryptoException;
 use Kanboard\Plugin\Vault\Crypto\Kdf;
+use Kanboard\Plugin\Vault\Crypto\Sealer;
 use Kanboard\Plugin\Vault\Crypto\Wraps;
 use RuntimeException;
 use SodiumException;
@@ -25,6 +26,11 @@ use ValueError;
 //           is re-checked for live access and re-keyed (new DEK, key_epoch + 1, sealed to every effective
 //           recipient, the rotating principal at the new key only). Objects shared with the principal are
 //           re-keyed too, not just re-sealed: re-sealing would leave a DEK that sk1 recovers from an old backup.
+//           Each batch first opens the bridge with sk2 and requires exactly sk1; anything else aborts the batch.
+//           R31 (revised): the principal's rows on an object are dropped (and the object queued) only when it is
+//           no longer an effective recipient, or when its rows open with neither sk1 nor sk2. A DEK that opens
+//           but whose payload or crypto_v doesn't is kept: the object stays old-generation, is reported as an
+//           integrity error (integrityErrors(); complete() throws integrity_error) and finish stays refused.
 //   finish  refused while an old-generation row remains; otherwise the pending wraps become active, the bridge
 //           is deleted, public_key = new_pk, key_gen + 1, enc_sk_next moves to enc_sk, rotating is cleared.
 //
@@ -44,6 +50,8 @@ class RotationService extends Base
     private VaultSession $session;
     private ?Closure $hook;
     private int $batch;
+    /** @var list<array{0:string,1:int}> */
+    private array $integrityErrors = [];
 
     // $hook is test-only: called as ($point, $index, $seconds) after start commits ('start', 0) and after each
     // sweep batch commits ('batch', k). A hook that throws simulates a crash at that point.
@@ -166,6 +174,7 @@ class RotationService extends Base
                     'new_pk' => base64_encode($pk2),
                     'bridge_nonce' => base64_encode($bridge['nonce']),
                     'bridge' => base64_encode($bridge['ct']),
+                    // start is one transaction, so 'start' is never observable: it commits straight into sweep.
                     'phase' => 'sweep',
                     'started_at' => $now,
                 ], null);
@@ -209,30 +218,39 @@ class RotationService extends Base
         }
     }
 
-    // Phase sweep, in batches of $batch objects, one exclusive transaction each, until none is left or
-    // $maxBatches batches ran. Returns the number of objects still holding an old-generation row for the
-    // principal (0 also when no rotation is in progress).
+    // Phase sweep, in batches of $batch objects, one exclusive transaction each, one pass in (type, id) order
+    // until no object is left or $maxBatches batches ran. Returns the number of objects still holding an
+    // old-generation row for the principal (0 also when no rotation is in progress). Objects kept for an
+    // integrity fault during this call are listed by integrityErrors().
     public function sweep(int $userId, #[\SensitiveParameter] string $sk1, #[\SensitiveParameter] string $sk2, int $batch = self::DEFAULT_BATCH, ?int $maxBatches = null): int
     {
         $batch = max(1, $batch);
+        $this->integrityErrors = [];
+        $cursor = null;
         for ($k = 0; ; $k++) {
             $t0 = microtime(true);
-            $result = $this->lock()->exclusive(fn (): ?array => $this->sweepBatch($userId, $sk1, $sk2, $batch));
+            $result = $this->lock()->exclusive(fn (): ?array => $this->sweepBatch($userId, $sk1, $sk2, $batch, $cursor));
             if ($result === null) {
                 return 0;
             }
-            [$processed, $left, $before] = $result;
+            [$processed, $left, $cursor, $faults] = $result;
+            array_push($this->integrityErrors, ...$faults);
             if ($processed === 0) {
                 return $left;
             }
             $this->fire('batch', $k, microtime(true) - $t0);
-            if ($left >= $before) {
-                throw new RuntimeException('Vault: a rotation batch made no progress');
-            }
             if ($left === 0 || ($maxBatches !== null && $k + 1 >= $maxBatches)) {
                 return $left;
             }
         }
+    }
+
+    // The objects the last sweep() kept at the old generation because their DEK opens but their payload or
+    // crypto_v doesn't (R31). For T10 to audit as integrity events.
+    /** @return list<array{0:string,1:int}> */
+    public function integrityErrors(): array
+    {
+        return $this->integrityErrors;
     }
 
     // Phase finish. rotation_incomplete (and the phase goes back to sweep) while any key row for the principal
@@ -303,10 +321,14 @@ class RotationService extends Base
     }
 
     // Sweep to the end, then finish. Grants that land between the last batch and finish send it back to sweep.
+    // integrity_error (the rotation stays pending) when the sweep had to keep objects for an integrity fault.
     public function complete(int $userId, #[\SensitiveParameter] string $sk1, #[\SensitiveParameter] string $sk2): void
     {
         for ($attempt = 1; ; $attempt++) {
             $this->sweep($userId, $sk1, $sk2, $this->batch);
+            if ($this->integrityErrors !== []) {
+                throw new VaultException('integrity_error');
+            }
             try {
                 $this->finish($userId);
                 return;
@@ -318,8 +340,9 @@ class RotationService extends Base
         }
     }
 
-    // One sweep batch inside the exclusive lock: [processed, left after, left before], or null without a rotation.
-    private function sweepBatch(int $userId, #[\SensitiveParameter] string $sk1, #[\SensitiveParameter] string $sk2, int $batch): ?array
+    // One sweep batch inside the exclusive lock: [processed, left, cursor, integrity faults], or null without a
+    // rotation. The bridge must open with sk2 to exactly sk1, or the batch aborts (rolls back) before any change.
+    private function sweepBatch(int $userId, #[\SensitiveParameter] string $sk1, #[\SensitiveParameter] string $sk2, int $batch, ?array $cursor): ?array
     {
         $db = $this->vdb();
         $rekeyer = $this->rekeyer();
@@ -334,40 +357,102 @@ class RotationService extends Base
             || ! hash_equals($principal['public_key'], $pk1) || ! hash_equals($rotation['new_pk'], $pk2)) {
             throw new VaultException('not_found');
         }
+        $bridged = '';
+        try {
+            $bridged = Bridge::open($rotation['bridge_nonce'], $rotation['bridge'], $sk2, $userId, $rotation['old_pk'], $rotation['new_pk']);
+            $bridgeOk = hash_equals($bridged, $sk1);
+        } catch (CryptoException) {
+            $bridgeOk = false;
+        } finally {
+            sodium_memzero($bridged);
+        }
+        if (! $bridgeOk) {
+            throw new RuntimeException('Vault: the rotation bridge does not open to the current key; the sweep stops');
+        }
         $gen = $principal['key_gen'];
-        $before = $this->oldGenerationLeft($db, $userId, $gen);
+        $after = $cursor === null ? '' : ' AND (object_type > ? OR (object_type = ? AND object_id > ?))';
         $objects = $db->fetchAll(
-            'SELECT DISTINCT object_type, object_id FROM vault_keys WHERE principal_id = ? AND principal_key_gen = ? ORDER BY object_type, object_id LIMIT '.$batch,
-            [$userId, $gen]
+            'SELECT DISTINCT object_type, object_id FROM vault_keys WHERE principal_id = ? AND principal_key_gen = ?'.$after
+            .' ORDER BY object_type, object_id LIMIT '.$batch,
+            $cursor === null ? [$userId, $gen] : [$userId, $gen, $cursor[0], $cursor[0], $cursor[1]]
         );
+        $faults = [];
         foreach ($objects as $o) {
-            $this->sweepObject($db, (string) $o['object_type'], (int) $o['object_id'], $userId, $sk2);
+            $cursor = [(string) $o['object_type'], (int) $o['object_id']];
+            if (! $this->sweepObject($db, $cursor[0], $cursor[1], $userId, $gen, $sk1, $sk2)) {
+                $faults[] = $cursor;
+            }
         }
         $left = $this->oldGenerationLeft($db, $userId, $gen);
         $db->execute('UPDATE vault_rotations SET phase = ? WHERE user_id = ?', [$left === 0 ? 'finish' : 'sweep', $userId]);
-        return [count($objects), $left, $before];
+        return [count($objects), $left, $cursor, $faults];
     }
 
-    // Re-checks live access, then re-keys the object with the rotating principal as the holder (sk2 opens the
-    // old-generation row through the bridge). A principal that has lost access, or whose row doesn't open, loses
-    // its key rows and the object is queued, so another holder re-keys it and the write barrier holds meanwhile.
-    private function sweepObject(VaultDb $db, string $type, int $id, int $userId, #[\SensitiveParameter] string $sk2): void
+    // Re-checks live access, then re-keys the object with the rotating principal as the holder (sk2 reaches both
+    // generations; the batch has checked the bridge). False for an integrity fault: the DEK is kept and the
+    // object stays old-generation. The principal's rows are dropped and the object queued (so another holder
+    // re-keys it, and the write barrier holds meanwhile) only when it lost access or its rows open with neither
+    // key: nothing anyone could read is lost that way.
+    private function sweepObject(VaultDb $db, string $type, int $id, int $userId, int $gen, #[\SensitiveParameter] string $sk1, #[\SensitiveParameter] string $sk2): bool
     {
         $resolver = new RecipientResolver($this->container);
         $row = isset(RecipientResolver::TABLES[$type]) ? $resolver->object($type, $id) : null;
         if ($row === null) {
             // R8: a key row for a missing object grants nothing; drop it.
             $this->dropKeys($db, $type, $id, $userId);
-            return;
+            return true;
         }
         (new GrantModel($this->container, $this->clock))->reconcileExpired($type, $id);
         $row = $resolver->object($type, $id);
         $rekeyer = $this->rekeyer();
-        if (isset($resolver->effective($type, $id, $this->now(), $row)[$userId]) && $rekeyer->rekeyRow($db, $type, $row, $userId, $sk2)) {
-            return;
+        if (! isset($resolver->effective($type, $id, $this->now(), $row)[$userId])) {
+            $this->dropKeys($db, $type, $id, $userId);
+            $rekeyer->enqueue($db, $type, $id, (int) $row['key_epoch']);
+            return true;
+        }
+        if ($rekeyer->rekeyRow($db, $type, $row, $userId, $sk2)) {
+            return true;
+        }
+        if ($this->anyRowOpens($db, $type, $id, $userId, $gen, $sk1, $sk2)) {
+            return false;
         }
         $this->dropKeys($db, $type, $id, $userId);
         $rekeyer->enqueue($db, $type, $id, (int) $row['key_epoch']);
+        return true;
+    }
+
+    // Does any of the principal's key rows on the object open, with sk1 or sk2, at the row's own epoch?
+    private function anyRowOpens(VaultDb $db, string $type, int $id, int $userId, int $gen, #[\SensitiveParameter] string $sk1, #[\SensitiveParameter] string $sk2): bool
+    {
+        $rows = $db->fetchAll(
+            'SELECT key_epoch, sealed_dek FROM vault_keys WHERE object_type = ? AND object_id = ? AND principal_id = ?',
+            [$type, $id, $userId]
+        );
+        $keypairs = [
+            sodium_crypto_box_keypair_from_secretkey_and_publickey($sk1, sodium_crypto_box_publickey_from_secretkey($sk1)),
+            sodium_crypto_box_keypair_from_secretkey_and_publickey($sk2, sodium_crypto_box_publickey_from_secretkey($sk2)),
+        ];
+        try {
+            foreach ($rows as $r) {
+                $sealed = base64_decode((string) $r['sealed_dek'], true);
+                if ($sealed === false) {
+                    continue;
+                }
+                foreach (array_keys($keypairs) as $i) {
+                    try {
+                        $dek = Sealer::openDek($sealed, $keypairs[$i], $type, $id, (int) $r['key_epoch'], $userId);
+                        sodium_memzero($dek);
+                        return true;
+                    } catch (CryptoException) {
+                    }
+                }
+            }
+            return false;
+        } finally {
+            foreach (array_keys($keypairs) as $i) {
+                sodium_memzero($keypairs[$i]);
+            }
+        }
     }
 
     private function dropKeys(VaultDb $db, string $type, int $id, int $userId): void

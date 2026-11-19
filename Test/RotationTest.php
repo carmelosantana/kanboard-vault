@@ -81,9 +81,11 @@ class RotationTest extends Base
         return new PrincipalModel($this->container, $this->slots(), $this->argon(), fn () => $this->now, $this->rotation($batch));
     }
 
+    private int $unlockBatch = 100;
+
     private function unlockService(): UnlockService
     {
-        return new UnlockService($this->container, $this->slots(), $this->argon(), $this->session(), $this->limiter(), fn () => $this->now, $this->rotation());
+        return new UnlockService($this->container, $this->slots(), $this->argon(), $this->session(), $this->limiter(), fn () => $this->now, $this->rotation($this->unlockBatch));
     }
 
     private function store(): ObjectStore
@@ -550,6 +552,145 @@ class RotationTest extends Base
         $this->pdo()->prepare('UPDATE vault_rotations SET bridge_nonce = ?, bridge = ? WHERE user_id = ?')
             ->execute([base64_encode($box['nonce']), base64_encode($box['ct']), $this->alice]);
         $this->assertVaultError('not_found', fn () => $this->rotation()->resume($this->alice, $sk2));
+    }
+
+    // Starts Alice's Rotate my keys and crashes right after start. Returns [sk1, sk2].
+    private function startedRotation(): array
+    {
+        $sk1 = $this->skFor($this->alice, $this->alicePassphrase);
+        $this->crashAt('start');
+        $this->thrown(fn () => $this->rotation()->requestManual($this->alice, $sk1, $this->alicePassphrase));
+        $this->crashWhen = null;
+        $pending = $this->row("SELECT * FROM vault_wraps WHERE user_id = ? AND status = 'pending'", [$this->alice]);
+        $rot = $this->row('SELECT * FROM vault_rotations WHERE user_id = ?', [$this->alice]);
+        return [$sk1, Wraps::unwrap($pending, $this->kek($this->alicePassphrase, $pending), base64_decode($rot['new_pk']))];
+    }
+
+    private function aliceRows(string $type, int $id): array
+    {
+        $s = $this->pdo()->prepare('SELECT principal_key_gen, key_epoch, sealed_dek FROM vault_keys WHERE object_type = ? AND object_id = ? AND principal_id = ? ORDER BY principal_key_gen');
+        $s->execute([$type, $id, $this->alice]);
+        return $s->fetchAll(\PDO::FETCH_ASSOC);
+    }
+
+    private function queued(string $type, int $id): bool
+    {
+        return $this->row('SELECT id FROM vault_rekey_queue WHERE object_type = ? AND object_id = ?', [$type, $id]) !== null;
+    }
+
+    // R31 (revised): a bridge that doesn't open (here: it holds another key, correctly sealed under sk2, so the
+    // old_pk check fails) aborts the sweep batch; nothing is dropped or re-keyed. Kills: swallowing a bridge
+    // failure in the sweep (degrading to "next generation only") and dropping the rows it then can't open.
+    public function testSweepAbortsOnBridgeFailureAndKeepsTheDeks(): void
+    {
+        $this->populate();
+        [$sk1, $sk2] = $this->startedRotation();
+        $rot = $this->row('SELECT * FROM vault_rotations WHERE user_id = ?', [$this->alice]);
+        $box = Aead::seal(sodium_crypto_box_secretkey(sodium_crypto_box_keypair()), sodium_crypto_generichash(Encoding::enc('bridge'), $sk2, 32),
+            Encoding::enc('bridge', $this->alice, base64_decode($rot['old_pk']), base64_decode($rot['new_pk'])));
+        $this->pdo()->prepare('UPDATE vault_rotations SET bridge_nonce = ?, bridge = ? WHERE user_id = ?')
+            ->execute([base64_encode($box['nonce']), base64_encode($box['ct']), $this->alice]);
+        $keysBefore = $this->pdo()->query('SELECT * FROM vault_keys ORDER BY object_type, object_id, principal_id, principal_key_gen')->fetchAll(\PDO::FETCH_ASSOC);
+        $epochs = $this->epochs();
+
+        $e = $this->thrown(fn () => $this->rotation()->sweep($this->alice, $sk1, $sk2));
+        $this->assertNotSame('injected crash', $e->getMessage());
+        $this->assertSame($keysBefore, $this->pdo()->query('SELECT * FROM vault_keys ORDER BY object_type, object_id, principal_id, principal_key_gen')->fetchAll(\PDO::FETCH_ASSOC));
+        $this->assertSame($epochs, $this->epochs());
+        $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_rekey_queue'));
+        $this->assertSame('a1', $this->read($this->alice, 'entry', $this->objs[2][1], $sk1)['title']);
+    }
+
+    // R31 (revised): Alice's DEK opens but the payload doesn't (a flipped ciphertext byte) or crypto_v is
+    // unknown. Her DEK is kept, the object stays old-generation, complete() reports integrity_error and finish
+    // stays refused. Every other object is still swept. Kills: dropping the rows on any re-key failure.
+    public function testPayloadOrCryptoVersionFailureKeepsTheDekAndBlocksFinish(): void
+    {
+        $this->populate();
+        [$sk1, $sk2] = $this->startedRotation();
+        $e1 = $this->objs[2][1];
+        $e2 = $this->objs[3][1];
+        $ct = base64_decode($this->row('SELECT ciphertext FROM vault_entries WHERE id = ?', [$e1])['ciphertext']);
+        $ct[5] = chr(ord($ct[5]) ^ 1);
+        $this->pdo()->prepare('UPDATE vault_entries SET ciphertext = ? WHERE id = ?')->execute([base64_encode($ct), $e1]);
+        $this->pdo()->prepare('UPDATE vault_entries SET crypto_v = 2 WHERE id = ?')->execute([$e2]);
+
+        $r = $this->rotation();
+        $this->assertVaultError('integrity_error', fn () => $r->complete($this->alice, $sk1, $sk2));
+        foreach ([$e1, $e2] as $id) {
+            $rows = $this->aliceRows('entry', $id);
+            $this->assertSame([1], array_map('intval', array_column($rows, 'principal_key_gen')), "entry $id keeps its old-generation row");
+            $this->assertSame(32, strlen(Sealer::openDek(base64_decode($rows[0]['sealed_dek']), $this->keypair($sk1), 'entry', $id, 1, $this->alice)));
+            $this->assertFalse($this->queued('entry', $id));
+        }
+        $this->assertSame(2, $this->countRows('SELECT COUNT(*) FROM (SELECT DISTINCT object_type, object_id FROM vault_keys WHERE principal_id = ? AND principal_key_gen = 1)', [$this->alice]), 'only the two faulty objects are left');
+        $this->assertSame([['entry', $e1], ['entry', $e2]], $r->integrityErrors());
+        $this->assertVaultError('rotation_incomplete', fn () => $this->rotation()->finish($this->alice));
+        $this->assertNotNull($this->row('SELECT * FROM vault_rotations WHERE user_id = ?', [$this->alice]));
+    }
+
+    // R31 (revised) (a): a principal that is no longer an effective recipient (its grant row vanished, as an
+    // offline cascade would leave it) loses its rows on those objects and they are queued; Bob drains them.
+    // Kills: keeping the rows of a principal that lost access.
+    public function testSweepDropsTheRowsOfAPrincipalThatLostAccess(): void
+    {
+        $this->populate();
+        [$sk1, $sk2] = $this->startedRotation();
+        $this->pdo()->prepare("DELETE FROM vault_grants WHERE subject_type = 'group' AND grantee_id = ?")->execute([$this->alice]);
+        $this->rotation()->complete($this->alice, $sk1, $sk2);
+        foreach ([8, 9, 10] as $i) {
+            [$t, $id] = $this->objs[$i];
+            $this->assertSame([], $this->aliceRows($t, $id), "alice lost $t $id");
+            $this->assertTrue($this->queued($t, $id), "$t $id is queued");
+        }
+        $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_rotations'));
+        $bobSk = $this->skFor($this->bob, $this->bobPassphrase);
+        $this->assertSame(3, (new \Kanboard\Plugin\Vault\Model\Rekeyer($this->container, fn () => $this->now))->drainQueue($this->bob, $bobSk));
+        $this->assertSame('b1', $this->read($this->bob, 'entry', $this->objs[9][1], $bobSk)['title']);
+        $this->assertVaultError('not_found', fn () => $this->read($this->alice, 'entry', $this->objs[9][1], $sk2));
+    }
+
+    // R31 (revised) (b): a row that opens with neither sk1 nor sk2 (the bridge opened and both keys checked) is
+    // dropped and the object queued, so another holder re-keys it to Alice's new key. Kills: never dropping, which
+    // would block finish forever on a row nobody can use.
+    public function testSweepDropsATrulyUnopenableRow(): void
+    {
+        $this->populate();
+        [$sk1, $sk2] = $this->startedRotation();
+        $e4 = $this->objs[5][1];
+        $junk = Sealer::sealDek(random_bytes(32), 'entry', $e4, 1, $this->alice, sodium_crypto_box_publickey(sodium_crypto_box_keypair()));
+        $this->pdo()->prepare("UPDATE vault_keys SET sealed_dek = ? WHERE object_type = 'entry' AND object_id = ? AND principal_id = ?")
+            ->execute([base64_encode($junk), $e4, $this->alice]);
+        $this->rotation()->complete($this->alice, $sk1, $sk2);
+        $this->assertSame([], $this->aliceRows('entry', $e4));
+        $this->assertTrue($this->queued('entry', $e4));
+        $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_rotations'));
+        $bobSk = $this->skFor($this->bob, $this->bobPassphrase);
+        (new \Kanboard\Plugin\Vault\Model\Rekeyer($this->container, fn () => $this->now))->drainQueue($this->bob, $bobSk);
+        $this->assertSame('a4', $this->read($this->alice, 'entry', $e4, $sk2)['title'], "bob's re-key reaches alice's new key");
+    }
+
+    // R33: unlock succeeds once resume has verified sk2. The session works with sk2 and the rotation stays
+    // pending when the sweep fails (an injected crash after batch 0, then an integrity fault). Kills: letting a
+    // sweep failure escape the unlock.
+    public function testUnlockSucceedsWhileTheSweepFails(): void
+    {
+        $this->populate();
+        [$sk1, $sk2] = $this->startedRotation();
+        $this->pdo()->exec('DELETE FROM vault_sessions');
+        $this->unlockBatch = 2;
+        $this->crashAt('batch', 0);
+        $sk = $this->unlockFresh($this->alice, $this->alicePassphrase, 'php-session-U1');
+        $this->assertSame($sk2, $sk);
+        $this->assertNotNull($this->row('SELECT * FROM vault_rotations WHERE user_id = ?', [$this->alice]), 'the rotation stays pending');
+        $this->assertAliceReadsEverything($sk);
+
+        $this->crashWhen = null;
+        $this->pdo()->prepare('UPDATE vault_entries SET crypto_v = 2 WHERE id = ?')->execute([$this->objs[7][1]]);
+        $sk = $this->unlockFresh($this->alice, $this->alicePassphrase, 'php-session-U2');
+        $this->assertSame($sk2, $sk);
+        $this->assertNotNull($this->row('SELECT * FROM vault_rotations WHERE user_id = ?', [$this->alice]));
+        $this->assertSame('a1', $this->read($this->alice, 'entry', $this->objs[2][1], $sk)['title']);
     }
 
     // R12: every sk, KEK, factor list and passphrase parameter of the rotation code is #[\SensitiveParameter],

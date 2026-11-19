@@ -222,7 +222,7 @@ class Rekeyer extends Base
     {
         $keypairs = $this->holderKeypairs($db, $holderId, $sk);
         try {
-            foreach ($keypairs as $gen => $keypair) {
+            foreach (array_keys($keypairs) as $gen) {
                 $key = $db->fetchOne(
                     'SELECT key_epoch, sealed_dek FROM vault_keys WHERE object_type = ? AND object_id = ? AND principal_id = ? AND principal_key_gen = ?',
                     [$type, $id, $holderId, $gen]
@@ -235,14 +235,14 @@ class Rekeyer extends Base
                     continue;
                 }
                 try {
-                    return Sealer::openDek($sealed, $keypair, $type, $id, $keyEpoch, $holderId);
+                    return Sealer::openDek($sealed, $keypairs[$gen], $type, $id, $keyEpoch, $holderId);
                 } catch (CryptoException|SodiumException|ValueError) {
                     continue;
                 }
             }
             return null;
         } finally {
-            foreach ($keypairs as $gen => $unused) {
+            foreach (array_keys($keypairs) as $gen) {
                 sodium_memzero($keypairs[$gen]);
             }
         }
