@@ -1,6 +1,6 @@
 // A small fake DOM for the Vault JS tests (zero-dependency; not a *.test.mjs, so index.js doesn't run it).
-// It parses the real Template/vault/{tree,list,detail,edit}.php (PHP stripped: t('…') becomes its text, any other
-// echo becomes "X"), adds the shell's app, toolbar and toast, and runs vault-browser.js and vault-generator.js in one
+// It parses the real Template/vault/{tree,list,detail,edit,share_dialog,activity}.php (PHP stripped: t('…') becomes its text, any other
+// echo becomes "X"), adds the shell's app, toolbar and toast, and runs vault-browser.js, vault-generator.js and vault-share.js in one
 // vm context. Elements support the selectors the scripts use, bubbling events, form.elements and select.options.
 // innerHTML, outerHTML and insertAdjacentHTML throw, so a test fails if a script ever reaches for them.
 import { readFileSync } from 'node:fs';
@@ -182,8 +182,9 @@ export function parseInto(doc, parent, html) {
 
 export const WORDLIST_URL = '/plugins/Vault/Assets/vendor/eff_large_wordlist.txt';
 
-// The unlocked Vault page. api(action, body) answers each KBVault.api call; return a Promise to hold it.
-export function loadPage({ api, crypto, wordlist = '', math = Math } = {}) {
+// The unlocked Vault page. api(action, body) answers each KBVault.api call; return a Promise to hold it. fetch, confirm
+// and prompt stand in for the window's.
+export function loadPage({ api, crypto, wordlist = '', math = Math, fetch, confirm = () => true, prompt = () => null } = {}) {
   const doc = new Doc();
   const calls = [];
   const fetches = [];
@@ -196,6 +197,7 @@ export function loadPage({ api, crypto, wordlist = '', math = Math } = {}) {
     </ul>
     <div id="vault-app" data-vault-state="unlocked" data-messages='{"failed":"Something went wrong.","saved":"Saved.","from":"from"}'>
       <div class="vault-panes" data-vault-panes>${tpl('tree')}${tpl('list')}<section class="vault-detail">${tpl('detail')}${tpl('edit')}</section></div>
+      ${tpl('share_dialog')}${tpl('activity')}
     </div>
     <p class="vault-toast" data-vault-toast role="status" hidden></p>`);
   const panel = doc.querySelector('[data-vault-generator]');
@@ -208,11 +210,11 @@ export function loadPage({ api, crypto, wordlist = '', math = Math } = {}) {
     setTimeout: () => 0,
     clearTimeout: () => {},
     location: { reload: () => {} },
-    prompt: () => null,
-    confirm: () => true,
+    prompt,
+    confirm,
     fetch: (url) => {
       fetches.push(url);
-      return Promise.resolve({ ok: true, text: () => Promise.resolve(wordlist) });
+      return fetch ? fetch(url) : Promise.resolve({ ok: true, text: () => Promise.resolve(wordlist) });
     },
     KBVault: {
       api: (action, body) => {
@@ -222,7 +224,7 @@ export function loadPage({ api, crypto, wordlist = '', math = Math } = {}) {
     },
   };
   const ctx = vm.createContext({ window, Math: math });
-  for (const f of ['vault-browser.js', 'vault-generator.js']) {
+  for (const f of ['vault-browser.js', 'vault-generator.js', 'vault-share.js']) {
     vm.runInContext(readFileSync(path(`Assets/js/${f}`), 'utf8'), ctx, { filename: f });
   }
   const messages = {};

@@ -7,6 +7,7 @@
         <h3 data-field="title"></h3>
         <div class="vault-detail-actions">
             <button type="button" class="btn btn-small" data-vault-action="edit" hidden><?= t('Edit') ?></button>
+            <button type="button" class="btn btn-small" data-vault-action="share-entry" data-vault-share-button hidden><?= t('Share') ?></button>
             <select class="vault-move" data-vault-move aria-label="<?= t('Move to group') ?>" hidden>
                 <option value=""><?= t('Move to…') ?></option>
             </select>

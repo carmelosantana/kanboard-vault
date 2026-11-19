@@ -115,6 +115,9 @@ class VaultController extends BaseVaultController
         foreach (['tree', 'list', 'entry', 'field', 'save', 'move', 'delete'] as $action) {
             $endpoints[$action] = $url($action, 'EntryController');
         }
+        foreach (['sharing', 'grant', 'revoke', 'activity'] as $action) {
+            $endpoints[$action] = $url($action, 'ShareGrantController');
+        }
         return [
             'csrf' => $this->token->getReusableCSRFToken(),
             'endpoints' => $endpoints,
@@ -145,6 +148,9 @@ class VaultController extends BaseVaultController
                 'no_entries' => t('No entries.'),
                 'shared_entries' => t('Entries shared with me'),
                 'from' => t('from'),
+                'not_enrolled' => t('They haven\'t set up their vault yet.'),
+                'agent_read_only' => t('Agents can only be given Read access.'),
+                'shared' => t('Shared.'),
             ],
         ];
     }

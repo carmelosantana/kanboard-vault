@@ -1,11 +1,9 @@
 <?php
 namespace Kanboard\Plugin\Vault\Controller;
 
-use InvalidArgumentException;
 use JsonException;
 use Kanboard\Plugin\Vault\Model\AuditModel;
 use Kanboard\Plugin\Vault\Model\ClientIp;
-use Kanboard\Plugin\Vault\Model\GrantModel;
 use Kanboard\Plugin\Vault\Model\ObjectStore;
 use Kanboard\Plugin\Vault\Model\VaultException;
 
@@ -19,7 +17,8 @@ use Kanboard\Plugin\Vault\Model\VaultException;
 //   vault/entry   {id}                                 → {entry: metadata, which secrets are set, custom field names}
 //   vault/field   {id, field}                          → {value}: the one place a secret leaves the server; audited
 //                                                          as read once the value has been read
-//   vault/save    {type: entry|group, id?, version?, group_id?, parent_id?, payload}  → {id, version}
+//   vault/save    {type: entry|group, id?, version?, group_id?, parent_id?, payload}  → {id, version}; a group with
+//                 an id is renamed or its metadata edited (R45: only the keys given change)
 //   vault/move    {type, id, parent_id}                → {}   (owner only, R29)
 //   vault/delete  {type, id}                           → {}   (owner only, unlocked, R25)
 //
@@ -120,10 +119,10 @@ class EntryController extends BaseVaultController
             $payload = $this->payload();
             $id = $this->intParam('id');
             $store = $this->store();
-            if ($type === 'group') {
-                if ($id !== null) {
-                    throw new InvalidArgumentException('Vault: groups are not edited here');
-                }
+            if ($type === 'group' && $id !== null) {
+                $store->updateGroup($userId, $id, $payload, $sk);
+                $out = ['id' => $id];
+            } elseif ($type === 'group') {
                 $out = ['id' => $store->createGroup($userId, $this->intParam('parent_id'), $payload)];
             } elseif ($id === null) {
                 $out = ['id' => $store->createEntry($userId, $this->intParam('group_id') ?? 0, $payload), 'version' => 1];
@@ -154,48 +153,6 @@ class EntryController extends BaseVaultController
         });
     }
 
-    // POST + CSRF, then the unlocked session's key (fetched before any vault lock, R18), wiped whatever happens.
-    private function withKey(callable $action): void
-    {
-        $this->handle(function () use ($action): void {
-            $this->requirePostCsrf();
-            $sk = $this->requireUnlocked();
-            try {
-                $action($this->userId(), $sk);
-            } finally {
-                sodium_memzero($sk);
-            }
-        });
-    }
-
-    private function answer(array $data): void
-    {
-        $this->respond()->json(['ok' => true] + $data);
-    }
-
-    // entry or group; anything else is the generic failure (T6 minor).
-    private function type(): string
-    {
-        $type = (string) $this->request->getRawValue('type');
-        if (! in_array($type, ObjectStore::TYPES, true)) {
-            throw new InvalidArgumentException('Vault: unknown object type');
-        }
-        return $type;
-    }
-
-    // A decimal id, or null when absent or empty (a top-level group). Anything else matches no object.
-    private function intParam(string $name): ?int
-    {
-        $raw = $this->request->getRawValue($name);
-        if ($raw === null || $raw === '') {
-            return null;
-        }
-        if (is_int($raw)) {
-            return max(0, $raw);
-        }
-        return is_string($raw) && ctype_digit($raw) && strlen($raw) < 16 ? (int) $raw : 0;
-    }
-
     // The editor's JSON object; EntryPayload validates its shape inside the store.
     private function payload(): array
     {
@@ -209,24 +166,5 @@ class EntryController extends BaseVaultController
             throw new VaultException('payload_invalid');
         }
         return $p;
-    }
-
-    private function userName(int $userId): string
-    {
-        $user = $this->userModel->getById($userId);
-        if (! $user) {
-            return '';
-        }
-        return (string) ($user['name'] !== '' && $user['name'] !== null ? $user['name'] : $user['username']);
-    }
-
-    private function store(): ObjectStore
-    {
-        return isset($this->container['vaultStore']) ? $this->container['vaultStore'] : new ObjectStore($this->container);
-    }
-
-    private function grants(): GrantModel
-    {
-        return isset($this->container['vaultGrants']) ? $this->container['vaultGrants'] : new GrantModel($this->container);
     }
 }

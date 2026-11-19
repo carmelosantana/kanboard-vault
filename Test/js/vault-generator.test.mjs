@@ -236,3 +236,72 @@ test('the editor generate button fills the password field from the generator', a
   assert.equal(panel.querySelector('[data-vault-gen="length"]').value, '9');
   assert.equal(panel.querySelector('[data-vault-gen="sep"]').value, '-');
 });
+
+// T13 review minor 2: a separator that is empty or holds a letter can make two passphrases read the same ("ab" + "c"
+// vs "a" + "bc"), so the 77-bit figure would be a lie. Such a separator is refused (RangeError) by passphrase() and
+// entropyBits(), and the panel shows the invalid message instead of a bit count.
+test('an empty or alphabetic separator is refused, not credited 77 bits', async () => {
+  const gen = load();
+  gen.useWordlist(LIST);
+  for (const sep of ['', 'a', 'x-', 'é', 'Ж']) {
+    assert.throws(() => gen.passphrase({ words: 6, sep }), { name: 'RangeError' }, JSON.stringify(sep));
+    assert.throws(() => gen.entropyBits({ words: 6, sep }), { name: 'RangeError' }, JSON.stringify(sep));
+  }
+  for (const sep of ['-', ' ', '.', '_', '4', '--', '#!']) {
+    assert.equal(gen.passphrase({ words: 6, sep }).split(sep).length >= 6, true, JSON.stringify(sep));
+    assert.ok(Math.abs(gen.entropyBits({ words: 6, sep }) - 6 * Math.log2(7776)) < 1e-9);
+  }
+
+  const page = loadPage({ crypto: webcrypto, wordlist: LIST, math: poisonedMath() });
+  const panel = page.doc.querySelector('[data-vault-generator]');
+  const password = page.doc.getElementById('vault-e-password');
+  page.doc.querySelector('[data-vault-action="generate"]').click();
+  const mode = panel.querySelector('[data-vault-gen="mode"]');
+  mode.value = 'passphrase';
+  mode.dispatch('change');
+  await flush();
+  const good = password.value;
+  panel.querySelector('[data-vault-gen="sep"]').value = '';
+  panel.querySelector('[data-vault-gen="sep"]').dispatch('change');
+  await flush();
+  assert.equal(panel.querySelector('[data-vault-gen-entropy]').textContent, page.messages.invalid);
+  assert.equal(password.value, good, 'the field keeps the last valid value');
+});
+
+// T13 review minor 1: a passphrase still waiting on the first wordlist fetch must not land in a different editor
+// session (Cancel, then reopen) and silently replace what is typed there. Kills: the editor-session check dropped.
+test('a late passphrase never lands in a reopened editor', async () => {
+  let release;
+  const held = new Promise((r) => { release = r; });
+  const page = loadPage({
+    crypto: webcrypto,
+    math: poisonedMath(),
+    api: (action) => action === 'tree'
+      ? { ok: true, groups: [{ id: 7, parent_id: null, permission: 'owner', shared_by: null, name: 'G' }], shared_entries: false }
+      : { ok: true, entries: [], next_offset: null },
+    fetch: () => held.then(() => ({ ok: true, text: () => Promise.resolve(LIST) })),
+  });
+  const { doc } = page;
+  await flush();
+  doc.querySelector('[data-group-id="7"]').click();
+  await flush();
+  doc.querySelector('[data-vault-action="new-entry"]').click();
+  const panel = doc.querySelector('[data-vault-generator]');
+  const mode = panel.querySelector('[data-vault-gen="mode"]');
+  mode.value = 'passphrase';
+  doc.querySelector('[data-vault-action="generate"]').click();
+  await flush();
+  // Cancel, reopen, type a password of one's own; then the wordlist arrives.
+  doc.querySelector('[data-vault-action="cancel"]').click();
+  doc.querySelector('[data-vault-action="new-entry"]').click();
+  const password = doc.getElementById('vault-e-password');
+  password.value = 'typed by hand';
+  release();
+  await flush(10);
+  assert.equal(password.value, 'typed by hand');
+
+  // The generator still works in the new session.
+  panel.querySelector('[data-vault-action="regenerate"]').click();
+  await flush(10);
+  assert.match(password.value, SIX_WORDS);
+});

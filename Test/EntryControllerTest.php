@@ -262,6 +262,27 @@ class EntryControllerTest extends Base
         $this->assertSame('Postgres 2', $this->store()->readEntry($this->alice, $e, $this->aliceSk())['payload']['title']);
     }
 
+    // R45: vault/save with a group id renames it (or edits its metadata) through ObjectStore::updateGroup, behind its
+    // edit gate, followed by afterWrite. Kills: the save still refusing a group id; the rename bypassing the gate (a
+    // read grantee renames); no afterWrite after a rename.
+    public function testGroupRenameThroughSave(): void
+    {
+        [$g] = $this->aliceEntry();
+        $this->principals()->enrolHuman($this->bob, Fixtures::BOB_PASSPHRASE);
+        $this->grants()->grant($this->alice, 'group', $g, $this->bob, 'read', null, $this->aliceSk());
+        $this->unlock($this->bob, Fixtures::BOB_PASSPHRASE);
+        $r = $this->post('save', ['type' => 'group', 'id' => $g, 'payload' => json_encode(['name' => 'hijacked'])]);
+        $this->assertSame([404, 'not_found'], [$r->status, $r->json_()['reason']]);
+        $this->assertSame([], $this->hk->writes);
+
+        $this->unlock($this->alice, Fixtures::PASSPHRASE);
+        $r = $this->post('save', ['type' => 'group', 'id' => $g, 'payload' => json_encode(['name' => 'Infra renamed'])]);
+        $this->assertSame(['ok' => true, 'id' => $g], $r->json_());
+        $this->assertSame('Infra renamed', $this->store()->readGroup($this->alice, $g, $this->aliceSk())['payload']['name']);
+        $this->assertSame([$this->alice], $this->hk->writes);
+        $this->assertSame('Infra renamed', $this->post('tree')->json_()['groups'][0]['name']);
+    }
+
     // The editor: create an entry and a group, update with optimistic concurrency (a stale version is a conflict),
     // an invalid payload is payload_invalid, and the payload round-trips byte for byte. Kills: version not passed
     // (a stale save overwrites); the payload not decoded as JSON; the group create not reaching createGroup.

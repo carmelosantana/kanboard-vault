@@ -3,7 +3,10 @@ namespace Kanboard\Plugin\Vault\Controller;
 
 use Kanboard\Controller\BaseController;
 use Kanboard\Core\Http\Response;
+use InvalidArgumentException;
 use Kanboard\Plugin\Vault\Model\ClientIp;
+use Kanboard\Plugin\Vault\Model\GrantModel;
+use Kanboard\Plugin\Vault\Model\ObjectStore;
 use Kanboard\Plugin\Vault\Model\Housekeeping;
 use Kanboard\Plugin\Vault\Model\VaultFailure;
 use Kanboard\Plugin\Vault\Model\VaultSession;
@@ -113,6 +116,67 @@ abstract class BaseVaultController extends BaseController
     {
         $params = ['plugin' => 'Vault'] + ($reason === null ? [] : ['vault_error' => $reason]);
         $this->respond()->withStatusCode(303)->redirect($this->helper->url->to('VaultController', 'index', $params));
+    }
+
+    // POST + CSRF, then the unlocked session's key (fetched before any vault lock, R18), wiped whatever happens.
+    protected function withKey(callable $action): void
+    {
+        $this->handle(function () use ($action): void {
+            $this->requirePostCsrf();
+            $sk = $this->requireUnlocked();
+            try {
+                $action($this->userId(), $sk);
+            } finally {
+                sodium_memzero($sk);
+            }
+        });
+    }
+
+    protected function answer(array $data): void
+    {
+        $this->respond()->json(['ok' => true] + $data);
+    }
+
+    // entry or group; anything else is the generic failure (T6 minor).
+    protected function type(): string
+    {
+        $type = (string) $this->request->getRawValue('type');
+        if (! in_array($type, ObjectStore::TYPES, true)) {
+            throw new InvalidArgumentException('Vault: unknown object type');
+        }
+        return $type;
+    }
+
+    // A decimal id, or null when absent or empty (a top-level group). Anything else matches no object.
+    protected function intParam(string $name): ?int
+    {
+        $raw = $this->request->getRawValue($name);
+        if ($raw === null || $raw === '') {
+            return null;
+        }
+        if (is_int($raw)) {
+            return max(0, $raw);
+        }
+        return is_string($raw) && ctype_digit($raw) && strlen($raw) < 16 ? (int) $raw : 0;
+    }
+
+    protected function userName(int $userId): string
+    {
+        $user = $this->userModel->getById($userId);
+        if (! $user) {
+            return '';
+        }
+        return (string) ($user['name'] !== '' && $user['name'] !== null ? $user['name'] : $user['username']);
+    }
+
+    protected function store(): ObjectStore
+    {
+        return isset($this->container['vaultStore']) ? $this->container['vaultStore'] : new ObjectStore($this->container);
+    }
+
+    protected function grants(): GrantModel
+    {
+        return isset($this->container['vaultGrants']) ? $this->container['vaultGrants'] : new GrantModel($this->container);
     }
 
     protected function clientIp(): string

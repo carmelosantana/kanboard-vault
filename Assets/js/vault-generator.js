@@ -7,8 +7,9 @@
  *                            drawn uniformly from the union of the selected classes; a draw missing a selected class is
  *                            discarded whole and redrawn. The result is uniform over the passwords that hold every
  *                            selected class, so no position or character is favoured.
- *   passphrase(opts)         {words: 4..20 (6), sep ('-')}: words drawn uniformly from the EFF large wordlist.
- *   entropyBits(opts)        {words} → words × log2(7776). Otherwise log2 of the exact number of passwords
+ *   passphrase(opts)         {words: 4..20 (6), sep ('-')}: words drawn uniformly from the EFF large wordlist. sep is
+ *                            1 to 8 characters and holds no letter (RangeError otherwise), so the words split back out.
+ *   entropyBits(opts)        {words, sep} → words × log2(7776), after the same checks. Otherwise log2 of the exact number of passwords
  *                            password(opts) can return (inclusion–exclusion over the selected classes).
  *   useWordlist(text)        takes the vendored eff_large_wordlist.txt as is, keeps the words and drops the dice
  *                            numbers. Anything but 7776 distinct "<5 dice digits>\t<word>" lines is refused.
@@ -98,12 +99,19 @@
     return n;
   }
 
+  // T13 review minor 2: a separator must be 1 to 8 characters with no letter, so every passphrase splits back into
+  // its words and the entropy figure holds. An empty or alphabetic one would let two draws read the same.
+  function separator(opts) {
+    var sep = opts && opts.sep !== undefined ? opts.sep : '-';
+    if (typeof sep !== 'string' || sep.length < 1 || sep.length > 8 || /\p{L}/u.test(sep)) {
+      throw new RangeError('passphrase: sep must be 1 to 8 characters, none of them a letter');
+    }
+    return sep;
+  }
+
   function passphrase(opts) {
     var n = wordCount(opts);
-    var sep = opts && opts.sep !== undefined ? opts.sep : '-';
-    if (typeof sep !== 'string' || sep.length > 8) {
-      throw new RangeError('passphrase: sep must be a string of at most 8 characters');
-    }
+    var sep = separator(opts);
     if (!words) {
       throw new Error('passphrase: the wordlist is not loaded');
     }
@@ -116,6 +124,7 @@
 
   function entropyBits(opts) {
     if (opts && opts.words !== undefined) {
+      separator(opts);
       return wordCount(opts) * Math.log2(LIST_SIZE);
     }
     var sets = classesFor(opts);
@@ -209,13 +218,21 @@
       return o;
     }
 
-    // Only the latest request writes: a slow wordlist fetch can't overwrite a newer password.
+    // The editor session the target's form is in (vault-browser.js bumps it on every open and close).
+    function session() {
+      var form = target.closest ? target.closest('form') : null;
+      return form ? form.getAttribute('data-vault-editor-session') : null;
+    }
+
+    // Only the latest request writes, and only into the editor session it started in: a slow wordlist fetch can't
+    // overwrite a newer password, nor what was typed after Cancel and reopen (T13 review minor 1).
     function generate() {
       var mine = ++seq;
+      var started = session();
       var o = options();
       var ready = o.words !== undefined ? loadWordlist(panel.getAttribute('data-wordlist')) : Promise.resolve();
       return ready.then(function () {
-        if (mine !== seq) {
+        if (mine !== seq || session() !== started) {
           return;
         }
         var value = o.words !== undefined ? passphrase(o) : password(o);

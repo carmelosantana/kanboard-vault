@@ -560,6 +560,68 @@ class GrantTest extends Base
         $this->assertSame(['id' => $bad, 'group_id' => $g, 'integrity_error' => true], $list[1]);
     }
 
+    // R45: a group's name and metadata are a payload write like an entry's: the gate is edit (owner or an edit
+    // grantee), never read. A refused rename changes nothing. Kills: updateGroup gated on read; the gate dropped.
+    public function testReadGranteeCannotRenameGroup(): void
+    {
+        $g = $this->store()->createGroup($this->alice, null, ['name' => 'Infra', 'icon' => 'server', 'notes' => 'racks']);
+        $this->grant('group', $g, $this->carol, 'read');
+        $this->grant('group', $g, $this->bob, 'edit');
+        $before = $this->row('SELECT nonce, ciphertext, key_epoch FROM vault_groups WHERE id = ?', [$g]);
+        $this->assertVaultError('not_found', fn () => $this->store()->updateGroup($this->carol, $g, ['name' => 'hijacked'], $this->carolSk));
+        $this->assertVaultError('not_found', fn () => $this->store()->updateGroup($this->dave, $g, ['name' => 'hijacked'], $this->daveSk));
+        $this->assertSame($before, $this->row('SELECT nonce, ciphertext, key_epoch FROM vault_groups WHERE id = ?', [$g]));
+
+        $this->store()->updateGroup($this->bob, $g, ['name' => 'Infra 2'], $this->bobSk);
+        $this->assertSame(['name' => 'Infra 2', 'icon' => 'server', 'notes' => 'racks'], $this->store()->readGroup($this->carol, $g, $this->carolSk)['payload'], 'a rename keeps the icon and notes');
+        $this->store()->updateGroup($this->alice, $g, ['notes' => 'cages'], $this->aliceSk);
+        $this->assertSame(['name' => 'Infra 2', 'icon' => 'server', 'notes' => 'cages'], $this->store()->readGroup($this->alice, $g, $this->aliceSk)['payload']);
+        $this->assertVaultError('payload_invalid', fn () => $this->store()->updateGroup($this->alice, $g, ['name' => ''], $this->aliceSk));
+        $this->assertVaultError('payload_invalid', fn () => $this->store()->updateGroup($this->alice, $g, ['title' => 'x'], $this->aliceSk));
+        $this->assertSame(2, count(array_filter($this->auditActionsFor('group', $g), fn (string $a): bool => $a === 'update')));
+    }
+
+    // R45 (the T7 carry): a group edit goes through beforeWrite, so a queued group is re-keyed inline before the new
+    // name is written, and an expired grant on it (or an ancestor) is reconciled first. Kills: updateGroup skipping
+    // beforeWrite (the new name lands under the DEK the removed principal still holds).
+    public function testGroupRenameRekeysQueuedGroupFirst(): void
+    {
+        $parent = $this->group(null, 'parent');
+        $g = $this->group($parent, 'child');
+        $this->grant('group', $parent, $this->carol, 'read', $this->now + 30);
+        $this->grant('group', $g, $this->bob, 'edit');
+        $carolCopy = $this->stolenDek('group', $g, $this->carol, $this->carolSk);
+        $this->now += 30;
+
+        $this->store()->updateGroup($this->bob, $g, ['name' => 'renamed'], $this->bobSk);
+        $this->assertSame(0, $this->countRows("SELECT COUNT(*) FROM vault_grants WHERE grantee_id = ?", [$this->carol]), 'the expired ancestor grant was reconciled');
+        $this->assertSame(2, $this->epoch('group', $g), 're-keyed before the write');
+        $this->assertNull($this->queued('group', $g));
+        $this->assertFalse($this->opens('group', $g, $carolCopy), 'the new name is out of reach of the old DEK');
+        $this->assertSame('renamed', $this->store()->readGroup($this->alice, $g, $this->aliceSk)['payload']['name']);
+    }
+
+    // Spec, Agents (decision 5): agents read what they are granted and never overwrite what a human shared, so a grant
+    // to an agent is read only, whatever path makes it. Kills: an edit grant to an agent accepted; read refused too.
+    public function testGrantToAgentIsReadOnly(): void
+    {
+        $this->pdo()->prepare("UPDATE vault_principals SET kind = 'agent' WHERE user_id = ?")->execute([$this->dave]);
+        $g = $this->group();
+        $this->assertVaultError('agent_read_only', fn () => $this->grant('group', $g, $this->dave, 'edit'));
+        $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_grants'));
+        $this->grant('group', $g, $this->dave, 'read');
+        $this->assertVaultError('agent_read_only', fn () => $this->grant('group', $g, $this->dave, 'edit'));
+        $this->assertSame('read', $this->row('SELECT permission FROM vault_grants')['permission'], 'an upgrade is refused too');
+    }
+
+    /** @return list<string> */
+    private function auditActionsFor(string $type, int $id): array
+    {
+        $s = $this->pdo()->prepare('SELECT action FROM vault_audit WHERE object_type = ? AND object_id = ? ORDER BY id');
+        $s->execute([$type, $id]);
+        return array_column($s->fetchAll(\PDO::FETCH_ASSOC), 'action');
+    }
+
     public function testSecretParametersAreSensitive(): void
     {
         $expected = [

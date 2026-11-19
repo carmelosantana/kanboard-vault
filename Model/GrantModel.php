@@ -44,6 +44,7 @@ class GrantModel extends Base
             if ($this->rekeyer()->principal($db, $granteeId) === null) {
                 throw new VaultException('not_enrolled');
             }
+            $this->checkAgentGrant($db, $granteeId, $perm, $expiresAt);
             $existing = $db->fetchOne(
                 'SELECT id FROM vault_grants WHERE subject_type = ? AND subject_id = ? AND grantee_id = ?',
                 [$type, $id, $granteeId]
@@ -68,6 +69,43 @@ class GrantModel extends Base
                 $this->sealMissing($db, $t, $oid, $ownerId, $ownerSk);
             }
             AuditModel::of($this->container, $this->clock)->record('grant', ['actor_user_id' => $ownerId, 'object_type' => $type, 'object_id' => $id, 'target_user_id' => $granteeId]);
+        });
+    }
+
+    // The sharing dialog's view of one object, for its owner only (not_found otherwise, like every refusal): the direct
+    // grants on it, with each grantee's kind, and for a group the number of entries a grant covers (its whole subtree).
+    // Grants inherited from an ancestor group are revoked there, so they are not listed here.
+    /** @return array{grants: list<array{grantee_id:int, kind:string, permission:string, expires_at:?int}>, covered_entries?: int} */
+    public function sharing(int $ownerId, string $type, int $id): array
+    {
+        self::checkType($type);
+        return $this->lock()->shared(function () use ($ownerId, $type, $id): array {
+            $this->requireOwner($type, $id, $ownerId);
+            $rows = $this->vdb()->fetchAll(
+                'SELECT g.grantee_id, g.permission, g.expires_at, p.kind FROM vault_grants g
+                 LEFT JOIN vault_principals p ON p.user_id = g.grantee_id
+                 WHERE g.subject_type = ? AND g.subject_id = ? ORDER BY g.id',
+                [$type, $id]
+            );
+            $out = ['grants' => array_map(static fn (array $r): array => [
+                'grantee_id' => (int) $r['grantee_id'],
+                'kind' => $r['kind'] === 'agent' ? 'agent' : 'human',
+                'permission' => (string) $r['permission'],
+                'expires_at' => $r['expires_at'] === null ? null : (int) $r['expires_at'],
+            ], $rows)];
+            if ($type === 'group') {
+                $out['covered_entries'] = $this->coveredEntries($id);
+            }
+            return $out;
+        });
+    }
+
+    // How many entries a grant on the group covers: every entry in its subtree. Owner only.
+    public function coveredCount(int $ownerId, int $groupId): int
+    {
+        return $this->lock()->shared(function () use ($ownerId, $groupId): int {
+            $this->requireOwner('group', $groupId, $ownerId);
+            return $this->coveredEntries($groupId);
         });
     }
 
@@ -255,11 +293,35 @@ class GrantModel extends Base
         }
     }
 
+    // Spec, Agents (decision 5): agents read the entries granted to them and never overwrite entries a human shared
+    // with them, so a grant to an agent is read only (agent_read_only), whichever path makes it. This is the one hook
+    // for any further agent limit on grants (T16): $expiresAt is passed for a maximum expiry, which v1 doesn't set.
+    private function checkAgentGrant(VaultDb $db, int $granteeId, string $perm, ?int $expiresAt): void
+    {
+        $p = $db->fetchOne('SELECT kind FROM vault_principals WHERE user_id = ?', [$granteeId]);
+        if ($p !== null && $p['kind'] === 'agent' && $perm !== ObjectStore::READ) {
+            throw new VaultException('agent_read_only');
+        }
+    }
+
+    private function coveredEntries(int $groupId): int
+    {
+        $resolver = $this->resolver();
+        return count($resolver->entriesIn(array_merge(...$resolver->subtreeLevels($groupId))));
+    }
+
+    private function requireOwner(string $type, int $id, int $ownerId): void
+    {
+        if (($this->resolver()->effective($type, $id, $this->now())[$ownerId] ?? null) !== ObjectStore::OWNER) {
+            throw new VaultException('not_found');
+        }
+    }
+
     // Owner only, and the owner must be unlocked: $sk must be their current key. Both failures are not_found.
     private function requireUnlockedOwner(VaultDb $db, string $type, int $id, int $ownerId, #[\SensitiveParameter] string $sk): void
     {
-        if (($this->resolver()->effective($type, $id, $this->now())[$ownerId] ?? null) !== ObjectStore::OWNER
-            || $this->rekeyer()->currentPrincipal($db, $ownerId, $sk) === null) {
+        $this->requireOwner($type, $id, $ownerId);
+        if ($this->rekeyer()->currentPrincipal($db, $ownerId, $sk) === null) {
             throw new VaultException('not_found');
         }
     }

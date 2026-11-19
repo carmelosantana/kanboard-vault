@@ -36,6 +36,7 @@ final class VaultFailure
         'rotation_needs_factors' => [409, 'rotation_needs_factors'],
         'rotation_incomplete' => [409, 'rotation_incomplete'],
         'policy_forbids' => [403, 'policy_forbids'],
+        'agent_read_only' => [422, 'agent_read_only'],
     ];
 
     /** @return array{0:int,1:string} [status, reason] */

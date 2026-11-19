@@ -13,7 +13,9 @@
  * audits each as read; the list and the detail answers carry metadata only.
  * Late answers never land on the wrong entry (T12 review M1): every mask (entry switch, hide, show) starts a new view,
  * and a reveal writes only into the view it was clicked in; only the latest entry load renders. The editor sends one
- * save at a time (M6).
+ * save at a time (M6), and every open or close of it bumps data-vault-editor-session on the form, which the generator
+ * checks before it writes (T13 minor 1). Share buttons carry data-vault-share-type/-id/-label for vault-share.js
+ * (owner only); Rename sends a group's new name through vault/save (R45).
  */
 (function (win) {
   'use strict';
@@ -281,7 +283,10 @@
     ui.more.hidden = true;
     ui.listEmpty.hidden = false;
     ui.listEmpty.textContent = title === null ? ui.selectGroupText : msg('no_entries');
-    ui.deleteGroup.hidden = !(ui.current && ui.current.group && ui.current.group.permission === 'owner');
+    var group = ui.current && ui.current.group;
+    ui.deleteGroup.hidden = !(group && group.permission === 'owner');
+    ui.renameGroup.hidden = !(group && canEdit(group.permission) && !group.integrity_error);
+    shareTarget(ui.shareGroup, group && group.permission === 'owner' ? 'group' : null, group && group.id, group && group.name);
     hideDetail();
   }
 
@@ -413,9 +418,27 @@
     });
     ui.editBtn.hidden = !canEdit(entry.permission);
     ui.deleteBtn.hidden = entry.permission !== 'owner';
+    shareTarget(ui.shareEntry, entry.permission === 'owner' ? 'entry' : null, entry.id, entry.title);
     fillMove(entry);
     ui.detail.hidden = false;
     ui.detailEmpty.hidden = true;
+  }
+
+  // A share button names what it shares (vault-share.js opens the dialog from these attributes); owner only.
+  function shareTarget(button, type, id, label) {
+    if (!button) {
+      return;
+    }
+    button.hidden = !type;
+    if (type) {
+      button.setAttribute('data-vault-share-type', type);
+      button.setAttribute('data-vault-share-id', String(id));
+      button.setAttribute('data-vault-share-label', text(label));
+    } else {
+      button.removeAttribute('data-vault-share-type');
+      button.removeAttribute('data-vault-share-id');
+      button.removeAttribute('data-vault-share-label');
+    }
   }
 
   function document_text(s) {
@@ -493,10 +516,14 @@
 
   // Editor
 
+  // Every close (and so every open) starts a new editor session: the generator writes only into the session it was
+  // started in (T13 review minor 1), so a late passphrase can't replace what was typed after Cancel and reopen.
   function closeEditor() {
     if (!ui.form) {
       return;
     }
+    ui.editorSession++;
+    ui.form.setAttribute('data-vault-editor-session', String(ui.editorSession));
     ui.form.hidden = true;
     Array.prototype.forEach.call(ui.form.querySelectorAll('input:not([type="hidden"]):not([data-vault-gen]), textarea'), function (i) {
       i.value = '';
@@ -672,6 +699,27 @@
     });
   }
 
+  // R45: a rename changes only the name (the server keeps the icon and notes). Owner or edit grantee.
+  function renameGroup() {
+    var g = ui.current && ui.current.group;
+    if (!g) {
+      return;
+    }
+    var name = win.prompt(msg('group_name'), text(g.name));
+    if (name === null || name.trim() === '') {
+      return;
+    }
+    kb().api('save', { type: 'group', id: g.id, payload: { name: name.trim() } }).then(function (res) {
+      if (!res || !res.ok) {
+        return report(res);
+      }
+      g.name = name.trim();
+      ui.listTitle.textContent = g.name;
+      shareTarget(ui.shareGroup, g.permission === 'owner' ? 'group' : null, g.id, g.name);
+      loadTree();
+    });
+  }
+
   function remove(type, id, after) {
     if (!win.confirm(msg('confirm_delete'))) {
       return;
@@ -722,6 +770,9 @@
       listEmpty: q('[data-vault-list-empty]', panes),
       more: q('[data-vault-action="more"]', panes),
       deleteGroup: q('[data-vault-action="delete-group"]', panes),
+      renameGroup: q('[data-vault-action="rename-group"]', panes),
+      shareGroup: q('[data-vault-action="share-group"]', panes),
+      shareEntry: q('[data-vault-action="share-entry"]', panes),
       detail: q('[data-vault-detail]', panes),
       detailEmpty: q('[data-vault-detail-empty]', panes),
       custom: q('[data-vault-custom]', panes),
@@ -739,6 +790,7 @@
       editing: null,
       view: 0,
       entryReq: 0,
+      editorSession: 0,
       saving: false
     };
     ui.saveBtn = q('button[type="submit"]', ui.form);
@@ -756,6 +808,7 @@
         });
       }
     });
+    ui.renameGroup.addEventListener('click', renameGroup);
     ui.detail.addEventListener('click', onDetailClick);
     ui.editBtn.addEventListener('click', function () {
       openEditor(ui.entry);

@@ -47,6 +47,9 @@ class Plugin extends Base
         foreach (['tree', 'list', 'entry', 'field', 'save', 'move', 'delete'] as $action) {
             $this->route->addRoute('vault/'.$action, 'EntryController', $action, 'Vault');
         }
+        foreach (['sharing', 'grant', 'revoke', 'activity'] as $action) {
+            $this->route->addRoute('vault/'.$action, 'ShareGrantController', $action, 'Vault');
+        }
         $this->hook->on('template:header:dropdown', ['template' => 'Vault:header/dropdown']);
         $this->hook->on('template:dashboard:sidebar', ['template' => 'Vault:dashboard/sidebar']);
 

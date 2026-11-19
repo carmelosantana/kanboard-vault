@@ -4,6 +4,8 @@
 <section class="vault-list" aria-label="<?= t('Entries') ?>">
     <div class="vault-list-head">
         <h3 class="vault-list-title" data-vault-list-title></h3>
+        <button type="button" class="btn btn-small" data-vault-action="rename-group" hidden><?= t('Rename') ?></button>
+        <button type="button" class="btn btn-small" data-vault-action="share-group" data-vault-share-button hidden><?= t('Share') ?></button>
         <button type="button" class="btn btn-small" data-vault-action="delete-group" hidden><?= t('Delete group') ?></button>
     </div>
     <table class="vault-table">

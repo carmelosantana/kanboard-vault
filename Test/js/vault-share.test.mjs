@@ -1,0 +1,202 @@
+// node --test Vault/Test/js — the sharing dialog, revoke, the activity view and group rename (spec: UI → The sharing
+// dialog; Audit → Who sees what), run against the real templates in the fake DOM (fake-dom.mjs), where innerHTML,
+// outerHTML and insertAdjacentHTML throw.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { loadPage, flush } from './fake-dom.mjs';
+
+const SRC = readFileSync(fileURLToPath(new URL('../../Assets/js/vault-share.js', import.meta.url)), 'utf8');
+const XSS = '<img src=x onerror=alert(1)>';
+const GROUP = { id: 7, parent_id: null, permission: 'owner', shared_by: null, name: 'Infra' };
+
+// A page whose tree holds GROUP; answers[action] is an answer or a function of the request body.
+function page(answers = {}, opts = {}) {
+  const p = loadPage({
+    ...opts,
+    api: (action, body) => {
+      if (action === 'tree') return { ok: true, groups: [GROUP], shared_entries: false };
+      if (action === 'list') return { ok: true, entries: [], next_offset: null };
+      const a = answers[action];
+      return typeof a === 'function' ? a(body) : a || { ok: true };
+    },
+  });
+  return p;
+}
+
+const q = (doc, sel) => doc.querySelector(sel);
+const shareButton = (doc) => q(doc, '[data-vault-action="share-group"]');
+
+async function openGroupShare(p) {
+  await flush();
+  q(p.doc, '[data-group-id="7"]').click();
+  await flush();
+  shareButton(p.doc).click();
+  await flush();
+}
+
+test('vault-share.js writes no HTML and runs no inline code', () => {
+  assert.doesNotMatch(SRC, /innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(|new Function/);
+});
+
+test('the share dialog lists grantees and grants as text, and an agent gets Read only', async () => {
+  const sharing = {
+    ok: true,
+    candidates: [{ id: 3, name: XSS, kind: 'human' }, { id: 9, name: 'ops.bot', kind: 'agent' }],
+    grants: [{ grantee_id: 4, name: XSS, kind: 'human', permission: 'edit', expires_at: null }],
+    covered_entries: 3,
+  };
+  const p = page({ sharing });
+  await openGroupShare(p);
+  const { doc, calls } = p;
+  const dialog = q(doc, '[data-vault-share]');
+  assert.equal(dialog.hidden, false);
+  assert.deepEqual(calls.filter((c) => c.action === 'sharing').map((c) => c.body), [{ type: 'group', id: '7' }]);
+  assert.equal(q(dialog, '[data-vault-share-label]').textContent, 'Infra');
+  const options = q(dialog, '[data-vault-share-grantee]').options;
+  assert.deepEqual(options.map((o) => [o.value, o.textContent]), [['3', XSS], ['9', 'ops.bot (' + dialog.getAttribute('data-msg-agent') + ')']]);
+  const grants = q(dialog, '[data-vault-share-grants]');
+  assert.ok(grants.textContent.includes(XSS), 'the grantee name is text');
+  assert.equal(grants.querySelectorAll('img').length, 0);
+  assert.match(q(dialog, '[data-vault-share-covered]').textContent, /3/);
+  assert.equal(q(dialog, '[data-vault-share-covered]').hidden, false);
+
+  const select = q(dialog, '[data-vault-share-grantee]');
+  const perm = q(dialog, '[data-vault-share-perm]');
+  perm.value = 'edit';
+  select.value = '9';
+  select.dispatch('change');
+  assert.equal(perm.value, 'read', 'an agent is switched to Read');
+  assert.equal(perm.querySelector('option[value="edit"]').disabled, true);
+  select.value = '3';
+  select.dispatch('change');
+  assert.equal(perm.querySelector('option[value="edit"]').disabled, false);
+});
+
+test('sharing a group asks for confirmation with the covered count before granting', async () => {
+  const grants = [];
+  const confirms = [];
+  let answer = true;
+  const p = page({
+    sharing: { ok: true, candidates: [{ id: 3, name: 'bob', kind: 'human' }], grants: [], covered_entries: 3 },
+    grant: (body) => {
+      grants.push({ ...body });
+      return body.confirm ? { ok: true, covered_entries: 3 } : { ok: true, confirm_required: true, covered_entries: 3 };
+    },
+  }, { confirm: (m) => { confirms.push(m); return answer; } });
+  await openGroupShare(p);
+  const dialog = q(p.doc, '[data-vault-share]');
+  q(dialog, '[data-vault-share-perm]').value = 'edit';
+  q(dialog, '[data-vault-share-expires]').value = '2030-01-02T03:04';
+  q(dialog, 'form').dispatch('submit');
+  await flush(10);
+  const at = Math.floor(new Date('2030-01-02T03:04').getTime() / 1000);
+  assert.deepEqual(grants, [
+    { type: 'group', id: '7', grantee_id: '3', perm: 'edit', expires_at: at },
+    { type: 'group', id: '7', grantee_id: '3', perm: 'edit', expires_at: at, confirm: 1 },
+  ]);
+  assert.equal(confirms.length, 1);
+  assert.match(confirms[0], /\b3\b/, 'the server count is in the confirmation');
+
+  // Declined: no second request.
+  answer = false;
+  q(dialog, '[data-vault-share-expires]').value = '';
+  q(dialog, 'form').dispatch('submit');
+  await flush(10);
+  assert.equal(grants.length, 3);
+  assert.equal(grants[2].confirm, undefined);
+  assert.equal(grants[2].expires_at, '', 'no expiry is sent empty');
+});
+
+test('revoking says to rotate the secrets', async () => {
+  const revokes = [];
+  const p = page({
+    sharing: { ok: true, candidates: [], grants: [{ grantee_id: 4, name: 'carol', kind: 'human', permission: 'read', expires_at: 1900000000 }], covered_entries: 1 },
+    revoke: (body) => { revokes.push({ ...body }); return { ok: true, suggest_rotate: true }; },
+  });
+  await openGroupShare(p);
+  const dialog = q(p.doc, '[data-vault-share]');
+  const rotate = q(dialog, '[data-vault-share-rotate]');
+  assert.equal(rotate.hidden, true);
+  q(dialog, '[data-vault-revoke]').click();
+  await flush(10);
+  assert.deepEqual(revokes, [{ type: 'group', id: '7', grantee_id: '4' }]);
+  assert.equal(rotate.hidden, false, 'the rotation suggestion shows');
+  assert.ok(rotate.textContent.length > 0);
+});
+
+test('a late sharing answer never renders into another object\'s dialog', async () => {
+  let release;
+  const held = new Promise((r) => { release = r; });
+  const p = page({
+    sharing: (body) => body.type === 'group'
+      ? held.then(() => ({ ok: true, candidates: [{ id: 3, name: 'for the group', kind: 'human' }], grants: [], covered_entries: 2 }))
+      : { ok: true, candidates: [{ id: 5, name: 'for the entry', kind: 'human' }], grants: [] },
+    entry: { ok: true, entry: { id: 11, group_id: 7, permission: 'owner', title: 'E', secrets: {}, fields: [] } },
+  });
+  await flush();
+  q(p.doc, '[data-group-id="7"]').click();
+  await flush();
+  shareButton(p.doc).click();
+  // The entry's dialog opens before the group's answer arrives.
+  p.window.KBVaultShare.open('entry', '11', 'E');
+  await flush();
+  release();
+  await flush(10);
+  const dialog = q(p.doc, '[data-vault-share]');
+  assert.deepEqual(q(dialog, '[data-vault-share-grantee]').options.map((o) => o.textContent), ['for the entry']);
+  assert.equal(q(dialog, '[data-vault-share-covered]').hidden, true, 'no group count on an entry');
+  assert.equal(q(dialog, '[data-vault-share-label]').textContent, 'E');
+});
+
+test('the activity view pages with More and renders rows as text', async () => {
+  const pages = {
+    0: { ok: true, rows: [{ id: 9, created_at: 1800000000, action: 'read', actor_kind: 'human', via: 'ui', actor: XSS, target: null, object_type: 'entry', object_id: 3, title: XSS, count: null, ip_trunc: '203.0.113.0/24', ua_family: null }], next_offset: 50 },
+    50: { ok: true, rows: [{ id: 2, created_at: 1700000000, action: 'grant', actor_kind: 'human', via: 'ui', actor: 'alice', target: 'bob', object_type: 'group', object_id: 7, title: null, count: null, ip_trunc: null, ua_family: null }], next_offset: null },
+  };
+  const offsets = [];
+  const p = page({ activity: (body) => { offsets.push(body.offset); return pages[body.offset]; } });
+  await flush();
+  const view = q(p.doc, '[data-vault-activity]');
+  assert.equal(view.hidden, true);
+  q(p.doc, '[data-vault-action="activity"]').click();
+  await flush(10);
+  assert.equal(view.hidden, false);
+  const rows = q(view, '[data-vault-activity-rows]');
+  assert.equal(rows.querySelectorAll('tr').length, 1);
+  assert.ok(rows.textContent.includes(XSS));
+  assert.equal(rows.querySelectorAll('img').length, 0);
+  const more = q(view, '[data-vault-action="activity-more"]');
+  assert.equal(more.hidden, false);
+  more.click();
+  await flush(10);
+  assert.deepEqual(offsets, [0, 50]);
+  assert.equal(rows.querySelectorAll('tr').length, 2);
+  assert.ok(rows.textContent.includes('#7'), 'an object without a title shows its id');
+  assert.equal(more.hidden, true, 'no More on the last page');
+});
+
+test('rename group sends the new name through save', async () => {
+  const saves = [];
+  const p = page({ save: (body) => { saves.push({ ...body }); return { ok: true, id: 7 }; } }, { prompt: () => '  Infra 2 ' });
+  await flush();
+  q(p.doc, '[data-group-id="7"]').click();
+  await flush();
+  const rename = q(p.doc, '[data-vault-action="rename-group"]');
+  assert.equal(rename.hidden, false, 'shown to the owner');
+  rename.click();
+  await flush(10);
+  assert.deepEqual(JSON.parse(JSON.stringify(saves)), [{ type: 'group', id: 7, payload: { name: 'Infra 2' } }]);
+  assert.ok(p.calls.filter((c) => c.action === 'tree').length >= 2, 'the tree reloads');
+
+  // A read grantee isn't offered it.
+  const ro = loadPage({
+    api: (action) => action === 'tree' ? { ok: true, groups: [{ ...GROUP, permission: 'read', shared_by: 'Ana' }], shared_entries: false } : { ok: true, entries: [], next_offset: null },
+  });
+  await flush();
+  q(ro.doc, '[data-group-id="7"]').click();
+  await flush();
+  assert.equal(q(ro.doc, '[data-vault-action="rename-group"]').hidden, true);
+  assert.equal(shareButton(ro.doc).hidden, true, 'and can\'t share');
+});
