@@ -150,6 +150,27 @@ class AuditModel extends Base
         return $out;
     }
 
+    // R8/R31/R37: the objects the rotation sweep kept for an integrity fault, for app admins (empty for anyone else):
+    // how many distinct objects, and up to $limit of them as type and id with the last time seen. Nothing else
+    // (no actor, no title): the admin learns that an object needs attention, not what it holds.
+    /** @return array{count:int, objects:list<array{object_type:string,object_id:int,last_at:int}>} */
+    public function integrityFaults(int $viewerId, int $limit = 50): array
+    {
+        if (! $this->isAdmin($viewerId)) {
+            return ['count' => 0, 'objects' => []];
+        }
+        $db = $this->vdb();
+        $count = $db->fetchOne("SELECT COUNT(*) AS n FROM (SELECT DISTINCT object_type, object_id FROM vault_audit WHERE action = 'integrity_error') t");
+        $rows = $db->fetchAll(
+            "SELECT object_type, object_id, MAX(created_at) AS last_at FROM vault_audit WHERE action = 'integrity_error'"
+            .' GROUP BY object_type, object_id ORDER BY last_at DESC, object_type, object_id LIMIT '.max(1, min(self::PAGE_LIMIT, $limit))
+        );
+        return [
+            'count' => (int) ($count['n'] ?? 0),
+            'objects' => array_map(static fn (array $r): array => ['object_type' => (string) $r['object_type'], 'object_id' => (int) $r['object_id'], 'last_at' => (int) $r['last_at']], $rows),
+        ];
+    }
+
     // Retention: deletes rows older than $retentionDays. Returns how many went.
     public function purge(int $retentionDays): int
     {

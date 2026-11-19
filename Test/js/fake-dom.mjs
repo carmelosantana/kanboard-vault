@@ -180,6 +180,13 @@ export function parseInto(doc, parent, html) {
   if (stack.length !== 1) throw new Error('unclosed tag in template');
 }
 
+// A Vault template with its parameterless Vault partials inlined ($this->render('Vault:vault/name')), PHP stripped.
+export function template(name) {
+  const raw = readFileSync(path(`Template/vault/${name}.php`), 'utf8')
+    .replace(/<\?=\s*\$this->render\('Vault:vault\/([a-z_]+)'\)\s*\?>/g, (_, n) => readFileSync(path(`Template/vault/${n}.php`), 'utf8'));
+  return stripPhp(raw);
+}
+
 export const WORDLIST_URL = '/plugins/Vault/Assets/vendor/eff_large_wordlist.txt';
 
 // The unlocked Vault page. api(action, body) answers each KBVault.api call; return a Promise to hold it. fetch, confirm

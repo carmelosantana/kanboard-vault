@@ -194,6 +194,24 @@ class VaultControllerTest extends Base
         $this->assertSame('kb_vault_dev', $this->jar->last()['name']);
     }
 
+    // R41: a plain-HTTP unlock carrying X-Forwarded-Proto: https from an untrusted REMOTE_ADDR gets https_required
+    // before any Argon2; from a trusted proxy it unlocks. Kills: the gate on Request::isHTTPS() (header from anyone).
+    public function testForwardedProtoOnlyFromATrustedProxy(): void
+    {
+        $this->enrol();
+        $calls = $this->argonCalls;
+        $forged = ['HTTPS' => '', 'HTTP_HOST' => 'kb.example', 'REMOTE_ADDR' => '198.51.100.9', 'HTTP_X_FORWARDED_PROTO' => 'https'];
+        $r = $this->post('unlock', ['passphrase' => Fixtures::PASSPHRASE], $forged);
+        $this->assertSame([403, ['ok' => false, 'reason' => 'https_required']], [$r->status, $r->json_()]);
+        $this->assertSame($calls, $this->argonCalls, 'refused before any Argon2');
+        $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_sessions'));
+
+        (new VaultSettings($this->container))->set('vault_trusted_proxy_cidrs', '198.51.100.0/24', self::ADMIN);
+        $r = $this->post('unlock', ['passphrase' => Fixtures::PASSPHRASE], $forged);
+        $this->assertSame(['ok' => true], $r->json_());
+        $this->assertSame('__Host-kb_vault', $this->jar->last()['name']);
+    }
+
     // Spec, Assets and headers: vault.js loads only on Vault pages (Vault never uses template:layout:js). The
     // dashboard renders without it, but with the sidebar link; the avatar menu links the Vault too. Kills: loading
     // vault.js or vault.css through a layout hook; the menu hooks missing.

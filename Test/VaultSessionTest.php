@@ -173,19 +173,57 @@ class VaultSessionTest extends Base
         $this->assertSame(0, $this->sessions());
     }
 
-    // The idle timeout never outlives the Kanboard session: SESSION_DURATION, or gc_maxlifetime when it is 0.
+    // T9 carry: the idle timeout is the admin's vault_idle_timeout (minutes, default 15), and it never outlives the
+    // Kanboard session: SESSION_DURATION, or gc_maxlifetime when that is 0 (PHP's 1440 s when unset).
+    // Kills: the setting ignored (the constant used), and the cap dropped or taken from the wrong source.
     public function testIdleTimeoutIsCappedBySessionLifetime(): void
     {
-        $this->assertSame(600, VaultSession::effectiveIdleTimeout(0, 600));
-        $this->assertSame(900, VaultSession::effectiveIdleTimeout(0, 1440));
-        $this->assertSame(900, VaultSession::effectiveIdleTimeout(0, 0), "PHP's 1440 s default");
-        $this->assertSame(300, VaultSession::effectiveIdleTimeout(300, 1440));
-        $this->assertSame(900, VaultSession::effectiveIdleTimeout(3600, 600), 'SESSION_DURATION wins over gc_maxlifetime');
-        $expected = VaultSession::effectiveIdleTimeout(SESSION_DURATION, (int) ini_get('session.gc_maxlifetime'));
-        $this->assertSame($expected, $this->session()->idleTimeout());
+        $this->assertSame(600, VaultSession::effectiveIdleTimeout(900, 0, 600));
+        $this->assertSame(900, VaultSession::effectiveIdleTimeout(900, 0, 1440));
+        $this->assertSame(900, VaultSession::effectiveIdleTimeout(900, 0, 0), "PHP's 1440 s default");
+        $this->assertSame(1440, VaultSession::effectiveIdleTimeout(3600, 0, 0), "PHP's 1440 s default caps an hour");
+        $this->assertSame(300, VaultSession::effectiveIdleTimeout(900, 300, 1440));
+        $this->assertSame(900, VaultSession::effectiveIdleTimeout(900, 3600, 600), 'SESSION_DURATION wins over gc_maxlifetime');
+        $this->assertSame(300, VaultSession::effectiveIdleTimeout(300, 3600, 600));
+        $lifetime = [(int) SESSION_DURATION, (int) ini_get('session.gc_maxlifetime')];
+        $this->assertSame(VaultSession::effectiveIdleTimeout(900, ...$lifetime), $this->session()->idleTimeout(), 'default 15 min');
+        (new \Kanboard\Plugin\Vault\Model\VaultSettings($this->container))->set('vault_idle_timeout', 5, 1);
+        $expected = VaultSession::effectiveIdleTimeout(300, ...$lifetime);
+        $this->assertSame($expected, $this->session()->idleTimeout(), 'the admin setting');
         $start = $this->now;
         $this->unlocked();
         $this->assertSame($start + $expected, (int) $this->row('SELECT idle_expires_at FROM vault_sessions')['idle_expires_at']);
+    }
+
+    // R41: Kanboard's Request::isHTTPS() trusts X-Forwarded-Proto from anyone. Vault honours X-Forwarded-Proto (its
+    // right-most value) or X-Forwarded-Ssl only when REMOTE_ADDR is a trusted proxy; otherwise only the connection's
+    // own HTTPS counts. Kills: transportAllowed() on Request::isHTTPS(); the trust check dropped; the left-most
+    // (client-supplied) value read; X-Forwarded-Ssl ignored.
+    public function testForwardedProtoCountsOnlyFromATrustedProxy(): void
+    {
+        $plain = ['HTTP_HOST' => 'kb.example', 'REMOTE_ADDR' => '198.51.100.9'];
+        $this->request($plain + ['HTTP_X_FORWARDED_PROTO' => 'https']);
+        $this->assertFalse($this->session()->transportAllowed(), 'untrusted sender');
+        $this->assertVaultError('https_required', fn () => $this->session()->create($this->alice, $this->sk));
+        $this->request($plain + ['HTTP_X_FORWARDED_SSL' => 'on']);
+        $this->assertFalse($this->session()->transportAllowed(), 'untrusted sender, X-Forwarded-Ssl');
+
+        (new \Kanboard\Plugin\Vault\Model\VaultSettings($this->container))->set('vault_trusted_proxy_cidrs', '198.51.100.0/24', 1);
+        $this->request($plain + ['HTTP_X_FORWARDED_PROTO' => 'https']);
+        $this->assertTrue($this->session()->transportAllowed(), 'trusted proxy');
+        $this->assertSame('__Host-kb_vault', $this->session()->cookieName());
+        $this->request($plain + ['HTTP_X_FORWARDED_SSL' => 'on']);
+        $this->assertTrue($this->session()->transportAllowed(), 'trusted proxy, X-Forwarded-Ssl');
+        $this->request($plain + ['HTTP_X_FORWARDED_PROTO' => 'https, http']);
+        $this->assertFalse($this->session()->transportAllowed(), 'the proxy saw http: the right-most value counts');
+        $this->request($plain);
+        $this->assertFalse($this->session()->transportAllowed(), 'trusted proxy, no header');
+        $this->request(['HTTP_HOST' => 'kb.example', 'REMOTE_ADDR' => '203.0.113.50', 'HTTP_X_FORWARDED_PROTO' => 'https']);
+        $this->assertFalse($this->session()->transportAllowed(), 'outside the trusted range');
+        $this->request(['HTTP_HOST' => 'kb.example', 'REMOTE_ADDR' => '203.0.113.50', 'HTTPS' => 'on']);
+        $this->assertTrue($this->session()->transportAllowed(), "the connection's own HTTPS");
+        $this->request(['HTTP_HOST' => 'kb.example', 'REMOTE_ADDR' => '203.0.113.50', 'HTTPS' => 'off']);
+        $this->assertFalse($this->session()->transportAllowed(), 'HTTPS=off');
     }
 
     public function testLockNowDeletesTheRowAndClearsTheCookie(): void

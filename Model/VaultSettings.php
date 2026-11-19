@@ -107,6 +107,33 @@ class VaultSettings extends Base
         }
     }
 
+    // Spec, Hardware keys: the relying party is Kanboard's Application URL. Its normalised origin and host (rp_id)
+    // when it is https://, or http://localhost (the dev stack); null otherwise (hardware keys are then refused).
+    // Read-only: it is shown on the admin page and pinned on each credential (T20), never set here.
+    /** @return array{origin:string, rp_id:string}|null */
+    public static function relyingParty(string $applicationUrl): ?array
+    {
+        $u = parse_url(trim($applicationUrl));
+        if (! is_array($u) || ! isset($u['scheme'], $u['host']) || isset($u['user']) || isset($u['pass'])) {
+            return null;
+        }
+        $scheme = strtolower($u['scheme']);
+        $host = strtolower($u['host']);
+        if ($scheme !== 'https' && ! ($scheme === 'http' && $host === 'localhost')) {
+            return null;
+        }
+        $default = $scheme === 'https' ? 443 : 80;
+        $port = isset($u['port']) && (int) $u['port'] !== $default ? ':'.(int) $u['port'] : '';
+        return ['origin' => $scheme.'://'.$host.$port, 'rp_id' => $host];
+    }
+
+    // The trusted proxy CIDRs as a list (ClientIp::resolve, ClientIp::secureTransport).
+    /** @return list<string> */
+    public function trustedProxies(): array
+    {
+        return array_values(array_filter(explode(',', (string) $this->get('vault_trusted_proxy_cidrs'))));
+    }
+
     // The org public key (raw 32 bytes) from the vault_meta row, or null when vault:org-keygen hasn't run.
     public function orgPublicKey(): ?string
     {

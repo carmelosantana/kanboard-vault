@@ -1,7 +1,6 @@
 <?php
 namespace Kanboard\Plugin\Vault\Controller;
 
-use Kanboard\Plugin\Vault\Model\PrincipalModel;
 use Kanboard\Plugin\Vault\Model\RecoveryService;
 use Kanboard\Plugin\Vault\Model\UnlockService;
 use Kanboard\Plugin\Vault\Model\VaultException;
@@ -28,12 +27,11 @@ class VaultController extends BaseVaultController
             $session = $this->vaultSession();
             $client = $this->clientConfig();
             // A native form POST comes back here with a fixed reason code; anything else shows nothing.
-            $code = $this->request->getStringParam('vault_error');
             $params = [
                 'title' => t('Vault'),
                 'client' => $client,
                 'https_ok' => $session->transportAllowed(),
-                'error' => $code !== '' && $code !== 'working' && isset($client['messages'][$code]) ? $client['messages'][$code] : '',
+                'error' => $this->codeMessage('vault_error', $client['messages']),
             ];
             if ($this->principals()->get($userId) === null) {
                 $template = 'enrol';
@@ -106,62 +104,8 @@ class VaultController extends BaseVaultController
         });
     }
 
-    // What vault.js reads from #vault-app: the CSRF token, the endpoint URLs, the idle timeout and the messages.
-    /** @return array{csrf:string, endpoints:array<string,string>, idle_ms:int, messages:array<string,string>} */
-    private function clientConfig(): array
-    {
-        $url = fn (string $action, string $controller = 'VaultController'): string => $this->helper->url->to($controller, $action, ['plugin' => 'Vault']);
-        $endpoints = ['unlock' => $url('unlock'), 'lock' => $url('lock'), 'enrol' => $url('enrol')];
-        foreach (['tree', 'list', 'entry', 'field', 'save', 'move', 'delete'] as $action) {
-            $endpoints[$action] = $url($action, 'EntryController');
-        }
-        foreach (['sharing', 'grant', 'revoke', 'activity'] as $action) {
-            $endpoints[$action] = $url($action, 'ShareGrantController');
-        }
-        return [
-            'csrf' => $this->token->getReusableCSRFToken(),
-            'endpoints' => $endpoints,
-            'idle_ms' => $this->vaultSession()->idleTimeout() * 1000,
-            'messages' => [
-                'working' => t('Working…'),
-                'unlock_failed' => t('Unlock failed.'),
-                'rate_limited' => t('Too many attempts. Wait a while, then try again.'),
-                'busy' => t('The server is busy. Try again in a few seconds.'),
-                'https_required' => t('Vault needs HTTPS. Open Kanboard over https:// to use it.'),
-                'passphrase_mismatch' => t('The passphrases don\'t match.'),
-                'passphrase_weak' => t('Use at least %d characters, and not your username.', PrincipalModel::MIN_PASSPHRASE_CHARS),
-                'passphrase_reuse' => t('Don\'t reuse your Kanboard login password.'),
-                'already_enrolled' => t('Your vault is already set up. Reload the page.'),
-                'forbidden' => t('The page expired. Reload it and try again.'),
-                'failed' => t('Something went wrong. Try again.'),
-                'locked' => t('Your vault is locked.'),
-                'not_found' => t('Not found, or you no longer have access.'),
-                'conflict' => t('This entry was changed elsewhere. Reload it, then edit again.'),
-                'payload_invalid' => t('Some values are not valid.'),
-                'payload_too_large' => t('This entry is too large.'),
-                'invalid_move' => t('It can\'t be moved there.'),
-                'integrity_error' => t('This item can\'t be decrypted.'),
-                'copied' => t('Copied — clears in 30 s'),
-                'saved' => t('Saved.'),
-                'confirm_delete' => t('Delete this for everyone it is shared with? This can\'t be undone.'),
-                'group_name' => t('Group name'),
-                'no_entries' => t('No entries.'),
-                'shared_entries' => t('Entries shared with me'),
-                'from' => t('from'),
-                'not_enrolled' => t('They haven\'t set up their vault yet.'),
-                'agent_read_only' => t('Agents can only be given Read access.'),
-                'shared' => t('Shared.'),
-            ],
-        ];
-    }
-
     private function unlockService(): UnlockService
     {
         return isset($this->container['vaultUnlock']) ? $this->container['vaultUnlock'] : new UnlockService($this->container);
-    }
-
-    private function principals(): PrincipalModel
-    {
-        return isset($this->container['vaultPrincipals']) ? $this->container['vaultPrincipals'] : new PrincipalModel($this->container);
     }
 }

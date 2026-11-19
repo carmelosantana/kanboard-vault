@@ -13,6 +13,8 @@ use Kanboard\Plugin\Vault\Model\Housekeeping;
 use Kanboard\Plugin\Vault\Model\Notifier;
 use Kanboard\Plugin\Vault\Model\ObjectStore;
 use Kanboard\Plugin\Vault\Model\PrincipalModel;
+use Kanboard\Plugin\Vault\Model\RecoveryService;
+use Kanboard\Plugin\Vault\Model\RotationService;
 use Kanboard\Plugin\Vault\Model\UnlockService;
 use Kanboard\Plugin\Vault\Model\VaultSession;
 use Kanboard\Plugin\Vault\Subscriber\AuthSubscriber;
@@ -37,6 +39,8 @@ class Plugin extends Base
         $this->container['vaultHousekeeping'] = static fn ($c): Housekeeping => new Housekeeping($c);
         $this->container['vaultStore'] = static fn ($c): ObjectStore => new ObjectStore($c);
         $this->container['vaultGrants'] = static fn ($c): GrantModel => new GrantModel($c);
+        $this->container['vaultRotation'] = static fn ($c): RotationService => new RotationService($c);
+        $this->container['vaultRecovery'] = static fn ($c): RecoveryService => new RecoveryService($c);
 
         // The page and its POST endpoints (spec: UI). No template:layout:js or :css: Vault's own templates load
         // vault.js and vault.css, so nothing of Vault's runs on other pages.
@@ -50,6 +54,15 @@ class Plugin extends Base
         foreach (['sharing', 'grant', 'revoke', 'activity'] as $action) {
             $this->route->addRoute('vault/'.$action, 'ShareGrantController', $action, 'Vault');
         }
+        // "My vault security" (R40): passphrase change, Rotate my keys, a personal recovery code.
+        $this->route->addRoute('vault/security', 'SecurityController', 'index', 'Vault');
+        $this->route->addRoute('vault/passphrase', 'SecurityController', 'passphrase', 'Vault');
+        $this->route->addRoute('vault/rotate', 'SecurityController', 'rotate', 'Vault');
+        $this->route->addRoute('vault/recovery-code', 'SecurityController', 'recoveryCode', 'Vault');
+        // Settings → Vault (admins only; SettingsController checks): the settings and the deployment checks.
+        $this->route->addRoute('vault/settings', 'SettingsController', 'index', 'Vault');
+        $this->route->addRoute('vault/settings/save', 'SettingsController', 'save', 'Vault');
+        $this->hook->on('template:config:sidebar', ['template' => 'Vault:config/sidebar']);
         $this->hook->on('template:header:dropdown', ['template' => 'Vault:header/dropdown']);
         $this->hook->on('template:dashboard:sidebar', ['template' => 'Vault:dashboard/sidebar']);
 

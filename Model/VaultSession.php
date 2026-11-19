@@ -18,7 +18,7 @@ class VaultSession extends Base
     public const COOKIE = '__Host-kb_vault';
     public const DEV_COOKIE = 'kb_vault_dev';
     public const DEV_OPT_IN = 'VAULT_DEV_INSECURE_LOCALHOST';
-    public const IDLE_TIMEOUT = 900;
+    public const IDLE_TIMEOUT = 900; // the default vault_idle_timeout (15 min), in seconds
     public const ABSOLUTE_TIMEOUT = 28800;
     public const CRYPTO_V = 1;
     private const KEY_BYTES = 32;
@@ -35,15 +35,21 @@ class VaultSession extends Base
         $this->clock = $clock !== null ? Closure::fromCallable($clock) : static fn (): int => time();
     }
 
-    // HTTPS, or plain HTTP in the opted-in dev stack. Anything else must not unlock.
+    // HTTPS, or plain HTTP in the opted-in dev stack. Anything else must not unlock. HTTPS is decided by
+    // ClientIp::secureTransport (R41): a forwarded protocol counts only from a trusted proxy.
     public function transportAllowed(): bool
     {
-        return $this->request->isHTTPS() || $this->isInsecureDev();
+        return $this->isHttps() || $this->isInsecureDev();
     }
 
     public function cookieName(): string
     {
-        return ! $this->request->isHTTPS() && $this->isInsecureDev() ? self::DEV_COOKIE : self::COOKIE;
+        return ! $this->isHttps() && $this->isInsecureDev() ? self::DEV_COOKIE : self::COOKIE;
+    }
+
+    public function isHttps(): bool
+    {
+        return (new ClientIp($this->container))->secureTransport($this->request, (new VaultSettings($this->container))->trustedProxies());
     }
 
     // A JSON-RPC request. Kanboard's API middleware marks the session scope 'API' before it authenticates
@@ -64,18 +70,29 @@ class VaultSession extends Base
         return $sid === '' ? null : bin2hex(sodium_crypto_generichash($sid, '', 32));
     }
 
-    // The idle timeout, capped by the effective Kanboard session lifetime.
+    // The admin's idle timeout (vault_idle_timeout, minutes), capped by the effective Kanboard session lifetime.
     public function idleTimeout(): int
     {
-        return self::effectiveIdleTimeout((int) SESSION_DURATION, (int) ini_get('session.gc_maxlifetime'));
+        $minutes = (int) (new VaultSettings($this->container))->get('vault_idle_timeout');
+        return min($minutes * 60, $this->sessionLifetimeSeconds());
+    }
+
+    // How long Kanboard keeps this install's sessions, in seconds (the cap on the idle timeout).
+    public function sessionLifetimeSeconds(): int
+    {
+        return self::sessionLifetime((int) SESSION_DURATION, (int) ini_get('session.gc_maxlifetime'));
     }
 
     // Kanboard's session handler keeps a session for SESSION_DURATION, or for gc_maxlifetime (PHP's default
-    // 1440 s) when SESSION_DURATION is 0. The vault idle timeout never outlives it.
-    public static function effectiveIdleTimeout(int $sessionDuration, int $gcMaxLifetime): int
+    // 1440 s) when SESSION_DURATION is 0. The vault idle timeout never outlives it. Seconds.
+    public static function effectiveIdleTimeout(int $idleSeconds, int $sessionDuration, int $gcMaxLifetime): int
     {
-        $lifetime = $sessionDuration > 0 ? $sessionDuration : ($gcMaxLifetime > 0 ? $gcMaxLifetime : 1440);
-        return min(self::IDLE_TIMEOUT, $lifetime);
+        return min($idleSeconds, self::sessionLifetime($sessionDuration, $gcMaxLifetime));
+    }
+
+    public static function sessionLifetime(int $sessionDuration, int $gcMaxLifetime): int
+    {
+        return $sessionDuration > 0 ? $sessionDuration : ($gcMaxLifetime > 0 ? $gcMaxLifetime : 1440);
     }
 
     // Stores sk for this UI session and sets the cookie. Returns the raw 32-byte session_key.

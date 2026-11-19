@@ -19,6 +19,8 @@ use Kanboard\Core\Base;
 //   sessions, challenges, share reservations and shares past their expiry (each share expiry is audited for its
 //                      creator), and audit rows past the retention setting.
 //   rate-limit windows R39: the rate_limited row of every closed window (RateLimitAudit::flush).
+//   policy wraps       T9 minor: recovery and org wraps the stored policy doesn't allow (a policy written through
+//                      Kanboard's generic settings form, around setPolicy) are deleted and their rotation queued.
 class Purger extends Base
 {
     public const INTERVAL = 60;
@@ -54,6 +56,7 @@ class Purger extends Base
         }
         $counts = ['ran' => true];
         $counts['orphan_principals'] = $this->sweepOrphans($now);
+        $counts['policy_wraps'] = (new RecoveryService($this->container))->pruneForPolicy();
         $counts['expired_grants'] = $this->expiredGrants($now);
         $counts['orphan_rows'] = $this->orphanRows($now);
         $counts += $this->expiredRows($now);

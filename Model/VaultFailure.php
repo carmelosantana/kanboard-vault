@@ -55,12 +55,15 @@ final class VaultFailure
     // a success ("finishes at next unlock"). A passphrase change drops the personal recovery code (R36): when the
     // policy allows codes, offer_recovery_code asks the UI to offer a new one (the hook T13 builds on).
     /** @return array<string,mixed> */
-    public static function rotationResult(string $result, string $policy): array
+    // $ceremony: 'passphrase' (a passphrase change) or 'keys' (Rotate my keys), for the PENDING message.
+    public static function rotationResult(string $result, string $policy, string $ceremony = 'passphrase'): array
     {
         $pending = $result === RotationService::PENDING;
         $out = ['ok' => true, 'rotation' => $pending ? 'pending' : 'done'];
         if ($pending) {
-            $out['message'] = t('Your passphrase is changed. Re-encrypting your vault finishes at your next unlock.');
+            $out['message'] = $ceremony === 'keys'
+                ? t('Your keys are rotated. Re-encrypting your vault finishes at your next unlock.')
+                : t('Your passphrase is changed. Re-encrypting your vault finishes at your next unlock.');
         }
         $out['offer_recovery_code'] = $policy !== VaultSettings::POLICY_NONE;
         return $out;

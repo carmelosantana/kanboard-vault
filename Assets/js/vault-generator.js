@@ -14,7 +14,12 @@
  *   useWordlist(text)        takes the vendored eff_large_wordlist.txt as is, keeps the words and drops the dice
  *                            numbers. Anything but 7776 distinct "<5 dice digits>\t<word>" lines is refused.
  *   loadWordlist(url)        fetches that file once (same origin) and calls useWordlist.
- * Its only randomness is crypto.getRandomValues. Generated values go only into the editor's password input (.value).
+ * Its only randomness is crypto.getRandomValues. Generated values go only into input .value and textContent.
+ *
+ * Every [data-vault-generator] panel on the page is bound: the editor's (one target, the entry password), and the
+ * new-passphrase panel of the enrolment and "My vault security" forms, which also fills data-vault-gen-confirm and
+ * shows the value in [data-vault-gen-show] so the user can write it down. A panel's button is the
+ * [data-vault-action="generate"] whose aria-controls names the panel.
  */
 (function (win) {
   'use strict';
@@ -187,15 +192,20 @@
     return loading;
   }
 
-  // ---- The editor's generator panel ----------------------------------------------------------------------------
+  // ---- The generator panels -----------------------------------------------------------------------------------
 
   function bind() {
-    var button = doc.querySelector('[data-vault-action="generate"]');
-    var panel = doc.querySelector('[data-vault-generator]');
-    var target = panel && doc.getElementById(panel.getAttribute('data-vault-gen-target') || '');
-    if (!button || !panel || !target) {
+    Array.prototype.forEach.call(doc.querySelectorAll('[data-vault-generator]'), bindPanel);
+  }
+
+  function bindPanel(panel) {
+    var button = panel.id ? doc.querySelector('[data-vault-action="generate"][aria-controls="' + panel.id + '"]') : null;
+    var target = doc.getElementById(panel.getAttribute('data-vault-gen-target') || '');
+    if (!button || !target) {
       return;
     }
+    var confirmTo = doc.getElementById(panel.getAttribute('data-vault-gen-confirm') || '');
+    var show = panel.querySelector('[data-vault-gen-show]');
     var out = panel.querySelector('[data-vault-gen-entropy]');
     var seq = 0;
 
@@ -238,6 +248,12 @@
         var value = o.words !== undefined ? passphrase(o) : password(o);
         var bits = entropyBits(o);
         target.value = value;
+        if (confirmTo) {
+          confirmTo.value = value;
+        }
+        if (show) {
+          show.textContent = value;
+        }
         out.textContent = '≈ ' + Math.floor(bits) + ' ' + msg('bits');
       }).then(null, function (e) {
         if (mine === seq) {

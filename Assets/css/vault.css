@@ -285,3 +285,44 @@
         border-bottom: 1px solid var(--border, #ddd);
     }
 }
+
+.vault-section {
+    margin-bottom: 1.25rem;
+}
+
+.vault-recovery-code,
+.vault-gen-show {
+    font-family: var(--font-mono, monospace);
+    font-size: 1.05rem;
+    letter-spacing: .05em;
+    user-select: all;
+}
+
+.vault-status.vault-ok {
+    color: var(--success, #2e7d32);
+}
+
+.vault-status.vault-bad {
+    color: var(--destructive, #b94a48);
+}
+
+.vault-checks {
+    list-style: none;
+    padding: 0;
+}
+
+.vault-checks li {
+    margin: .35rem 0;
+}
+
+.vault-check-ok .fa {
+    color: var(--success, #2e7d32);
+}
+
+.vault-check-warn .fa {
+    color: var(--destructive, #b94a48);
+}
+
+.vault-readonly dt {
+    font-weight: 600;
+}

@@ -44,6 +44,9 @@ class RotationService extends Base
     // Results of a passphrase ceremony. Both mean the change took effect (the old passphrase opens nothing).
     public const ROTATED = 'rotated';
     public const PENDING = 'rotation_pending';
+    // T11 M1: a ceremony run from a request (passphrase change, Rotate my keys, a recovery code) re-keys at most this
+    // many sweep batches after start(); the next unlock or write continues the rest (R32/R33).
+    public const CEREMONY_BATCHES = UnlockService::ROTATION_BATCHES;
     private const FINISH_ATTEMPTS = 3;
     private const KDF_METHODS = ['passphrase', 'passphrase+prf'];
 
@@ -172,13 +175,22 @@ class RotationService extends Base
             $guess?->notifyIfDue($userId, $streak);
         }
         try {
-            $this->complete($userId, $sk, $sk2);
-            return self::ROTATED;
+            return $this->advanceContained($userId, $sk, $sk2);
+        } finally {
+            sodium_memzero($sk2);
+        }
+    }
+
+    // After a ceremony's start() has committed (the change has taken effect): at most CEREMONY_BATCHES sweep
+    // batches, then finish. ROTATED when it finished, PENDING when work is left or it failed (logged with the
+    // exception class only); never a failure (R33). The caller holds no Argon2 slot and wipes both keys.
+    public function advanceContained(int $userId, #[\SensitiveParameter] string $sk1, #[\SensitiveParameter] string $sk2): string
+    {
+        try {
+            return $this->advance($userId, $sk1, $sk2, self::CEREMONY_BATCHES) === 0 ? self::ROTATED : self::PENDING;
         } catch (Throwable $e) {
             $this->logger->warning('Vault: key rotation for user '.$userId.' started but could not complete and stays pending ('.get_class($e).')');
             return self::PENDING;
-        } finally {
-            sodium_memzero($sk2);
         }
     }
 

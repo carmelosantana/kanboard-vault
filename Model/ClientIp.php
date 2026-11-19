@@ -44,6 +44,32 @@ class ClientIp extends Base
         return $last;
     }
 
+    // R41: did this request reach Kanboard over HTTPS? The connection's own HTTPS always counts. A proxy's
+    // X-Forwarded-Proto (its right-most value: what the last proxy saw) or X-Forwarded-Ssl counts only when
+    // REMOTE_ADDR is a trusted proxy. Request::isHTTPS() trusts X-Forwarded-Proto from any sender, so a client
+    // on plain HTTP could claim HTTPS for itself.
+    public function secureTransport(Request $request, array $trustedCidrs): bool
+    {
+        $https = strtolower($request->getServerVariable('HTTPS'));
+        if ($https !== '' && $https !== 'off') {
+            return true;
+        }
+        if (! $this->inCidrs($request->getServerVariable('REMOTE_ADDR'), $trustedCidrs)) {
+            return false;
+        }
+        $proto = explode(',', $request->getServerVariable('HTTP_X_FORWARDED_PROTO'));
+        return strtolower(trim((string) end($proto))) === 'https'
+            || strtolower(trim($request->getServerVariable('HTTP_X_FORWARDED_SSL'))) === 'on';
+    }
+
+    // An IPv4-mapped IPv6 CIDR (::ffff:a.b.c.d/n) matches nothing: addresses are compared as IPv4 (T4 minor).
+    public static function isMappedCidr(string $cidr): bool
+    {
+        $net = explode('/', $cidr)[0];
+        $bin = filter_var($net, FILTER_VALIDATE_IP) === false ? false : inet_pton($net);
+        return $bin !== false && strlen($bin) === 16 && substr($bin, 0, 12) === str_repeat("\0", 10)."\xff\xff";
+    }
+
     // IPv4 → a.b.c.0/24, IPv6 → its /48; '' for anything that isn't an IP.
     public function truncate(string $ip): string
     {

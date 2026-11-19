@@ -573,4 +573,53 @@ class RecoveryTest extends Base
         $this->assertSame([], $this->wraps($this->alice, 'recovery'));
         $this->assertSame('1', (string) $this->principal($this->alice)['rotate_requested']);
     }
+
+    // T9 minor (T15 carry): Kanboard's generic settings form can write vault_recovery_policy without setPolicy. The
+    // purge then deletes the wraps the stored policy no longer allows, for every user, and queues their rotation.
+    // Kills: a Purger without the policy step, and a step that prunes nothing (or only org wraps).
+    public function testPurgePrunesWrapsThePolicyNoLongerAllows(): void
+    {
+        $this->policy('code_org');
+        $this->recovery()->createCode($this->alice, $this->skFor($this->alice, $this->alicePassphrase));
+        $this->recovery()->createCode($this->bob, $this->skFor($this->bob, $this->bobPassphrase));
+        // A generic config save, as ConfigController::save would do it: no setPolicy, no wrap deletion.
+        $this->container['configModel']->save(['vault_recovery_policy' => 'none']);
+        $this->assertCount(1, $this->wraps($this->alice, 'recovery'), 'the bypass leaves the wraps');
+
+        $counts = (new \Kanboard\Plugin\Vault\Model\Purger($this->container))->run($this->now, true);
+        $this->assertSame(2, $counts['policy_wraps']);
+        $this->assertSame([], $this->wraps($this->alice, 'recovery'));
+        $this->assertSame([], $this->wraps($this->bob, 'recovery'));
+        $this->assertSame('1', (string) $this->principal($this->alice)['rotate_requested']);
+        $this->assertSame('1', (string) $this->principal($this->bob)['rotate_requested']);
+        $this->assertCount(1, $this->wraps($this->alice, 'passphrase'), 'passphrases are untouched');
+    }
+
+    // T11 M1 (T15 carry): using a recovery code commits its rotation's start inside the Argon2 slot, then re-keys
+    // outside it, for at most CEREMONY_BATCHES batches; the rest waits for the next unlock (PENDING). Each batch
+    // checks that alice's principal slot is free. Kills: the re-key run before the slot is released, and an
+    // unbounded re-key (complete()) in the request.
+    public function testCodeUseRekeysOutsideTheArgonSlotAndBounded(): void
+    {
+        $this->policy('code');
+        $code = $this->recovery()->createCode($this->alice, $this->skFor($this->alice, $this->alicePassphrase));
+        for ($i = 0; $i < 12; $i++) {
+            $this->aliceEntry();
+        }
+        $free = [];
+        $hook = function (string $point) use (&$free): void {
+            if ($point === 'batch') {
+                $slot = $this->slots()->acquire($this->alice);
+                $free[] = $slot !== null;
+                $slot?->release();
+            }
+        };
+        $rotation = new RotationService($this->container, $this->slots(), $this->argon(), fn () => $this->now, $this->session(), $hook, 1);
+        $this->assertSame(RotationService::PENDING, $this->recovery($rotation)->useCode($this->alice, $code, self::NEW_PASS, self::IP));
+        $this->assertCount(RotationService::CEREMONY_BATCHES, $free);
+        $this->assertSame([true], array_values(array_unique($free)));
+        $this->assertNotNull($this->row('SELECT * FROM vault_rotations WHERE user_id = ?', [$this->alice]), 'the rest waits');
+        $sk = $this->unlock($this->alice, self::NEW_PASS, 'sid-after-code');
+        $this->assertNotSame('', $sk);
+    }
 }

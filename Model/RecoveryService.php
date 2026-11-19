@@ -196,17 +196,25 @@ class RecoveryService extends Base
                 ]);
                 return $sk2;
             });
-            return $this->completeContained($userId, $sk1, $sk2);
+        } catch (Throwable $e) {
+            sodium_memzero($sk1);
+            sodium_memzero($sk2);
+            throw $e;
         } finally {
             sodium_memzero($secret);
             sodium_memzero($kek);
-            sodium_memzero($sk1);
-            sodium_memzero($sk2);
             sodium_memzero($ikm);
             sodium_memzero($newKek);
             $slot->release();
             // R39: the five-failure email goes once the slot is free.
             $guess?->notifyIfDue($userId, $streak);
+        }
+        // T11 M1: the re-key runs after the slot is released, bounded; the next unlock continues the rest.
+        try {
+            return $this->rotation()->advanceContained($userId, $sk1, $sk2);
+        } finally {
+            sodium_memzero($sk1);
+            sodium_memzero($sk2);
         }
     }
 
@@ -222,6 +230,14 @@ class RecoveryService extends Base
             $this->pruneMethods($db, self::forbidden($policy), null);
         });
         $settings->changed();
+    }
+
+    // T9 minor: a policy written around setPolicy (Kanboard's generic settings form) still takes effect. Deletes,
+    // for every user, the wraps the stored policy doesn't allow and queues their rotation, in one exclusive
+    // transaction. Run by the purge. Returns how many principals lost a wrap.
+    public function pruneForPolicy(): int
+    {
+        return $this->lock()->exclusive(fn (): int => $this->pruneMethods($this->vdb(), self::forbidden($this->settings()->get(VaultSettings::POLICY)), null));
     }
 
     // vault:org-keygen. Stores only the public key, on the vault_meta lock row, and returns the secret's display

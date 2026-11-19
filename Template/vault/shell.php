@@ -4,6 +4,7 @@
         <li><input type="search" class="vault-search" data-vault-search placeholder="<?= t('Search…') ?>" aria-label="<?= t('Search') ?>"></li>
         <li><button type="button" class="btn" data-vault-action="new-entry"><i class="fa fa-plus" aria-hidden="true"></i> <?= t('Entry') ?></button></li>
         <li><button type="button" class="btn" data-vault-action="new-group"><i class="fa fa-folder" aria-hidden="true"></i> <?= t('Group') ?></button></li>
+        <li><a class="btn" href="<?= $this->url->href('SecurityController', 'index', ['plugin' => 'Vault']) ?>" data-vault-link="security"><i class="fa fa-shield" aria-hidden="true"></i> <?= t('Security') ?></a></li>
         <li><button type="button" class="btn" data-vault-action="lock"><i class="fa fa-lock" aria-hidden="true"></i> <?= t('Lock') ?></button></li>
     </ul>
 </div>
@@ -18,7 +19,7 @@
     <?php if ($notice === 'org_enabled'): ?>
     <p class="alert alert-info vault-banner"><?= t('Your organisation\'s recovery key can now reset your vault passphrase.') ?></p>
     <?php elseif ($notice === 'recovery_code_reset'): ?>
-    <p class="alert alert-info vault-banner" data-vault-offer="recovery-code"><?= t('Your old recovery code no longer works. Create a new one if you want one.') ?></p>
+    <p class="alert alert-info vault-banner" data-vault-offer="recovery-code"><?= t('Your old recovery code no longer works. Create a new one if you want one.') ?> <?= $this->url->link(t('Create a new recovery code'), 'SecurityController', 'index', ['plugin' => 'Vault'], false, '', '', false, 'vault-recovery') ?></p>
     <?php elseif ($notice === 'org_recovered'): ?>
     <p class="alert alert-error vault-banner"><?= t('Your vault passphrase was reset with your organisation\'s recovery key.') ?></p>
     <?php endif ?>

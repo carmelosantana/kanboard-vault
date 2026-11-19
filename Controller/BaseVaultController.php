@@ -8,6 +8,9 @@ use Kanboard\Plugin\Vault\Model\ClientIp;
 use Kanboard\Plugin\Vault\Model\GrantModel;
 use Kanboard\Plugin\Vault\Model\ObjectStore;
 use Kanboard\Plugin\Vault\Model\Housekeeping;
+use Kanboard\Plugin\Vault\Model\PrincipalModel;
+use Kanboard\Plugin\Vault\Model\RecoveryService;
+use Kanboard\Plugin\Vault\Model\RotationService;
 use Kanboard\Plugin\Vault\Model\VaultFailure;
 use Kanboard\Plugin\Vault\Model\VaultSession;
 use Kanboard\Plugin\Vault\Model\VaultSettings;
@@ -59,9 +62,19 @@ abstract class BaseVaultController extends BaseController
         if ($this->request->isAjax()) {
             $this->fail(401, 'locked');
         } else {
-            $this->redirectToPage();
+            // A locked vault always goes back to the Vault page (its unlock form), never to returnRoute().
+            $this->redirectTo(['VaultController', 'index'], []);
         }
         throw new ResponseSent();
+    }
+
+    // Admin settings are for Kanboard app admins only. Anyone else gets the generic forbidden answer, hardened.
+    protected function requireAdmin(): void
+    {
+        if (! $this->userSession->isAdmin()) {
+            $this->fail(403, 'forbidden');
+            throw new ResponseSent();
+        }
     }
 
     // Every Vault action, the page included (fix I1), runs here: the opportunistic purge, then the action. Any
@@ -81,13 +94,14 @@ abstract class BaseVaultController extends BaseController
         }
     }
 
-    // The success answer of a POST: {ok: true} to vault.js, or back to the page for a native form POST (fix C1).
-    protected function succeed(): void
+    // The success answer of a POST: {ok: true} (plus $data) to vault.js, or back to the page for a native form POST
+    // (fix C1), carrying only the fixed $notice code.
+    protected function succeed(array $data = [], ?string $notice = null): void
     {
         if ($this->request->isAjax()) {
-            $this->respond()->json(['ok' => true]);
+            $this->respond()->json(['ok' => true] + $data);
         } else {
-            $this->redirectToPage();
+            $this->redirectToPage($notice === null ? [] : ['vault_notice' => $notice]);
         }
     }
 
@@ -105,17 +119,114 @@ abstract class BaseVaultController extends BaseController
             }
             $response->json(['ok' => false, 'reason' => $reason], $status);
         } elseif ($this->request->isPost()) {
-            $this->redirectToPage($reason);
+            $this->redirectToPage(['vault_error' => $reason]);
         } else {
             $this->respond()->html('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Vault</title></head><body><p>'
                 .htmlspecialchars(t('Something went wrong. Try again.'), ENT_QUOTES, 'UTF-8').'</p></body></html>', $status);
         }
     }
 
-    private function redirectToPage(?string $reason = null): void
+    // The page a native form POST of this controller returns to: [controller, action].
+    protected function returnRoute(): array
     {
-        $params = ['plugin' => 'Vault'] + ($reason === null ? [] : ['vault_error' => $reason]);
-        $this->respond()->withStatusCode(303)->redirect($this->helper->url->to('VaultController', 'index', $params));
+        return ['VaultController', 'index'];
+    }
+
+    private function redirectToPage(array $codes = []): void
+    {
+        $this->redirectTo($this->returnRoute(), $codes);
+    }
+
+    private function redirectTo(array $route, array $codes): void
+    {
+        $this->respond()->withStatusCode(303)->redirect($this->helper->url->to($route[0], $route[1], ['plugin' => 'Vault'] + $codes));
+    }
+
+    // A fixed code from the query string ($param), shown only when $known has a message for it; '' otherwise.
+    protected function codeMessage(string $param, array $known): string
+    {
+        $code = $this->request->getStringParam($param);
+        return $code !== '' && $code !== 'working' && isset($known[$code]) ? (string) $known[$code] : '';
+    }
+
+    // What vault.js reads from #vault-app: the CSRF token, the endpoint URLs, the idle timeout and the messages.
+    /** @return array{csrf:string, endpoints:array<string,string>, idle_ms:int, messages:array<string,string>} */
+    protected function clientConfig(): array
+    {
+        $url = fn (string $action, string $controller = 'VaultController'): string => $this->helper->url->to($controller, $action, ['plugin' => 'Vault']);
+        $endpoints = ['unlock' => $url('unlock'), 'lock' => $url('lock'), 'enrol' => $url('enrol')];
+        foreach (['tree', 'list', 'entry', 'field', 'save', 'move', 'delete'] as $action) {
+            $endpoints[$action] = $url($action, 'EntryController');
+        }
+        foreach (['sharing', 'grant', 'revoke', 'activity'] as $action) {
+            $endpoints[$action] = $url($action, 'ShareGrantController');
+        }
+        $endpoints += ['passphrase' => $url('passphrase', 'SecurityController'), 'rotate' => $url('rotate', 'SecurityController'), 'recovery_code' => $url('recoveryCode', 'SecurityController')];
+        return [
+            'csrf' => $this->token->getReusableCSRFToken(),
+            'endpoints' => $endpoints,
+            'idle_ms' => $this->vaultSession()->idleTimeout() * 1000,
+            'messages' => self::messages(),
+        ];
+    }
+
+    /** @return array<string,string> */
+    protected static function messages(): array
+    {
+        return [
+            'working' => t('Working…'),
+            'unlock_failed' => t('Unlock failed.'),
+            'rate_limited' => t('Too many attempts. Wait a while, then try again.'),
+            'busy' => t('The server is busy. Try again in a few seconds.'),
+            'https_required' => t('Vault needs HTTPS. Open Kanboard over https:// to use it.'),
+            'passphrase_mismatch' => t('The passphrases don\'t match.'),
+            'passphrase_weak' => t('Use at least %d characters, and not your username.', PrincipalModel::MIN_PASSPHRASE_CHARS),
+            'passphrase_reuse' => t('Don\'t reuse your Kanboard login password.'),
+            'already_enrolled' => t('Your vault is already set up. Reload the page.'),
+            'forbidden' => t('The page expired. Reload it and try again.'),
+            'failed' => t('Something went wrong. Try again.'),
+            'locked' => t('Your vault is locked.'),
+            'not_found' => t('Not found, or you no longer have access.'),
+            'conflict' => t('This entry was changed elsewhere. Reload it, then edit again.'),
+            'payload_invalid' => t('Some values are not valid.'),
+            'payload_too_large' => t('This entry is too large.'),
+            'invalid_move' => t('It can\'t be moved there.'),
+            'integrity_error' => t('This item can\'t be decrypted.'),
+            'copied' => t('Copied — clears in 30 s'),
+            'saved' => t('Saved.'),
+            'confirm_delete' => t('Delete this for everyone it is shared with? This can\'t be undone.'),
+            'group_name' => t('Group name'),
+            'no_entries' => t('No entries.'),
+            'shared_entries' => t('Entries shared with me'),
+            'from' => t('from'),
+            'not_enrolled' => t('They haven\'t set up their vault yet.'),
+            'agent_read_only' => t('Agents can only be given Read access.'),
+            'shared' => t('Shared.'),
+            'rotation_in_progress' => t('A key rotation is still finishing. Lock and unlock your vault, then try again.'),
+            'rotation_needs_factors' => t('Your hardware keys must take part in this change. Use the hardware key settings instead.'),
+            'policy_forbids' => t('Your organisation\'s recovery policy doesn\'t allow this.'),
+            'passphrase_changed' => t('Your passphrase is changed.'),
+            'keys_rotated' => t('Your keys are rotated.'),
+            'rotation_pending' => t('Done. Re-encrypting your vault finishes at your next unlock.'),
+            'confirm_new_code' => t('This replaces your current recovery code, if you have one. Continue?'),
+            'code_group_mismatch' => t('That isn\'t group 3 of the code. Check what you wrote down.'),
+            'code_saved' => t('Recovery code saved. Keep it somewhere safe and offline.'),
+        ];
+    }
+
+    protected function principals(): PrincipalModel
+    {
+        return isset($this->container['vaultPrincipals']) ? $this->container['vaultPrincipals'] : new PrincipalModel($this->container);
+    }
+
+    protected function rotationService(): RotationService
+    {
+        return isset($this->container['vaultRotation']) ? $this->container['vaultRotation'] : new RotationService($this->container);
+    }
+
+    protected function recoveryService(): RecoveryService
+    {
+        return isset($this->container['vaultRecovery']) ? $this->container['vaultRecovery'] : new RecoveryService($this->container);
     }
 
     // POST + CSRF, then the unlocked session's key (fetched before any vault lock, R18), wiped whatever happens.
@@ -181,8 +292,7 @@ abstract class BaseVaultController extends BaseController
 
     protected function clientIp(): string
     {
-        $cidrs = (string) (new VaultSettings($this->container))->get('vault_trusted_proxy_cidrs');
-        return (new ClientIp($this->container))->resolve($this->request, array_values(array_filter(explode(',', $cidrs))));
+        return (new ClientIp($this->container))->resolve($this->request, (new VaultSettings($this->container))->trustedProxies());
     }
 
     protected function vaultSession(): VaultSession

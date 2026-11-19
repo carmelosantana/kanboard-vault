@@ -756,7 +756,13 @@ class RotationTest extends Base
         }
         $pdo->exec('COMMIT');
 
-        $this->rotation(100)->requestManual($this->alice, $sk1, $this->alicePassphrase, self::IP);
+        // The request runs CEREMONY_BATCHES batches (T11 M1); later requests continue the rest, as unlock does.
+        $this->assertSame(RotationService::PENDING, $this->rotation(100)->requestManual($this->alice, $sk1, $this->alicePassphrase, self::IP));
+        $pending = $this->row("SELECT * FROM vault_wraps WHERE user_id = ? AND status = 'pending'", [$this->alice]);
+        $newPk = base64_decode($this->row('SELECT new_pk FROM vault_rotations WHERE user_id = ?', [$this->alice])['new_pk']);
+        $keys = $this->rotation(100)->resume($this->alice, Wraps::unwrap($pending, $this->kek($this->alicePassphrase, $pending), $newPk));
+        while ($this->rotation(100)->advance($this->alice, $keys['sk1'], $keys['sk2'], UnlockService::ROTATION_BATCHES) > 0) {
+        }
         $batches = array_values(array_filter($this->hookLog, static fn (array $h): bool => $h[0] === 'batch'));
         $this->assertCount(101, $batches);
         foreach ($batches as [, $k, $seconds]) {
@@ -861,5 +867,24 @@ class RotationTest extends Base
         $this->assertSame(RotationService::ROTATED, $this->rotatingPrincipals(2)->changePassphrase($this->alice, $this->alicePassphrase, self::NEW_PASS, $sk1, self::IP));
         $this->assertNotEmpty($free);
         $this->assertSame([true], array_values(array_unique($free)));
+    }
+
+    // T11 M1 (T15 carry): a passphrase change runs start() and then at most CEREMONY_BATCHES sweep batches in the
+    // request; the rest is left pending for the next unlock or write. Alice holds 11 objects; at one object per batch
+    // the change stops after 10 batches with one left, still a success (PENDING), and the next advance finishes it.
+    // Kills: the ceremony sweeping to the end (complete()) in the request, and a bound that ignores the batch cap.
+    public function testPassphraseChangeRunsBoundedBatchesThenResumes(): void
+    {
+        $this->populate();
+        $sk1 = $this->skFor($this->alice, $this->alicePassphrase);
+        $this->assertSame(RotationService::PENDING, $this->rotatingPrincipals(1)->changePassphrase($this->alice, $this->alicePassphrase, self::NEW_PASS, $sk1, self::IP));
+        $batches = array_filter($this->hookLog, static fn (array $h): bool => $h[0] === 'batch');
+        $this->assertCount(RotationService::CEREMONY_BATCHES, $batches);
+        $this->assertSame(10, RotationService::CEREMONY_BATCHES);
+        $this->assertGreaterThan(0, $this->oldGenRows($this->alice, 1), 'the rest is left for later');
+        $sk = $this->unlockFresh($this->alice, self::NEW_PASS, 'php-session-next');
+        $this->assertAliceReadsEverything($sk);
+        $this->assertSame(0, $this->oldGenRows($this->alice, 1));
+        $this->assertSame(2, (int) $this->principalRow($this->alice)['key_gen']);
     }
 }
