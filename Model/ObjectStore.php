@@ -333,6 +333,86 @@ class ObjectStore extends Base
         });
     }
 
+    // Everything the actor may export, decrypted through the read path (spec: KeePassXC import and export → Export),
+    // under one shared lock so it is one consistent snapshot:
+    //   groups   the actor's own groups, and with $includeShared every group another owner shared with them (a live
+    //            grant on it or an ancestor, R23), as tree() lists them: {id, parent_id (null when the parent isn't
+    //            listed), name, shared}. Ordered by id.
+    //   entries  every entry in those groups the actor can read, and with $includeShared each entry shared on its own
+    //            whose group isn't listed (group_id null): the full payload (EntryPayload's keys) plus group_id.
+    //            Ordered by id.
+    //   skipped  entries the actor is entitled to that fail to decrypt (and listed groups whose name doesn't): left
+    //            out and counted, not a failed export (R23).
+    // Callers fetch $sk before calling (R18) and wipe it; nothing here is audited (the controller audits the export).
+    /** @return array{groups: list<array{id:int, parent_id:?int, name:string, shared:bool}>, entries: list<array<string,mixed>>, skipped:int} */
+    public function exportFor(int $actorId, #[\SensitiveParameter] string $sk, bool $includeShared): array
+    {
+        return $this->lock()->shared(function () use ($actorId, $sk, $includeShared): array {
+            $db = $this->vdb();
+            $now = $this->now();
+            $ids = array_map(static fn (array $r): int => (int) $r['id'], $db->fetchAll('SELECT id FROM vault_groups WHERE owner_id = ?', [$actorId]));
+            if ($includeShared) {
+                $roots = $db->fetchAll(
+                    "SELECT subject_id FROM vault_grants WHERE subject_type = 'group' AND grantee_id = ? AND (expires_at IS NULL OR expires_at > ?)",
+                    [$actorId, $now]
+                );
+                foreach ($roots as $r) {
+                    $ids = array_merge($ids, ...$this->resolver()->subtreeLevels((int) $r['subject_id']));
+                }
+            }
+            $ids = array_values(array_unique($ids));
+            sort($ids);
+            $rows = [];
+            foreach ($ids as $id) {
+                $row = $this->fetchObject($db, 'group', $id);
+                if ($row !== null && $this->effectivePermission('group', $id, $actorId, $row) !== null) {
+                    $rows[$id] = $row;
+                }
+            }
+            $skipped = 0;
+            $groups = [];
+            foreach ($rows as $id => $row) {
+                try {
+                    $name = (string) ($this->decryptFor($db, 'group', $row, $actorId, $sk)['name'] ?? '');
+                } catch (VaultException) {
+                    $skipped++;
+                    $name = '';
+                }
+                $parent = $row['parent_id'] === null || ! isset($rows[(int) $row['parent_id']]) ? null : (int) $row['parent_id'];
+                $groups[] = ['id' => $id, 'parent_id' => $parent, 'name' => $name, 'shared' => (int) $row['owner_id'] !== $actorId];
+            }
+            $entryRows = [];
+            foreach (array_chunk(array_keys($rows), self::CHUNK) as $chunk) {
+                foreach ($db->fetchAll('SELECT * FROM vault_entries WHERE group_id IN ('.RecipientResolver::marks($chunk).')', $chunk) as $row) {
+                    $entryRows[(int) $row['id']] = [$row, (int) $row['group_id']];
+                }
+            }
+            if ($includeShared) {
+                $loose = $db->fetchAll(
+                    "SELECT e.* FROM vault_entries e JOIN vault_grants g ON g.subject_type = 'entry' AND g.subject_id = e.id
+                     WHERE g.grantee_id = ? AND (g.expires_at IS NULL OR g.expires_at > ?)",
+                    [$actorId, $now]
+                );
+                foreach ($loose as $row) {
+                    $entryRows[(int) $row['id']] ??= [$row, null];
+                }
+            }
+            ksort($entryRows);
+            $entries = [];
+            foreach ($entryRows as [$row, $groupId]) {
+                if ($this->effectivePermission('entry', (int) $row['id'], $actorId, $row) === null) {
+                    continue;
+                }
+                try {
+                    $entries[] = ['group_id' => $groupId] + EntryPayload::validate($this->decryptFor($db, 'entry', $row, $actorId, $sk));
+                } catch (VaultException) {
+                    $skipped++;
+                }
+            }
+            return ['groups' => $groups, 'entries' => $entries, 'skipped' => $skipped];
+        });
+    }
+
     // The names of the groups directly under $parentId that the actor owns, decrypted through the read path (the
     // import finds its group paths with it). A group that fails to decrypt is left out. Ordered by id.
     /** @return array<int,string> id => name */

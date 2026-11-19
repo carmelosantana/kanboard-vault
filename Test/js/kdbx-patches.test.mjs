@@ -79,7 +79,7 @@ test('tabs and whitespace preserved', async () => {
 // --- Patch 3 -------------------------------------------------------------------------------------------------------
 
 // A page whose WebCrypto records every SHA digest, and a spy on Uint8Array.prototype.fill(0) (kdbxweb's zeroBuffer).
-function spiedPage({ failEncrypt = false } = {}) {
+function spiedPage({ failEncrypt = false, failSign = false } = {}) {
   const digests = [];
   const subtle = webcrypto.subtle;
   const crypto = {
@@ -96,6 +96,9 @@ function spiedPage({ failEncrypt = false } = {}) {
         }
         if (prop === 'encrypt' && failEncrypt) {
           return () => Promise.reject(new Error('encrypt failed'));
+        }
+        if (prop === 'sign' && failSign) {
+          return () => Promise.reject(new Error('sign failed'));
         }
         const v = target[prop];
         return typeof v === 'function' ? v.bind(target) : v;
@@ -261,6 +264,88 @@ function gzipFixed(fill, size) {
   return Uint8Array.from([0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff, ...out, ...trailer]);
 }
 
+// --- Patch 5 (Task 23, T21 carry) ---------------------------------------------------------------------------------
+
+// A KDBX 4.0 database as the export writes it (Argon2id, ChaCha20, a fast KDF), with one protected value.
+function exportLike(kdbxweb) {
+  const db = kdbxweb.Kdbx.create(new kdbxweb.Credentials(kdbxweb.ProtectedValue.fromString(PASSWORD)), 'Saved');
+  db.setVersion(4);
+  db.setKdf(kdbxweb.Consts.KdfId.Argon2id);
+  db.header.dataCipherUuid = new kdbxweb.KdbxUuid(kdbxweb.Consts.CipherId.ChaCha20);
+  const e = db.createEntry(db.getDefaultGroup());
+  e.fields.set('Title', 'Saved entry');
+  e.fields.set('Password', kdbxweb.ProtectedValue.fromString('saved\tpassword'));
+  return db;
+}
+
+test('save-path keys and the inner-stream key are zeroed', async () => {
+  // Upstream's saveV4 zeroed the cipher and HMAC keys on success only, and kept the inner random-stream key (the
+  // header's protectedStreamKey), the SHA-512 it derives the ChaCha20 key and nonce from, and that cipher's state.
+  // Patch 05 zeroes them all once the save resolves or fails; generateSalts makes a new stream key for each save.
+  const spy = spyFill();
+  const innerKeyZeroed = (p) => {
+    const inner = p.digests.filter((d) => d.alg === 'SHA-512' && d.inLen === 64);
+    assert.equal(inner.length, 1, 'one inner-stream key hash');
+    assert.ok(spy.zeroed.has(inner[0].out) && new Uint8Array(inner[0].out).every((b) => b === 0), 'the inner-stream key hash is zeroed');
+  };
+  try {
+    let p = spiedPage();
+    let db = exportLike(p.kdbxweb);
+    // Every ChaCha20 the save runs (the data cipher and the inner stream), the plaintext the data cipher is given,
+    // and the stream generators destroyed.
+    const ciphers = new Set();
+    const C = p.kdbxweb.ChaCha20.prototype;
+    const [enc, getBytes] = [C.encrypt, C.getBytes];
+    C.encrypt = function (...a) { ciphers.add(this); return enc.apply(this, a); };
+    C.getBytes = function (...a) { ciphers.add(this); return getBytes.apply(this, a); };
+    const plaintexts = [];
+    const chacha20 = p.kdbxweb.CryptoEngine.chacha20;
+    p.kdbxweb.CryptoEngine.chacha20 = (data, ...rest) => { plaintexts.push(data); return chacha20(data, ...rest); };
+    let destroyed = 0;
+    const destroy = p.kdbxweb.ProtectSaltGenerator.prototype.destroy;
+    p.kdbxweb.ProtectSaltGenerator.prototype.destroy = function () { destroyed++; return destroy.call(this); };
+    const saved = new Uint8Array(await p.vault.save(db));
+    assertKeysZeroed(p.digests, spy.zeroed, [32, 64, 65, 72]);
+    innerKeyZeroed(p);
+    assert.equal(ciphers.size, 2, 'the data cipher and the inner stream');
+    for (const c of ciphers) assert.ok([c._input, c._x, c._block].every((a) => a.every((x) => x === 0)), 'a ChaCha20 state is zeroed');
+    assert.equal(plaintexts.length, 1);
+    assert.ok(new Uint8Array(plaintexts[0]).every((b) => b === 0), 'the (gzipped) plaintext handed to the cipher is zeroed');
+    assert.equal(destroyed, 1, 'the inner stream generator is destroyed');
+    assert.ok(new Uint8Array(db.header.protectedStreamKey).every((b) => b === 0), 'the header keeps no inner-stream key');
+    const gen = p.kdbxweb.ProtectSaltGenerator;
+    assert.equal(typeof gen.prototype.destroy, 'function');
+    // The file was written before anything was zeroed: it opens, protected value and all, and saves again.
+    const back = await loadKdbxPage({ vault: true }).vault.load(saved, PASSWORD);
+    assert.equal(back.getDefaultGroup().entries[0].fields.get('Password').getText(), 'saved\tpassword');
+    assert.ok((await p.vault.save(db)).byteLength > 0, 'a second save makes a new stream key');
+
+    // A save that fails once the keys exist (the header HMAC can't be made): the same keys are zeroed.
+    p = spiedPage({ failSign: true });
+    db = exportLike(p.kdbxweb);
+    await assert.rejects(p.vault.save(db), (e) => e && e.code === 'save_failed');
+    assertKeysZeroed(p.digests, spy.zeroed, [32, 64, 65, 72]);
+    assert.ok(new Uint8Array(db.header.protectedStreamKey).every((b) => b === 0), 'and the inner-stream key');
+  } finally {
+    spy.restore();
+  }
+});
+
+// The stream cipher's state (key words, block, working state) is zeroed by destroy().
+test('ProtectSaltGenerator.destroy zeroes the stream cipher state', async () => {
+  const { kdbxweb } = loadKdbxPage();
+  for (const crs of [kdbxweb.Consts.CrsAlgorithm.ChaCha20, kdbxweb.Consts.CrsAlgorithm.Salsa20]) {
+    const gen = await kdbxweb.ProtectSaltGenerator.create(new Uint8Array(64).fill(7), crs);
+    gen.getSalt(10);
+    const algo = gen._algo;
+    // Every typed or plain number array the cipher keeps, except its constant sigma words.
+    const state = Object.entries(algo).filter(([k, v]) => k !== '_sigmaWords' && (ArrayBuffer.isView(v) || Array.isArray(v))).map(([, v]) => v);
+    assert.ok(state.length >= 3 && state.some((v) => v.some((x) => x !== 0)), 'state before');
+    gen.destroy();
+    for (const v of state) assert.ok(v.every((x) => x === 0), 'state zeroed: ' + crs);
+  }
+});
+
 test('an empty password is tried as no password, then as an empty one', async () => {
   // KeePassXC's rule: an empty password field opens a key-file-only database, and a database whose password is
   // literally empty on a retry (Task 21 concern 4).
@@ -301,7 +386,7 @@ test('vendored file sha256 matches VENDOR.md after patches', () => {
 
   // The patches, in order, are exactly the files in patches/ and each is listed in VENDOR.md.
   const patches = readdirSync(path('Assets/vendor/kdbxweb/patches')).sort();
-  assert.deepEqual(patches, ['01-verify-final-hmac-block.patch', '02-preserve-tabs.patch', '03-zero-keys-on-failure.patch', '04-cap-inflated-size.patch']);
+  assert.deepEqual(patches, ['01-verify-final-hmac-block.patch', '02-preserve-tabs.patch', '03-zero-keys-on-failure.patch', '04-cap-inflated-size.patch', '05-zero-save-path-keys.patch']);
   for (const f of patches) assert.ok(md.includes('`kdbxweb/patches/' + f + '`'), f + ' is recorded in VENDOR.md');
   const texts = patches.map((f) => readFileSync(path('Assets/vendor/kdbxweb/patches/' + f), 'utf8'));
 

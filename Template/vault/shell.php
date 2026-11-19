@@ -5,6 +5,7 @@
         <li><button type="button" class="btn" data-vault-action="new-entry"><i class="fa fa-plus" aria-hidden="true"></i> <?= t('Entry') ?></button></li>
         <li><button type="button" class="btn" data-vault-action="new-group"><i class="fa fa-folder" aria-hidden="true"></i> <?= t('Group') ?></button></li>
         <li><a class="btn" href="<?= $this->url->href('ImportController', 'index', ['plugin' => 'Vault']) ?>" data-vault-link="import"><i class="fa fa-upload" aria-hidden="true"></i> <?= t('Import') ?></a></li>
+        <li><a class="btn" href="<?= $this->url->href('ExportController', 'index', ['plugin' => 'Vault']) ?>" data-vault-link="export"><i class="fa fa-download" aria-hidden="true"></i> <?= t('Export') ?></a></li>
         <li><a class="btn" href="<?= $this->url->href('SecurityController', 'index', ['plugin' => 'Vault']) ?>" data-vault-link="security"><i class="fa fa-shield" aria-hidden="true"></i> <?= t('Security') ?></a></li>
         <li><a class="btn" href="<?= $this->url->href('HardwareKeyController', 'index', ['plugin' => 'Vault']) ?>" data-vault-link="hwkeys"><i class="fa fa-key" aria-hidden="true"></i> <?= t('Keys') ?></a></li>
         <?php if (! empty($agents_available)): ?>

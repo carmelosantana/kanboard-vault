@@ -96,6 +96,27 @@ abstract class BaseVaultController extends BaseController
         }
     }
 
+    // A fresh re-authentication for what an unlocked session alone must not do (R54: a recovery code; T23: the
+    // export): the current passphrase ('passphrase') through the passphrase change's throttled check
+    // (RotationService::confirmPassphrase: the principal's Argon2 slot, back-off, the IP bucket, Argon2, the streak;
+    // R15), and for a user with hardware keys also a fresh assertion ('assertion', from a 'ceremony' challenge), which
+    // HardwareKeys::confirm checks together with the passphrase (that key's wrap must open to exactly $sk), throttled
+    // the same way. hw_assertion_required, before any Argon2, when a key user sent none. Throws on any refusal.
+    protected function requireFreshReauth(int $userId, #[\SensitiveParameter] string $sk): void
+    {
+        $passphrase = (string) $this->request->getRawValue('passphrase');
+        $hw = $this->hardwareKeys();
+        if ($hw->count($userId) === 0) {
+            $this->rotationService()->confirmPassphrase($userId, $sk, $passphrase, $this->clientIp());
+            return;
+        }
+        $raw = (string) $this->request->getRawValue('assertion');
+        if ($raw === '') {
+            throw new VaultException('hw_assertion_required');
+        }
+        $hw->confirm($userId, $sk, $passphrase, HardwareKeys::parseAssertion($raw), $this->clientIp());
+    }
+
     // Admin settings are for Kanboard app admins only. Anyone else gets the generic forbidden answer, hardened.
     protected function requireAdmin(): void
     {
@@ -205,6 +226,7 @@ abstract class BaseVaultController extends BaseController
         // The one-time link's base: vault-onetime.js (T18) appends &id=<share_id>#<fragment> to an absolute copy.
         $endpoints['share_show'] = $url('show', 'VaultShareController');
         $endpoints += ['import_start' => $url('start', 'ImportController'), 'import_batch' => $url('batch', 'ImportController')];
+        $endpoints['export'] = $url('export', 'ExportController');
         $endpoints += ['agent_enrol' => $url('enrol', 'VaultAgentController'), 'agent_reenrol' => $url('reenrol', 'VaultAgentController'), 'agent_cap' => $url('cap', 'VaultAgentController')];
         return [
             'csrf' => $this->token->getReusableCSRFToken(),
@@ -303,6 +325,18 @@ abstract class BaseVaultController extends BaseController
             'import_uploading' => t('Saving the entries in your vault…'),
             'import_done' => t('Import finished.'),
             'import_partial' => t('{count} entries were saved before it stopped; they are in the new import group.'),
+            // KeePassXC export (vault-export.js shows export_<code>, else the plain code).
+            'export_password_required' => t('Choose a password for the exported file.'),
+            'export_checking' => t('Checking your passphrase…'),
+            'export_building' => t('Building the KeePass file… Argon2 takes a few seconds.'),
+            'export_done' => t('Exported. Your browser saved the file; it never went through the server.'),
+            'export_skipped' => t('{count} entries couldn\'t be decrypted and were left out.'),
+            'export_cancelled' => t('Export cancelled. No file was saved.'),
+            'export_timeout' => t('Building the file took too long, so it was stopped. Try again.'),
+            'export_worker_failed' => t('This browser couldn\'t run the key derivation. Try a current browser.'),
+            'export_unavailable' => t('The export scripts didn\'t load. Reload the page.'),
+            'export_busy' => t('An export is already running.'),
+            'export_save_failed' => t('The KeePass file couldn\'t be built.'),
         ];
     }
 

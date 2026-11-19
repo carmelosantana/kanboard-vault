@@ -9,10 +9,10 @@
 // page-like realm of Test/js/kdbx-page.mjs; they hold no entries and no recycle bin.
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
 import { loadKdbxPage } from '../../js/kdbx-page.mjs';
 import { argon2d, argon2id } from '../../../Assets/vendor/noble-hashes/argon2.js';
 import { PASSWORD, KPXC_ENTRIES } from './fixtures.mjs';
+import { keepassXml } from './keepass-xml.mjs';
 
 const dir = process.argv[2];
 if (!dir) throw new Error('usage: node make-seeds.mjs <folder>');
@@ -61,62 +61,5 @@ cc.header.kdfParameters.set('P', VarDictionary.ValueType.UInt32, 1);
 await save(cc, 'seed-chacha.kdbx');
 
 // --- entries.xml ---------------------------------------------------------------------------------------------------
-// Fixed UUIDs, so the XML (and what the import holds) is the same on every run.
-const uuid = (label) => createHash('sha256').update('vault-kpxc:' + label).digest().subarray(0, 16).toString('base64');
-const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-const TIME = '2026-11-19T00:00:00Z';
-
-function times(expires) {
-  return '<Times><CreationTime>' + TIME + '</CreationTime><LastModificationTime>' + TIME + '</LastModificationTime>'
-    + '<LastAccessTime>' + TIME + '</LastAccessTime><ExpiryTime>' + (expires || TIME) + '</ExpiryTime>'
-    + '<Expires>' + (expires ? 'True' : 'False') + '</Expires><UsageCount>0</UsageCount>'
-    + '<LocationChanged>' + TIME + '</LocationChanged></Times>';
-}
-
-function strings(fields, protect) {
-  return Object.entries(fields).map(([k, v]) => '<String><Key>' + esc(k) + '</Key><Value'
-    + (protect.includes(k) ? ' ProtectInMemory="True"' : '') + '>' + esc(v) + '</Value></String>').join('');
-}
-
-const binaries = [];
-function entryXml(e, label) {
-  let x = '<Entry><UUID>' + uuid('entry:' + label) + '</UUID><IconID>0</IconID><Tags>' + esc(e.tags.join(';')) + '</Tags>'
-    + times(e.expires) + strings(e.fields, e.protect);
-  for (const [name, text] of Object.entries(e.attachments || {})) {
-    binaries.push(Buffer.from(text, 'utf8').toString('base64'));
-    x += '<Binary><Key>' + esc(name) + '</Key><Value Ref="' + (binaries.length - 1) + '"/></Binary>';
-  }
-  if (e.history && e.history.length) {
-    x += '<History>' + e.history.map((h, i) => '<Entry><UUID>' + uuid('entry:' + label) + '</UUID><IconID>0</IconID>'
-      + times() + strings(h, ['Password']) + '</Entry>').join('') + '</History>';
-  }
-  return x + '</Entry>';
-}
-
-// The group tree: a group is keyed by its path, plus `group` for siblings of the same name.
-const tree = { name: 'Vault import fixture', key: 'root', entries: [], groups: [] };
-KPXC_ENTRIES.forEach((e, i) => {
-  let node = tree;
-  e.path.forEach((name, depth) => {
-    const key = node.key + '/' + name + (depth === e.path.length - 1 && e.group !== undefined ? '#' + e.group : '');
-    let child = node.groups.find((g) => g.key === key);
-    if (!child) {
-      child = { name, key, entries: [], groups: [] };
-      node.groups.push(child);
-    }
-    node = child;
-  });
-  node.entries.push(entryXml(e, String(i)));
-});
-
-function groupXml(g) {
-  return '<Group><UUID>' + uuid('group:' + g.key) + '</UUID><Name>' + esc(g.name) + '</Name><Notes></Notes><IconID>48</IconID>'
-    + times() + '<IsExpanded>True</IsExpanded>' + g.entries.join('') + g.groups.map(groupXml).join('') + '</Group>';
-}
-
-const xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<KeePassFile><Meta><Generator>Vault fixture</Generator>'
-  + '<DatabaseName>Vault import fixture</DatabaseName><RecycleBinEnabled>False</RecycleBinEnabled>'
-  + '<Binaries>' + binaries.map((b, i) => '<Binary ID="' + i + '" Compressed="False">' + b + '</Binary>').join('') + '</Binaries>'
-  + '</Meta><Root>' + groupXml(tree) + '<DeletedObjects/></Root></KeePassFile>\n';
-writeFileSync(join(dir, 'entries.xml'), xml);
+writeFileSync(join(dir, 'entries.xml'), keepassXml('Vault import fixture', KPXC_ENTRIES, 'vault-kpxc:'));
 console.log('wrote seeds and entries.xml to', dir);

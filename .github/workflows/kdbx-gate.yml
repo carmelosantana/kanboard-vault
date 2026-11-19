@@ -1,0 +1,40 @@
+# The KeePassXC export gate (spec: KeePassXC import and export → CI gate): Test/kdbx-gate/run.sh imports KeePassXC
+# files through Vault's real pages in headless Chrome, exports them again, and checks that keepassxc-cli and pykeepass
+# both read every entry field for field. If it fails, export slips to v1.1.
+# Supply chain: every action pinned to a full commit SHA, read-only token, no secrets, no pull_request_target, no cache;
+# keepassxc-cli and pykeepass run only in the throwaway container from Test/kdbx-gate/Dockerfile.
+name: kdbx-gate
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          path: Vault
+          persist-credentials: false
+      # The throwaway Kanboard image comes from the plugins harness's testing/Dockerfile.sodium, at a pinned commit.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          repository: carmelosantana/kanboard-plugins
+          ref: 4ea5311200f5945ae1bafd9fc1ac337d76abb998
+          path: harness
+          sparse-checkout: testing/Dockerfile.sodium
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: KDBX gate
+        env:
+          KB_DOCKERFILE: ${{ github.workspace }}/harness/testing/Dockerfile.sodium
+          CHROME: /usr/bin/google-chrome
+        run: bash Vault/Test/kdbx-gate/run.sh

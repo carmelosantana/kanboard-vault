@@ -1,0 +1,193 @@
+--- a/kdbxweb.js
++++ b/kdbxweb.js
+@@ -107,6 +107,13 @@
+         }
+         return res;
+     }
++    // Vault patch 05: zero the key words, the working state and the last key-stream block.
++    destroy() {
++        this._input.fill(0);
++        this._x.fill(0);
++        this._block.fill(0);
++        this._blockUsed = 64;
++    }
+ }
+ exports.ChaCha20 = ChaCha20;
+ function quarterRound(x, a, b, c, d) {
+@@ -301,8 +308,16 @@
+ exports.random = random;
+ function chacha20(data, key, iv) {
+     return Promise.resolve().then(() => {
+-        const algo = new chacha20_1.ChaCha20(new Uint8Array(key), new Uint8Array(iv));
+-        return (0, byte_utils_1.arrayToBuffer)(algo.encrypt(new Uint8Array(data)));
++        // Vault patch 05: the copy of the cipher key and the cipher's state are zeroed once the data is transformed.
++        const keyCopy = new Uint8Array(key);
++        const algo = new chacha20_1.ChaCha20(keyCopy, new Uint8Array(iv));
++        try {
++            return (0, byte_utils_1.arrayToBuffer)(algo.encrypt(new Uint8Array(data)));
++        }
++        finally {
++            keyCopy.fill(0);
++            algo.destroy();
++        }
+     });
+ }
+ exports.chacha20 = chacha20;
+@@ -750,12 +765,18 @@
+     getSalt(len) {
+         return (0, byte_utils_1.arrayToBuffer)(this._algo.getBytes(len));
+     }
++    // Vault patch 05: zero the stream cipher's state once the generator is no longer needed.
++    destroy() {
++        this._algo.destroy();
++    }
+     static create(key, crsAlgorithm) {
++        // Vault patch 05: the ciphers copy the key (and nonce) into their state, so the hash they come from is zeroed.
+         switch (crsAlgorithm) {
+             case consts_1.CrsAlgorithm.Salsa20:
+                 return CryptoEngine.sha256((0, byte_utils_1.arrayToBuffer)(key)).then((hash) => {
+                     const key = new Uint8Array(hash);
+                     const algo = new salsa20_1.Salsa20(key, SalsaNonce);
++                    (0, byte_utils_1.zeroBuffer)(hash);
+                     return new ProtectSaltGenerator(algo);
+                 });
+             case consts_1.CrsAlgorithm.ChaCha20:
+@@ -763,6 +784,7 @@
+                     const key = new Uint8Array(hash, 0, 32);
+                     const nonce = new Uint8Array(hash, 32, 12);
+                     const algo = new chacha20_1.ChaCha20(key, nonce);
++                    (0, byte_utils_1.zeroBuffer)(hash);
+                     return new ProtectSaltGenerator(algo);
+                 });
+             default:
+@@ -970,6 +992,14 @@
+         this._counterWords[1] = 0;
+         this._blockUsed = 64;
+     }
++    // Vault patch 05: zero the key, nonce and counter words and the last key-stream block.
++    destroy() {
++        this._keyWords.fill(0);
++        this._nonceWords.fill(0);
++        this._counterWords.fill(0);
++        this._block.fill(0);
++        this._blockUsed = 64;
++    }
+     incrementCounter() {
+         // Note: maximum 2^64 blocks.
+         this._counterWords[0] = (this._counterWords[0] + 1) & 0xffffffff;
+@@ -2408,16 +2438,20 @@
+         return this.kdbx.credentials.ready.then(() => {
+             const stm = new binary_stream_1.BinaryStream();
+             this.kdbx.header.generateSalts();
+-            this.kdbx.header.write(stm);
+-            if (this.kdbx.versionMajor === 3) {
+-                return this.saveV3(stm);
+-            }
+-            else if (this.kdbx.versionMajor === 4) {
+-                return this.saveV4(stm);
+-            }
+-            else {
+-                throw new kdbx_error_1.KdbxError(consts_1.ErrorCodes.InvalidVersion, `bad version: ${this.kdbx.versionMajor}`);
+-            }
++            // Vault patch 05: the inner random-stream key is needed only while this save runs (generateSalts makes a
++            // new one for each save), so it is zeroed when the save resolves, rejects or throws.
++            return zeroAfter(() => {
++                this.kdbx.header.write(stm);
++                if (this.kdbx.versionMajor === 3) {
++                    return this.saveV3(stm);
++                }
++                else if (this.kdbx.versionMajor === 4) {
++                    return this.saveV4(stm);
++                }
++                else {
++                    throw new kdbx_error_1.KdbxError(consts_1.ErrorCodes.InvalidVersion, `bad version: ${this.kdbx.versionMajor}`);
++                }
++            }, this.kdbx.header.protectedStreamKey);
+         });
+     }
+     saveV3(stm) {
+@@ -2441,38 +2475,56 @@
+         this.kdbx.buildXml(this.ctx);
+         return this.getHeaderHash(stm).then((headerSha) => {
+             stm.writeBytes(headerSha);
++            // Vault patch 05: the cipher and HMAC keys, the stream cipher's state and the plaintext buffers are zeroed
++            // when the save resolves, rejects or throws (upstream zeroed the keys on success only, and the rest never).
+             return this.computeKeysV4().then((keys) => {
+-                return this.getHeaderHmac(stm, keys.hmacKey).then((headerHmac) => {
+-                    stm.writeBytes(headerHmac);
+-                    return this.getProtectSaltGenerator().then((gen) => {
+-                        if (!this.kdbx.xml) {
+-                            throw new kdbx_error_1.KdbxError(consts_1.ErrorCodes.InvalidState, 'no xml');
+-                        }
+-                        XmlUtils.updateProtectedValuesSalt(this.kdbx.xml.documentElement, gen);
+-                        const xml = XmlUtils.serialize(this.kdbx.xml);
+-                        const innerHeaderStm = new binary_stream_1.BinaryStream();
+-                        this.kdbx.header.writeInnerHeader(innerHeaderStm, this.ctx);
+-                        const innerHeaderData = innerHeaderStm.getWrittenBytes();
+-                        const xmlData = (0, byte_utils_1.arrayToBuffer)((0, byte_utils_1.stringToBytes)(xml));
+-                        let data = new ArrayBuffer(innerHeaderData.byteLength + xmlData.byteLength);
+-                        const dataArr = new Uint8Array(data);
+-                        dataArr.set(new Uint8Array(innerHeaderData));
+-                        dataArr.set(new Uint8Array(xmlData), innerHeaderData.byteLength);
+-                        (0, byte_utils_1.zeroBuffer)(xmlData);
+-                        (0, byte_utils_1.zeroBuffer)(innerHeaderData);
+-                        if (this.kdbx.header.compression === consts_1.CompressionAlgorithm.GZip) {
+-                            data = (0, byte_utils_1.arrayToBuffer)((0, fflate_1.gzipSync)(new Uint8Array(data)));
+-                        }
+-                        return this.encryptData((0, byte_utils_1.arrayToBuffer)(data), keys.cipherKey).then((data) => {
+-                            (0, byte_utils_1.zeroBuffer)(keys.cipherKey);
+-                            return HmacBlockTransform.encrypt(data, keys.hmacKey).then((data) => {
+-                                this.cleanXml();
+-                                (0, byte_utils_1.zeroBuffer)(keys.hmacKey);
+-                                stm.writeBytes(data);
+-                                return stm.getWrittenBytes();
++                let gen;
++                const plain = [];
++                return zeroAfter(() => {
++                    return this.getHeaderHmac(stm, keys.hmacKey).then((headerHmac) => {
++                        stm.writeBytes(headerHmac);
++                        return this.getProtectSaltGenerator().then((g) => {
++                            gen = g;
++                            if (!this.kdbx.xml) {
++                                throw new kdbx_error_1.KdbxError(consts_1.ErrorCodes.InvalidState, 'no xml');
++                            }
++                            XmlUtils.updateProtectedValuesSalt(this.kdbx.xml.documentElement, gen);
++                            const xml = XmlUtils.serialize(this.kdbx.xml);
++                            const innerHeaderStm = new binary_stream_1.BinaryStream();
++                            this.kdbx.header.writeInnerHeader(innerHeaderStm, this.ctx);
++                            const innerHeaderData = innerHeaderStm.getWrittenBytes();
++                            const xmlData = (0, byte_utils_1.arrayToBuffer)((0, byte_utils_1.stringToBytes)(xml));
++                            let data = new ArrayBuffer(innerHeaderData.byteLength + xmlData.byteLength);
++                            const dataArr = new Uint8Array(data);
++                            plain.push(data);
++                            dataArr.set(new Uint8Array(innerHeaderData));
++                            dataArr.set(new Uint8Array(xmlData), innerHeaderData.byteLength);
++                            (0, byte_utils_1.zeroBuffer)(xmlData);
++                            (0, byte_utils_1.zeroBuffer)(innerHeaderData);
++                            if (this.kdbx.header.compression === consts_1.CompressionAlgorithm.GZip) {
++                                data = (0, byte_utils_1.arrayToBuffer)((0, fflate_1.gzipSync)(new Uint8Array(data)));
++                                plain.push(data);
++                            }
++                            return this.encryptData((0, byte_utils_1.arrayToBuffer)(data), keys.cipherKey).then((data) => {
++                                (0, byte_utils_1.zeroBuffer)(keys.cipherKey);
++                                return HmacBlockTransform.encrypt(data, keys.hmacKey).then((data) => {
++                                    this.cleanXml();
++                                    (0, byte_utils_1.zeroBuffer)(keys.hmacKey);
++                                    stm.writeBytes(data);
++                                    return stm.getWrittenBytes();
++                                });
+                             });
+                         });
+                     });
++                }, keys.cipherKey, keys.hmacKey).then((result) => {
++                    plain.forEach((b) => (0, byte_utils_1.zeroBuffer)(b));
++                    gen === null || gen === void 0 ? void 0 : gen.destroy();
++                    return result;
++                }, (e) => {
++                    plain.forEach((b) => (0, byte_utils_1.zeroBuffer)(b));
++                    gen === null || gen === void 0 ? void 0 : gen.destroy();
++                    this.cleanXml();
++                    throw e;
+                 });
+             });
+         });

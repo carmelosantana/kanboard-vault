@@ -73,6 +73,8 @@ class Plugin extends Base
         $this->route->addRoute('vault/import', 'ImportController', 'index', 'Vault');
         $this->route->addRoute('vault/import/start', 'ImportController', 'start', 'Vault');
         $this->route->addRoute('vault/import/batch', 'ImportController', 'batch', 'Vault');
+        $this->route->addRoute('vault/export/kdbx', 'ExportController', 'index', 'Vault');
+        $this->route->addRoute('vault/export', 'ExportController', 'export', 'Vault');
         // "My vault security" (R40): passphrase change, Rotate my keys, a personal recovery code.
         $this->route->addRoute('vault/security', 'SecurityController', 'index', 'Vault');
         $this->route->addRoute('vault/passphrase', 'SecurityController', 'passphrase', 'Vault');
