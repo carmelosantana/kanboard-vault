@@ -217,8 +217,9 @@ class UnlockService extends Base
     {
         (new VaultLock($this->container))->exclusive(function () use ($userId, $ipBucket, $ip): void {
             $db = new VaultDb($this->container);
-            $row = $db->fetchOne('SELECT tokens FROM vault_rate WHERE bucket = ?', [self::userBucket($userId)]);
-            $failures = $row === null ? 0 : (int) round((float) $row['tokens']);
+            // The banner shows the consecutive-failure streak (passphrase and recovery code), as the email counts it.
+            $failures = FailedGuess::streak($db, $userId);
+            FailedGuess::resetStreak($db, $userId);
             $db->execute('DELETE FROM vault_rate WHERE bucket = ?', [PrincipalModel::noticeBucket($userId)]);
             if ($failures > 0) {
                 $db->insert('vault_rate', ['bucket' => PrincipalModel::noticeBucket($userId), 'tokens' => $failures, 'updated_at' => $this->now()], null);

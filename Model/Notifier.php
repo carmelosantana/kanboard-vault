@@ -5,8 +5,21 @@ use Kanboard\Core\Base;
 use Throwable;
 
 // Email notices (R19; spec: Throttling, Recovery, One-time shares, Agents), sent through Kanboard's emailClient
-// and skipped when email isn't configured: no usable mail transport, or a recipient without an address. Each
-// notice is fixed text plus the recipient's own name; none carries a secret, an entry, a share label or an IP.
+// and skipped when email isn't configured. Each notice is fixed text plus the recipient's own name; none carries a
+// secret, an entry, a share label or an IP.
+//
+// "Configured" (emailConfigured, mailUsable). Kanboard registers its smtp, sendmail and mail transports on every
+// install and defaults to MAIL_TRANSPORT = mail with MAIL_FROM = notifications@kanboard.local, so registration says
+// nothing. Email counts as configured only when all of these hold:
+//   - the effective transport (Settings → Email when MAIL_CONFIGURATION allows it, else MAIL_TRANSPORT) is a
+//     registered transport;
+//   - the effective sender (Settings → Email sender address, else MAIL_FROM) is a valid address and not Kanboard's
+//     stock default notifications@kanboard.local, which an install that never set up email still has;
+//   - smtp: MAIL_SMTP_HOSTNAME is set (its default is empty);
+//   - sendmail: the binary of MAIL_SENDMAIL_COMMAND exists and is executable;
+//   - mail: the binary of PHP's sendmail_path exists and is executable (PHP's mail() hands the message to it);
+//   - any other transport is a plugin's (Resend, ...), which owns its own settings: registered is enough.
+// The recipient must also be an active user with an address.
 //
 // A notice is best-effort and never fails the action that triggered it: callers send it after their change has
 // committed, and every public method returns false (logging the exception class only) instead of throwing. The
@@ -19,9 +32,45 @@ class Notifier extends Base
         return isset($container['vaultNotifier']) ? $container['vaultNotifier'] : new self($container);
     }
 
+    // Kanboard's built-in MAIL_FROM default: an install that never configured email still sends "from" it.
+    public const STOCK_SENDER = 'notifications@kanboard.local';
+
     public function emailConfigured(): bool
     {
-        return isset($this->emailClient->getAvailableTransports()[$this->helper->mail->getMailTransport()]);
+        return self::mailUsable(
+            (string) $this->helper->mail->getMailTransport(),
+            array_keys($this->emailClient->getAvailableTransports()),
+            (string) $this->helper->mail->getMailSenderAddress(),
+            (string) MAIL_SMTP_HOSTNAME,
+            (string) MAIL_SENDMAIL_COMMAND,
+            (string) ini_get('sendmail_path')
+        );
+    }
+
+    // The rule above, from the effective values. Pure, so every branch is testable whatever the process's constants.
+    /** @param list<string> $registered */
+    public static function mailUsable(string $transport, array $registered, string $sender, string $smtpHost, string $sendmailCommand, string $sendmailPath): bool
+    {
+        if (! in_array($transport, $registered, true)) {
+            return false;
+        }
+        $sender = trim($sender);
+        if (filter_var($sender, FILTER_VALIDATE_EMAIL) === false || strcasecmp($sender, self::STOCK_SENDER) === 0) {
+            return false;
+        }
+        return match ($transport) {
+            'smtp' => trim($smtpHost) !== '',
+            'sendmail' => self::executable($sendmailCommand),
+            'mail' => self::executable($sendmailPath),
+            default => true,
+        };
+    }
+
+    // The command's first word is an existing executable file.
+    private static function executable(string $command): bool
+    {
+        $bin = strtok(trim($command), " \t");
+        return $bin !== false && $bin !== '' && is_file($bin) && is_executable($bin);
     }
 
     // Five consecutive failed unlocks (passphrase or recovery code).

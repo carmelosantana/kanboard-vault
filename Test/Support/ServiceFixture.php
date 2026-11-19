@@ -124,6 +124,15 @@ trait ServiceFixture
             ->execute([$ownerId, $agentId, $this->now]);
     }
 
+    // Email set up as an admin would: a plugin transport (registered, so configured by its own settings) chosen in
+    // Settings → Email with a real sender address. Kanboard's core transports need host or binary checks (Notifier).
+    protected function configureEmail(): void
+    {
+        $this->container['emailClient']->setTransport('vaulttest', \Kanboard\Core\Mail\Transport\Mail::class);
+        $this->container['configModel']->save(['mail_transport' => 'vaulttest', 'mail_sender_address' => 'vault@example.test']);
+        $this->container['memoryCache']->flush();
+    }
+
     /** @return list<array<string,mixed>> every audit row, oldest first */
     protected function auditRows(?string $action = null): array
     {

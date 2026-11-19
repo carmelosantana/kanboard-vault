@@ -2,7 +2,7 @@
 require_once 'tests/units/Base.php';
 require_once __DIR__.'/Support/ServiceFixture.php';
 
-use Kanboard\Core\Mail\Transport\Mail;
+use Kanboard\ServiceProvider\MailProvider;
 use Kanboard\Plugin\Vault\Crypto\RecoveryCode;
 use Kanboard\Plugin\Vault\Model\Notifier;
 use Kanboard\Plugin\Vault\Model\RotationService;
@@ -38,11 +38,6 @@ class NotifierTest extends Base
     {
         $this->tearDownVault();
         parent::tearDown();
-    }
-
-    private function configureEmail(): void
-    {
-        $this->container['emailClient']->setTransport('mail', Mail::class);
     }
 
     private function failUnlock(): void
@@ -102,6 +97,162 @@ class NotifierTest extends Base
 
         $this->failUnlock();
         $this->assertCount(1, $this->sent, 'the sixth failure sends nothing more');
+    }
+
+    // One wrong recovery code, past any back-off the earlier ones started (the code bucket backs off at its fifth).
+    private function failCode(): void
+    {
+        $this->now += 3601;
+        $bad = RecoveryCode::generate()['display'];
+        $this->assertVaultError('unlock_failed', fn () => $this->recovery()->useCode($this->alice, $bad, Fixtures::NEW_PASSPHRASE, self::IP));
+    }
+
+    // I1: on a real install Kanboard registers smtp, sendmail and mail and defaults to mail from
+    // notifications@kanboard.local; that is not configured email. With Kanboard's own MailProvider registration and
+    // config values from Settings → Email: the stock sender is never enough, smtp needs MAIL_SMTP_HOSTNAME, and
+    // sendmail needs its binary. Kills: the decision made from transport registration alone; the stock-sender check
+    // removed (the plugin-transport case); the smtp host check removed.
+    public function testCoreTransportsWithStockSettingsAreNotConfigured(): void
+    {
+        (new MailProvider())->register($this->container);
+        $n = new Notifier($this->container);
+        $this->assertSame(['smtp', 'sendmail', 'mail'], array_keys($this->container['emailClient']->getAvailableTransports()));
+        $this->assertSame(Notifier::STOCK_SENDER, MAIL_FROM, 'this process runs with Kanboard\'s default sender');
+        foreach (['mail', 'smtp', 'sendmail'] as $transport) {
+            $this->container['configModel']->save(['mail_transport' => $transport, 'mail_sender_address' => '']);
+            $this->container['memoryCache']->flush();
+            $this->assertFalse($n->emailConfigured(), "$transport with the stock sender");
+        }
+        $this->container['configModel']->save(['mail_transport' => 'smtp', 'mail_sender_address' => 'vault@example.test']);
+        $this->container['memoryCache']->flush();
+        $this->assertSame(MAIL_SMTP_HOSTNAME !== '', $n->emailConfigured(), 'smtp follows MAIL_SMTP_HOSTNAME');
+        $this->container['configModel']->save(['mail_transport' => 'sendmail']);
+        $this->container['memoryCache']->flush();
+        $bin = strtok(MAIL_SENDMAIL_COMMAND, ' ');
+        $this->assertSame(is_file($bin) && is_executable($bin), $n->emailConfigured(), 'sendmail follows its binary');
+        // A plugin transport (Resend's shape) owns its settings, but the stock sender still means nobody set up email.
+        $this->container['emailClient']->setTransport('resend', \Kanboard\Core\Mail\Transport\Mail::class);
+        $this->container['configModel']->save(['mail_transport' => 'resend', 'mail_sender_address' => '']);
+        $this->container['memoryCache']->flush();
+        $this->assertFalse($n->emailConfigured(), 'plugin transport with the stock sender');
+        $this->container['configModel']->save(['mail_sender_address' => 'vault@example.test']);
+        $this->container['memoryCache']->flush();
+        $this->assertTrue($n->emailConfigured(), 'plugin transport with a real sender');
+    }
+
+    // The rule, branch by branch, with real files for the binaries. Kills: each condition of mailUsable removed or
+    // inverted (registration, sender validity, stock sender, smtp host, executable check, plugin transports).
+    public function testMailUsableRule(): void
+    {
+        $dir = sys_get_temp_dir().'/vault-mail-'.bin2hex(random_bytes(4));
+        mkdir($dir);
+        $exe = $dir.'/sendmail';
+        $plain = $dir.'/not-exec';
+        file_put_contents($exe, "#!/bin/sh\n");
+        chmod($exe, 0755);
+        file_put_contents($plain, '');
+        chmod($plain, 0644);
+        $core = ['smtp', 'sendmail', 'mail'];
+        $ok = 'vault@example.test';
+        try {
+            $cases = [
+                'smtp with host' => [true, 'smtp', $core, $ok, 'mail.example.test', '', ''],
+                'smtp without host' => [false, 'smtp', $core, $ok, '  ', '', ''],
+                'smtp, stock sender' => [false, 'smtp', $core, Notifier::STOCK_SENDER, 'mail.example.test', '', ''],
+                'smtp, stock sender upper case' => [false, 'smtp', $core, 'Notifications@Kanboard.local', 'mail.example.test', '', ''],
+                'smtp, invalid sender' => [false, 'smtp', $core, 'not an address', 'mail.example.test', '', ''],
+                'sendmail binary' => [true, 'sendmail', $core, $ok, '', $exe.' -bs', ''],
+                'sendmail missing' => [false, 'sendmail', $core, $ok, '', $dir.'/nope -bs', ''],
+                'sendmail not executable' => [false, 'sendmail', $core, $ok, '', $plain.' -bs', ''],
+                'mail via sendmail_path' => [true, 'mail', $core, $ok, '', '', $exe.' -t -i'],
+                'mail, no sendmail_path' => [false, 'mail', $core, $ok, 'mail.example.test', $exe, ''],
+                'plugin transport' => [true, 'resend', [...$core, 'resend'], $ok, '', '', ''],
+                'unregistered transport' => [false, 'resend', $core, $ok, 'mail.example.test', $exe, $exe],
+            ];
+            foreach ($cases as $name => [$want, $transport, $registered, $sender, $host, $cmd, $path]) {
+                $this->assertSame($want, Notifier::mailUsable($transport, $registered, $sender, $host, $cmd, $path), $name);
+            }
+        } finally {
+            @unlink($exe);
+            @unlink($plain);
+            @rmdir($dir);
+        }
+    }
+
+    // I2: bad codes first, then bad passphrases, are one streak: one email, at exactly the fifth. Kills: the streak
+    // not shared between the two kinds of guess.
+    public function testCodesThenPassphrasesNotifyOnceAtFive(): void
+    {
+        $this->configureEmail();
+        $this->failCode();
+        $this->failCode();
+        $this->failUnlock();
+        $this->failUnlock();
+        $this->assertSame([], $this->sent);
+        $this->failUnlock();
+        $this->assertCount(1, $this->sent);
+    }
+
+    // I2: spending recovery-code guesses first can't suppress or fake the notice. Four bad codes, a good unlock and
+    // one wrong passphrase is not five in a row; four more codes make five (one notice); after the eight stale code
+    // failures, a good unlock and five wrong passphrases notify again at the fifth. Kills: the streak summed from back-off buckets that a success doesn't reset; the
+    // unlock not resetting the streak.
+    public function testPreSpentCodesCannotSuppressTheNotice(): void
+    {
+        $this->configureEmail();
+        for ($i = 0; $i < 4; $i++) {
+            $this->failCode();
+        }
+        $this->unlockAs($this->alice, Fixtures::PASSPHRASE, 'sid-1');
+        $this->failUnlock();
+        $this->assertSame([], $this->sent, 'four stale code failures plus one is not five in a row');
+
+        $this->failCode();
+        $this->failCode();
+        $this->failCode();
+        $this->assertCount(0, $this->sent);
+        $this->failCode();
+        $this->assertCount(1, $this->sent, 'the fifth consecutive failure (one passphrase, then four codes)');
+        $this->unlockAs($this->alice, Fixtures::PASSPHRASE, 'sid-2');
+        for ($i = 0; $i < 4; $i++) {
+            $this->failUnlock();
+        }
+        $this->assertCount(1, $this->sent);
+        $this->failUnlock();
+        $this->assertCount(2, $this->sent, 'a new streak of five notifies again');
+    }
+
+    // A successful recovery-code use resets the streak too. Kills: the reset removed from useCode.
+    public function testCodeUseResetsTheStreak(): void
+    {
+        $this->configureEmail();
+        $this->recovery()->setPolicy(VaultSettings::POLICY_CODE, self::ADMIN);
+        $sk = $this->unlockAs($this->alice, Fixtures::PASSPHRASE, 'sid-1');
+        $code = $this->recovery()->createCode($this->alice, $sk);
+        for ($i = 0; $i < 4; $i++) {
+            $this->failUnlock();
+        }
+        $this->assertSame(RotationService::ROTATED, $this->recovery()->useCode($this->alice, $code, Fixtures::NEW_PASSPHRASE, self::IP));
+        $this->failUnlock();
+        $this->assertSame([], $this->sent);
+    }
+
+    // The spec is silent past five, so a streak that goes on notifies again at each further multiple of five, never
+    // in between. Kills: notifying only at exactly five (silent from then on), or at every failure from five.
+    public function testLongStreakNotifiesAtEachMultipleOfFive(): void
+    {
+        $this->configureEmail();
+        for ($i = 0; $i < 5; $i++) {
+            $this->failCode();
+        }
+        $this->assertCount(1, $this->sent);
+        for ($i = 0; $i < 4; $i++) {
+            $this->failUnlock();
+        }
+        $this->assertCount(1, $this->sent);
+        $this->now += 120; // past the unlock bucket's back-off after its fifth failure
+        $this->failUnlock();
+        $this->assertCount(2, $this->sent, 'the tenth');
     }
 
     // A success resets the count, so a later streak of five emails again. Kills: the count not reset.

@@ -165,7 +165,10 @@ class RecoveryService extends Base
                 (new FailedGuess($this->container, $limiter, $this->clock))->record($userId, self::userBucket($userId), $ip);
                 throw new VaultException('unlock_failed');
             }
-            $limiter->recordSuccess(self::userBucket($userId));
+            $this->lock()->exclusive(function () use ($limiter, $userId): void {
+                $limiter->recordSuccess(self::userBucket($userId));
+                FailedGuess::resetStreak($this->vdb(), $userId);
+            });
             $limiter->refund($ipBucket, self::IP_FAILURES, self::IP_FAILURES / self::IP_WINDOW);
 
             // Only a code holder learns whether the new passphrase passes (the check reads the login hash).

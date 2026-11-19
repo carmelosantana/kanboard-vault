@@ -4,7 +4,6 @@ require_once __DIR__.'/Support/ServiceFixture.php';
 
 use Kanboard\Core\Log\File;
 use Kanboard\Core\Log\Logger;
-use Kanboard\Core\Mail\Transport\Mail;
 use Kanboard\Plugin\Vault\Crypto\RecoveryCode;
 use Kanboard\Plugin\Vault\Model\PrincipalModel;
 use Kanboard\Plugin\Vault\Model\Purger;
@@ -46,7 +45,7 @@ class LogHygieneTest extends Base
         $this->oldLogErrors = ini_set('log_errors', '1');
         $this->setUpVault();
         $this->pdo()->prepare('UPDATE users SET email = ? WHERE id IN (?, ?)')->execute(['user@example.test', $this->alice, $this->bob]);
-        $this->container['emailClient']->setTransport('mail', Mail::class);
+        $this->configureEmail();
         $this->container['emailClient']->method('send')->willReturnCallback(function (...$args) {
             $this->mails[] = implode("\n", array_map('strval', $args));
             return $this->container['emailClient'];
