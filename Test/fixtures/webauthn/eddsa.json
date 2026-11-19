@@ -1,0 +1,32 @@
+{
+  "_note": "Recorded by scripts/e2e/record-webauthn.mjs from a Chrome DevTools virtual authenticator. Test-only key material.",
+  "alg": -8,
+  "rpId": "localhost",
+  "origin": "http://localhost:35663",
+  "chrome": "Chrome/158.0.8127.36",
+  "register": {
+    "challenge": "qUeCxFMz-Mgu8dN4v2L21FsWIYr5z4yNq6B3k8TuWO8",
+    "rawId": "GMnSwcpjUD1VsJ1W-tCnzu3kKE5XAMjwZzul9mdPHns",
+    "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoicVVlQ3hGTXotTWd1OGRONHYyTDIxRnNXSVlyNXo0eU5xNkIzazhUdVdPOCIsIm9yaWdpbiI6Imh0dHA6Ly9sb2NhbGhvc3Q6MzU2NjMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+    "attestationObject": "o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YViBSZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2NFAAAAAQAAAAAAAAAAAAAAAAAAAAAAIBjJ0sHKY1A9VbCdVvrQp87t5ChOVwDI8Gc7pfZnTx57pAEBAycgBiFYIHPfVACzFCQnoEIlCwd_3JGyEiB2v4lBjIkl02VPMGsn",
+    "clientExtensionResults": {
+      "prf": {
+        "enabled": true
+      }
+    }
+  },
+  "assert": {
+    "challenge": "6hukLFjsN6t4X1Pxvq1tIYw4ptMkJTG5BG4jP5Hzc0E",
+    "rawId": "GMnSwcpjUD1VsJ1W-tCnzu3kKE5XAMjwZzul9mdPHns",
+    "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiNmh1a0xGanNONnQ0WDFQeHZxMXRJWXc0cHRNa0pURzVCRzRqUDVIemMwRSIsIm9yaWdpbiI6Imh0dHA6Ly9sb2NhbGhvc3Q6MzU2NjMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+    "authenticatorData": "SZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2MFAAAAAg",
+    "signature": "RrCed81aVdn_vJeFlQTDaf18ICMrDQfu4h2f4JJ4kiXft0JZfYaEoET7FgRrEhbaupUdj2NBkHb9YdVYQXPnAw",
+    "prfSalt": "sA4GNPFqQbdefH6IInA0btE5TeFtfq6Pd3xoAQcwBK0",
+    "prf": {
+      "results": {
+        "first": "OfSga8rfkCF1jA61tjJFsEOqfTj_4l9Nk9evsJ-Rorw"
+      }
+    }
+  },
+  "privateKey": "MC4CAQAwBQYDK2VwBCIEIKRbTFQgqC-vPEfp-yktN4Zq8SoF3qCD06GRnw8qQRhI"
+}

@@ -1,0 +1,32 @@
+{
+  "_note": "Recorded by scripts/e2e/record-webauthn.mjs from a Chrome DevTools virtual authenticator. Test-only key material.",
+  "alg": -7,
+  "rpId": "localhost",
+  "origin": "http://localhost:35663",
+  "chrome": "Chrome/158.0.8127.36",
+  "register": {
+    "challenge": "EagxHCqtulAkueciDw8_cHJBj-ryjmF9x01dc5vyo1A",
+    "rawId": "RFNT2eAsmBTcU1DCFRuCLG2Z8rI7xxt5MJ9WMDFqssQ",
+    "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiRWFneEhDcXR1bEFrdWVjaUR3OF9jSEpCai1yeWptRjl4MDFkYzV2eW8xQSIsIm9yaWdpbiI6Imh0dHA6Ly9sb2NhbGhvc3Q6MzU2NjMiLCJjcm9zc09yaWdpbiI6ZmFsc2UsIm90aGVyX2tleXNfY2FuX2JlX2FkZGVkX2hlcmUiOiJkbyBub3QgY29tcGFyZSBjbGllbnREYXRhSlNPTiBhZ2FpbnN0IGEgdGVtcGxhdGUuIFNlZSBodHRwczovL2dvby5nbC95YWJQZXgifQ",
+    "attestationObject": "o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YVikSZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2NFAAAAAQAAAAAAAAAAAAAAAAAAAAAAIERTU9ngLJgU3FNQwhUbgixtmfKyO8cbeTCfVjAxarLEpQECAyYgASFYIPW4Pqp-hyTBa-whwCU_cIQfLg_yZ7EGF3qnwdiJcFhuIlggbYJtOq6AH618X4qLgg5MQRDyW0UMD77B8irMuIAUsnU",
+    "clientExtensionResults": {
+      "prf": {
+        "enabled": true
+      }
+    }
+  },
+  "assert": {
+    "challenge": "h6jujE6MUAleVwffs-pWBv78eLo273IaMh1PrpoeqhU",
+    "rawId": "RFNT2eAsmBTcU1DCFRuCLG2Z8rI7xxt5MJ9WMDFqssQ",
+    "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiaDZqdWpFNk1VQWxlVndmZnMtcFdCdjc4ZUxvMjczSWFNaDFQcnBvZXFoVSIsIm9yaWdpbiI6Imh0dHA6Ly9sb2NhbGhvc3Q6MzU2NjMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+    "authenticatorData": "SZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2MFAAAAAg",
+    "signature": "MEUCIQCgTdX8OaJp8PED97NXS6LMkN__hh-vHTJ841ZquuWz6gIgSVgkn7ygMQkxFrflhTJUf-dwcN3DVhtWbfUOjt4w5X8",
+    "prfSalt": "WOBRaYEfg1oy3zUbuREhA1kP7QPIcoXnqdPsKHaugQI",
+    "prf": {
+      "results": {
+        "first": "guDBQZ4cSsn1wh0rT8OPWZe9-31TzhSS9T5_JNoskVs"
+      }
+    }
+  },
+  "privateKey": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg8Dp0RmdowBj8XxINT4ZMLHPFiJwutYzFCYIhNfZqCGehRANCAAT1uD6qfockwWvsIcAlP3CEHy4P8mexBhd6p8HYiXBYbm2CbTqugB-tfF-Ki4IOTEEQ8ltFDA--wfIqzLiAFLJ1"
+}
