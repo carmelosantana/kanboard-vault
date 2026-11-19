@@ -153,6 +153,30 @@ class VaultShareControllerTest extends Base
         $this->assertSame(1, $this->countRows('SELECT COUNT(*) FROM vault_shares'), 'viewing the page burns nothing');
     }
 
+    // Fix I1: nothing on the share page can submit natively. A native submission would send the passphrase in a GET
+    // query string (access and proxy logs, history) and drop the #k||b fragment. So the shell has no form that can
+    // submit (every form, if any, is method=post), no named input, textarea or select (nothing is ever form-encoded),
+    // and every button is type="button". Kills: name="passphrase" restored; a <form> without method; a submit button.
+    public function testShellCannotSubmitASecretNatively(): void
+    {
+        $doc = new \DOMDocument();
+        @$doc->loadHTML($this->show(['id' => bin2hex(random_bytes(16))])->body);
+        $this->assertNotNull($doc->getElementById('vault-reveal-passphrase'), 'the passphrase field is there');
+        foreach (['input', 'textarea', 'select'] as $tag) {
+            foreach ($doc->getElementsByTagName($tag) as $el) {
+                $this->assertFalse($el->hasAttribute('name'), "a named $tag would be form-encoded");
+            }
+        }
+        foreach ($doc->getElementsByTagName('form') as $form) {
+            $this->assertSame('post', strtolower($form->getAttribute('method')), 'a form that can submit as GET');
+        }
+        $buttons = $doc->getElementsByTagName('button');
+        $this->assertGreaterThan(0, $buttons->length);
+        foreach ($buttons as $b) {
+            $this->assertSame('button', $b->getAttribute('type'), 'a submit button');
+        }
+    }
+
     // Spec: headers on Vault public responses: Cache-Control no-store, Referrer-Policy no-referrer, X-Robots-Tag
     // noindex, X-Frame-Options DENY (plus Vault's frame-ancestors 'none'), on every answer of both public actions:
     // the page, a reveal, a not-available reveal, a CSRF refusal, a rate-limit refusal and an HTTPS refusal.

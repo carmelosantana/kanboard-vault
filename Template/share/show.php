@@ -4,6 +4,8 @@
 // page, outside Kanboard's layout, so no other plugin's layout script runs where a secret is decrypted.
 // vault-reveal.js (T18) reads the id from the query string and k ‖ b from the #fragment, POSTs {id, b, csrf_token}
 // to data-reveal-url, and decrypts in the page. Opening the page reveals nothing; the Reveal button does.
+// There is no <form> and no named field (fix I1): nothing here can submit natively, which would put the passphrase in
+// a GET query string and drop the #fragment. The script binds the button and Enter in the field itself.
 ?><!DOCTYPE html>
 <html>
 <head>
@@ -22,11 +24,11 @@
     <?php endif ?>
     <p><?= t('Someone shared a secret with you. It can be viewed once: after you reveal it, the link stops working.') ?></p>
     <noscript><p class="vault-reveal-error"><?= t('Revealing the secret needs JavaScript.') ?></p></noscript>
-    <form class="vault-reveal-form" data-vault-reveal-form>
+    <div class="vault-reveal-form" data-vault-reveal-form>
         <label for="vault-reveal-passphrase"><?= t('Passphrase (only if the sender gave you one)') ?></label>
-        <input type="password" id="vault-reveal-passphrase" name="passphrase" autocomplete="off" spellcheck="false">
-        <button type="submit" class="btn btn-blue" data-vault-reveal-button><?= t('Reveal') ?></button>
-    </form>
+        <input type="password" id="vault-reveal-passphrase" autocomplete="off" spellcheck="false" data-vault-reveal-passphrase>
+        <button type="button" class="btn btn-blue" data-vault-reveal-button><?= t('Reveal') ?></button>
+    </div>
     <p class="vault-reveal-status" data-vault-reveal-status role="status" hidden></p>
     <div class="vault-reveal-result" data-vault-reveal-result hidden>
         <textarea readonly rows="8" aria-label="<?= t('Secret') ?>" data-vault-reveal-secret></textarea>
