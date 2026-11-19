@@ -20,13 +20,28 @@ class PrincipalModel extends Base
     private ArgonSlots $slots;
     private Closure $argon2;
     private Closure $clock;
+    private ?RotationService $rotation;
 
-    public function __construct($container, ?ArgonSlots $slots = null, ?callable $argon2 = null, ?callable $clock = null)
+    public function __construct($container, ?ArgonSlots $slots = null, ?callable $argon2 = null, ?callable $clock = null, ?RotationService $rotation = null)
     {
         parent::__construct($container);
         $this->slots = $slots ?? new ArgonSlots($container);
         $this->argon2 = Closure::fromCallable($argon2 ?? [Kdf::class, 'argon2id']);
         $this->clock = $clock !== null ? Closure::fromCallable($clock) : static fn (): int => time();
+        $this->rotation = $rotation;
+    }
+
+    // A passphrase change is a key rotation trigger (spec: Key rotation). The new passphrase meets the same
+    // rules as at enrolment; the current one must open the principal's wrap to $sk (RotationService).
+    public function changePassphrase(int $userId, #[\SensitiveParameter] string $currentPassphrase, #[\SensitiveParameter] string $newPassphrase, #[\SensitiveParameter] string $sk): void
+    {
+        $user = (new VaultDb($this->container))->fetchOne('SELECT username, password, is_active FROM users WHERE id = ?', [$userId]);
+        if ($user === null || (int) $user['is_active'] !== 1) {
+            throw new VaultException('not_found');
+        }
+        $this->checkPassphrase($newPassphrase, (string) $user['username'], (string) ($user['password'] ?? ''));
+        $rotation = $this->rotation ?? new RotationService($this->container, $this->slots, $this->argon2, $this->clock);
+        $rotation->rotateWithPassphrase($userId, $sk, $currentPassphrase, $newPassphrase);
     }
 
     /** @return array{user_id:int,kind:string,public_key:string,key_gen:int,state:string,created_at:int}|null */

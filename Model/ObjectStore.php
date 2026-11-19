@@ -283,14 +283,24 @@ class ObjectStore extends Base
 
     // Spec "Expiry reconciliation on write" and "Write barrier", for a payload write of an existing object.
     // Runs inside the caller's exclusive lock (or its own): expired sources on the object and its ancestors
-    // are removed for their whole subtrees, then, if the object is queued, the writer re-keys it inline. A
-    // writer who can't re-key it gets not_found and nothing is written.
+    // are removed for their whole subtrees, then, if the object is queued, the writer re-keys it inline. Rotation
+    // uses the same barrier: an object that still holds an old-generation key row for a rotating principal is
+    // re-keyed inline too (the rotating principal gets its next key only). A writer who can't re-key it gets
+    // not_found and nothing is written.
     public function beforeWrite(string $type, int $id, int $actorId, #[\SensitiveParameter] string $sk): void
     {
         $this->lock()->exclusive(function () use ($type, $id, $actorId, $sk): void {
+            $db = $this->vdb();
+            $rekeyer = $this->rekeyer();
             $this->grants()->reconcileExpired($type, $id);
-            if (! $this->rekeyer()->processQueued($this->vdb(), $type, $id, $actorId, $sk)) {
+            if (! $rekeyer->processQueued($db, $type, $id, $actorId, $sk)) {
                 throw new VaultException('not_found');
+            }
+            if ($rekeyer->holdsOldGeneration($db, $type, $id)) {
+                $row = $this->fetchObject($db, $type, $id);
+                if ($row === null || ! $rekeyer->rekeyRow($db, $type, $row, $actorId, $sk)) {
+                    throw new VaultException('not_found');
+                }
             }
         });
     }
@@ -329,7 +339,7 @@ class ObjectStore extends Base
                 'UPDATE '.self::TABLES[$type].' SET nonce = ?, ciphertext = ? WHERE id = ?',
                 [base64_encode($box['nonce']), base64_encode($box['ct']), $id]
             );
-            $this->rekeyer()->sealTo($db, $type, $id, 1, $dek, $this->effectiveRecipients($type, $id));
+            $this->rekeyer()->sealTo($db, $type, $id, 1, $dek, $this->effectiveRecipients($type, $id), false, true);
         } finally {
             sodium_memzero($dek);
         }

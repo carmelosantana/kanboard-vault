@@ -10,7 +10,10 @@ use RuntimeException;
 // already_enrolled, not_enrolled, not_found (no such object, or not readable by the caller: one code for
 // both), conflict (a stale entry version), payload_invalid, payload_too_large,
 // invalid_move (a group moved into its own subtree, or an entry with no destination group), integrity_error
-// (the owner can't open a DEK they must hold; or, per row of a list, an entitled entry that fails to decrypt).
+// (the owner can't open a DEK they must hold; or, per row of a list, an entitled entry that fails to decrypt),
+// rotation_in_progress (a rotation is already under way), rotation_needs_factors (the principal has wraps other
+// than a passphrase, whose ceremony must present them), rotation_incomplete (finish refused: old-generation key
+// rows remain).
 class VaultException extends RuntimeException
 {
     public function __construct(private string $errorCode)

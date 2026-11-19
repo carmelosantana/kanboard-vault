@@ -4,6 +4,7 @@ namespace Kanboard\Plugin\Vault\Model;
 use Closure;
 use Kanboard\Core\Base;
 use Kanboard\Plugin\Vault\Crypto\Aead;
+use Kanboard\Plugin\Vault\Crypto\Bridge;
 use Kanboard\Plugin\Vault\Crypto\CryptoException;
 use Kanboard\Plugin\Vault\Crypto\Sealer;
 use RuntimeException;
@@ -22,6 +23,13 @@ use ValueError;
 // Queue rows carry expected_key_epoch. An item re-keys only if key_epoch still equals it; otherwise the object
 // was re-keyed since (every epoch change seals a fresh DEK to the then-effective recipients), so the row is
 // just deleted.
+//
+// Key generations (spec: Key rotation; R27). While a principal is rotating (a vault_rotations row exists) it has
+// two keys: the current one (old_pk, principal_key_gen = key_gen) and the next one (new_pk, key_gen + 1). Sealing
+// an existing DEK to a new recipient seals to both keys; a fresh DEK (a new object or a re-key) is sealed to the
+// next key only, so a re-keyed object never again holds an old-generation row. Either secret key is accepted as
+// the principal's: sk1 opens old-generation rows, and sk2 opens new-generation rows directly and old-generation
+// rows through the bridge (sk1 under a key derived from sk2), with both keys checked against their public keys.
 class Rekeyer extends Base
 {
     public const MAX_DRAIN = 500;
@@ -140,7 +148,7 @@ class Rekeyer extends Base
                 throw new RuntimeException('Vault: the object changed under the exclusive lock');
             }
             $db->execute('DELETE FROM vault_keys WHERE object_type = ? AND object_id = ?', [$type, $id]);
-            $this->sealTo($db, $type, $id, $epoch + 1, $new, array_keys($recipients));
+            $this->sealTo($db, $type, $id, $epoch + 1, $new, array_keys($recipients), false, true);
             $this->dequeue($db, $type, $id);
             return true;
         } finally {
@@ -153,12 +161,18 @@ class Rekeyer extends Base
     // Seals $dek to every key of every principal given; principals with no principal row are skipped. By
     // default every row is a plain insert, so a row already there (which a new or just re-keyed object can't
     // legitimately have) aborts the transaction. With $onlyMissing (topping up recipients), a key that already
-    // has a row at this key_epoch is left alone and a stale row for it is replaced.
+    // has a row at this key_epoch is left alone and a stale row for it is replaced; a rotating principal whose
+    // next key already holds this epoch is not sealed to the old key again. $fresh says the DEK was just
+    // generated (a new object or a re-key): a rotating principal then gets the next key only.
     /** @param list<int> $principalIds */
-    public function sealTo(VaultDb $db, string $type, int $id, int $keyEpoch, #[\SensitiveParameter] string $dek, array $principalIds, bool $onlyMissing = false): void
+    public function sealTo(VaultDb $db, string $type, int $id, int $keyEpoch, #[\SensitiveParameter] string $dek, array $principalIds, bool $onlyMissing = false, bool $fresh = false): void
     {
         foreach (array_unique($principalIds) as $principalId) {
-            foreach ($this->principalKeysForSealing((int) $principalId) as $key) {
+            $keys = $this->principalKeysForSealing((int) $principalId, $fresh);
+            if ($onlyMissing && $keys !== [] && $this->keyEpochOf($db, $type, $id, (int) $principalId, $keys[0]['key_gen']) === $keyEpoch) {
+                continue;
+            }
+            foreach ($keys as $key) {
                 $existing = ! $onlyMissing ? null : $db->fetchOne(
                     'SELECT key_epoch FROM vault_keys WHERE object_type = ? AND object_id = ? AND principal_id = ? AND principal_key_gen = ?',
                     [$type, $id, $principalId, $key['key_gen']]
@@ -184,56 +198,148 @@ class Rekeyer extends Base
         }
     }
 
-    // The public keys a DEK for this principal is sealed to, with their key_gen. One today: the current key.
-    // Task 8 (rotation) returns both the old and the new key while the principal is rotating.
+    // The public keys a DEK for this principal is sealed to, with their key_gen, newest first: the current key,
+    // or while the principal is rotating the next key and the current one (the next key alone for a fresh DEK).
     /** @return list<array{key_gen:int,public_key:string}> public_key as raw bytes; empty if not enrolled */
-    public function principalKeysForSealing(int $principalId): array
+    public function principalKeysForSealing(int $principalId, bool $fresh = false): array
     {
-        $p = $this->principal($this->vdb(), $principalId);
-        return $p === null ? [] : [$p];
+        $db = $this->vdb();
+        $p = $this->principal($db, $principalId);
+        if ($p === null) {
+            return [];
+        }
+        $rotation = $this->rotation($db, $principalId);
+        if ($rotation === null) {
+            return [$p];
+        }
+        $next = ['public_key' => $rotation['new_pk'], 'key_gen' => $p['key_gen'] + 1];
+        return $fresh ? [$next] : [$next, $p];
     }
 
-    // The holder's DEK for the object at $keyEpoch, or null: $sk must be the holder's current key and the key
-    // row must be at $keyEpoch. The caller wipes the result.
+    // The holder's DEK for the object at $keyEpoch, or null: $sk must be one of the holder's keys (see the class
+    // comment) and a key row of a generation that key opens must be at $keyEpoch. The caller wipes the result.
     public function openDek(VaultDb $db, string $type, int $id, int $keyEpoch, int $holderId, #[\SensitiveParameter] string $sk): ?string
     {
-        $principal = $this->currentPrincipal($db, $holderId, $sk);
-        if ($principal === null) {
-            return null;
-        }
-        $keypair = '';
+        $keypairs = $this->holderKeypairs($db, $holderId, $sk);
         try {
-            $key = $db->fetchOne(
-                'SELECT key_epoch, sealed_dek FROM vault_keys WHERE object_type = ? AND object_id = ? AND principal_id = ? AND principal_key_gen = ?',
-                [$type, $id, $holderId, $principal['key_gen']]
-            );
-            if ($key === null || (int) $key['key_epoch'] !== $keyEpoch) {
-                return null;
+            foreach ($keypairs as $gen => $keypair) {
+                $key = $db->fetchOne(
+                    'SELECT key_epoch, sealed_dek FROM vault_keys WHERE object_type = ? AND object_id = ? AND principal_id = ? AND principal_key_gen = ?',
+                    [$type, $id, $holderId, $gen]
+                );
+                if ($key === null || (int) $key['key_epoch'] !== $keyEpoch) {
+                    continue;
+                }
+                $sealed = base64_decode((string) $key['sealed_dek'], true);
+                if ($sealed === false) {
+                    continue;
+                }
+                try {
+                    return Sealer::openDek($sealed, $keypair, $type, $id, $keyEpoch, $holderId);
+                } catch (CryptoException|SodiumException|ValueError) {
+                    continue;
+                }
             }
-            $sealed = base64_decode((string) $key['sealed_dek'], true);
-            if ($sealed === false) {
-                return null;
-            }
-            $keypair = sodium_crypto_box_keypair_from_secretkey_and_publickey($sk, $principal['public_key']);
-            return Sealer::openDek($sealed, $keypair, $type, $id, $keyEpoch, $holderId);
-        } catch (CryptoException|SodiumException|ValueError) {
             return null;
         } finally {
-            sodium_memzero($keypair);
+            foreach ($keypairs as $gen => $unused) {
+                sodium_memzero($keypairs[$gen]);
+            }
         }
     }
 
-    // The principal, provided $sk is its current secret key (pk(sk) equals the stored pk); otherwise null.
-    /** @return array{public_key:string,key_gen:int}|null */
+    // The principal, provided $sk is its current secret key (pk(sk) equals the stored pk) or, while it is
+    // rotating, the next key (pk(sk) equals the rotation's new_pk); otherwise null.
+    /** @return array{public_key:string,key_gen:int}|null  the stored (current) key */
     public function currentPrincipal(VaultDb $db, int $userId, #[\SensitiveParameter] string $sk): ?array
     {
         $principal = $this->principal($db, $userId);
+        if ($principal === null) {
+            return null;
+        }
         try {
             $pk = sodium_crypto_box_publickey_from_secretkey($sk);
         } catch (SodiumException|ValueError) {
             return null;
         }
-        return $principal !== null && hash_equals($principal['public_key'], $pk) ? $principal : null;
+        if (hash_equals($principal['public_key'], $pk)) {
+            return $principal;
+        }
+        $rotation = $this->rotation($db, $userId);
+        return $rotation !== null && hash_equals($rotation['new_pk'], $pk) ? $principal : null;
+    }
+
+    // The principal's rotation in progress, or null. Keys and the bridge as raw bytes.
+    /** @return array{old_pk:string,new_pk:string,bridge_nonce:string,bridge:string,phase:string}|null */
+    public function rotation(VaultDb $db, int $userId): ?array
+    {
+        $row = $db->fetchOne('SELECT old_pk, new_pk, bridge_nonce, bridge, phase FROM vault_rotations WHERE user_id = ?', [$userId]);
+        if ($row === null) {
+            return null;
+        }
+        $out = ['phase' => (string) $row['phase']];
+        foreach (['old_pk', 'new_pk', 'bridge_nonce', 'bridge'] as $col) {
+            $v = base64_decode((string) $row[$col], true);
+            if ($v === false) {
+                throw new RuntimeException('Vault: malformed rotation row');
+            }
+            $out[$col] = $v;
+        }
+        return $out;
+    }
+
+    // Write barrier for rotation (spec): does the object still hold an old-generation key row for a principal
+    // that is rotating?
+    public function holdsOldGeneration(VaultDb $db, string $type, int $id): bool
+    {
+        return $db->fetchOne(
+            'SELECT 1 AS x FROM vault_keys k JOIN vault_rotations r ON r.user_id = k.principal_id JOIN vault_principals p ON p.user_id = k.principal_id'
+            .' WHERE k.object_type = ? AND k.object_id = ? AND k.principal_key_gen = p.key_gen',
+            [$type, $id]
+        ) !== null;
+    }
+
+    // key_gen => 64-byte keypair for every generation $sk opens for this principal, newest first. Empty when
+    // $sk is neither its current key nor its next key. The caller wipes the keypairs.
+    /** @return array<int,string> */
+    private function holderKeypairs(VaultDb $db, int $userId, #[\SensitiveParameter] string $sk): array
+    {
+        $principal = $this->principal($db, $userId);
+        if ($principal === null) {
+            return [];
+        }
+        try {
+            $pk = sodium_crypto_box_publickey_from_secretkey($sk);
+            if (hash_equals($principal['public_key'], $pk)) {
+                return [$principal['key_gen'] => sodium_crypto_box_keypair_from_secretkey_and_publickey($sk, $pk)];
+            }
+        } catch (SodiumException|ValueError) {
+            return [];
+        }
+        $rotation = $this->rotation($db, $userId);
+        if ($rotation === null || ! hash_equals($rotation['new_pk'], $pk) || ! hash_equals($rotation['old_pk'], $principal['public_key'])) {
+            return [];
+        }
+        $out = [$principal['key_gen'] + 1 => sodium_crypto_box_keypair_from_secretkey_and_publickey($sk, $pk)];
+        $sk1 = '';
+        try {
+            $sk1 = Bridge::open($rotation['bridge_nonce'], $rotation['bridge'], $sk, $userId, $rotation['old_pk'], $rotation['new_pk']);
+            $out[$principal['key_gen']] = sodium_crypto_box_keypair_from_secretkey_and_publickey($sk1, $rotation['old_pk']);
+        } catch (CryptoException|SodiumException|ValueError) {
+            // The bridge doesn't open: only the next generation is reachable.
+        } finally {
+            sodium_memzero($sk1);
+        }
+        return $out;
+    }
+
+    private function keyEpochOf(VaultDb $db, string $type, int $id, int $principalId, int $keyGen): ?int
+    {
+        $r = $db->fetchOne(
+            'SELECT key_epoch FROM vault_keys WHERE object_type = ? AND object_id = ? AND principal_id = ? AND principal_key_gen = ?',
+            [$type, $id, $principalId, $keyGen]
+        );
+        return $r === null ? null : (int) $r['key_epoch'];
     }
 
     /** @return array{public_key:string,key_gen:int}|null  public_key as raw bytes */

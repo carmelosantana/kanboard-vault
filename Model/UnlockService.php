@@ -12,6 +12,11 @@ use Kanboard\Plugin\Vault\Crypto\Wraps;
 //   per-IP failure bucket → Argon2 → unwrap and public-key check → record the outcome → KDF upgrade → session.
 // Every failed guess, whatever the cause, is the one generic VaultException('unlock_failed'); each runs the
 // same Argon2 work so timing doesn't separate them either.
+//
+// Key rotation, crash recovery (spec): while the principal has a vault_rotations row its old wraps are gone, so
+// the wrap tried is its pending passphrase wrap of sk2 (checked against new_pk). After it opens, the bridge gives
+// sk1, both keys are checked (RotationService::resume) and the rotation runs to the end before the session is
+// created with sk2. A crash during that leaves the rotation where it stopped, for the next unlock.
 class UnlockService extends Base
 {
     public const IP_FAILURES = 30;
@@ -22,8 +27,9 @@ class UnlockService extends Base
     private VaultSession $session;
     private RateLimiter $limiter;
     private Closure $clock;
+    private RotationService $rotation;
 
-    public function __construct($container, ?ArgonSlots $slots = null, ?callable $argon2 = null, ?VaultSession $session = null, ?RateLimiter $limiter = null, ?callable $clock = null)
+    public function __construct($container, ?ArgonSlots $slots = null, ?callable $argon2 = null, ?VaultSession $session = null, ?RateLimiter $limiter = null, ?callable $clock = null, ?RotationService $rotation = null)
     {
         parent::__construct($container);
         $this->slots = $slots ?? new ArgonSlots($container);
@@ -31,6 +37,7 @@ class UnlockService extends Base
         $this->session = $session ?? new VaultSession($container);
         $this->clock = $clock !== null ? Closure::fromCallable($clock) : static fn (): int => time();
         $this->limiter = $limiter ?? new RateLimiter($container, null, $this->clock);
+        $this->rotation = $rotation ?? new RotationService($container, $this->slots, $this->argon2, $this->clock, $this->session);
     }
 
     public static function userBucket(int $userId): string
@@ -74,6 +81,15 @@ class UnlockService extends Base
             }
 
             $this->recordSuccess($userId, $ipBucket);
+            if (! empty($wrap['resume'])) {
+                $keys = $this->rotation->resume($userId, $sk);
+                try {
+                    $this->rotation->complete($userId, $keys['sk1'], $keys['sk2']);
+                } finally {
+                    sodium_memzero($keys['sk1']);
+                    sodium_memzero($keys['sk2']);
+                }
+            }
             $this->upgradeKdf($wrap, $sk, $passphrase);
             return $this->session->create($userId, $sk);
         } finally {
@@ -98,6 +114,20 @@ class UnlockService extends Base
         );
         if ($principal === null) {
             return null;
+        }
+        $rotation = $db->fetchOne('SELECT new_pk FROM vault_rotations WHERE user_id = ?', [$userId]);
+        if ($rotation !== null) {
+            // Mid-rotation: only sk2's pending wrap (key_gen + 1), checked against new_pk, and only to resume.
+            $wrap = $db->fetchOne(
+                "SELECT * FROM vault_wraps WHERE user_id = ? AND method = 'passphrase' AND status = 'pending' AND key_gen = ? ORDER BY id LIMIT 1",
+                [$userId, (int) $principal['key_gen'] + 1]
+            );
+            if ($wrap === null) {
+                return null;
+            }
+            $wrap['public_key'] = $rotation['new_pk'];
+            $wrap['resume'] = true;
+            return $wrap;
         }
         $wrap = $db->fetchOne(
             "SELECT * FROM vault_wraps WHERE user_id = ? AND method = 'passphrase' AND status = 'active' AND key_gen = ? ORDER BY id LIMIT 1",

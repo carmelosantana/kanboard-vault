@@ -114,7 +114,9 @@ class VaultSession extends Base
         return $sessionKey;
     }
 
-    // The unlocked sk for the current user in this UI session, or null. The caller wipes it after use.
+    // The unlocked sk for the current user in this UI session, or null. The caller wipes it after use. While a
+    // key rotation is in progress the row also holds enc_sk_next (sk2), and that is the key returned: sk2 opens
+    // both key generations (the old one through the rotation bridge), sk1 only the old one.
     public function secretKey(): ?string
     {
         $sidHash = $this->sidHash();
@@ -152,7 +154,19 @@ class VaultSession extends Base
             if ($nonce === false || $ct === false) {
                 return null;
             }
-            $sk = Aead::open($nonce, $ct, $sessionKey, self::ad($sidHash, $userId, (int) $row['created_at']));
+            $ad = self::ad($sidHash, $userId, (int) $row['created_at']);
+            $sk = Aead::open($nonce, $ct, $sessionKey, $ad);
+            if ($row['enc_sk_next'] !== null && $row['enc_sk_next'] !== '') {
+                try {
+                    $next = $this->openNext($row, $sessionKey, $ad);
+                } finally {
+                    sodium_memzero($sk);
+                }
+                if ($next === null) {
+                    return null;
+                }
+                $sk = $next;
+            }
         } catch (CryptoException) {
             return null;
         } finally {
@@ -163,6 +177,47 @@ class VaultSession extends Base
             [$now, min($now + $this->idleTimeout(), (int) $row['abs_expires_at']), $sidHash, $userId]
         );
         return $sk;
+    }
+
+    // Key rotation, start (spec): inside the caller's exclusive transaction, adds enc_sk_next = sk2 under this UI
+    // session's session_key (the same AD as enc_sk) to the current user's row. Only when the cookie's key opens
+    // that row to exactly $sk1. Returns the row's sid_hash, or null when there is no such session (for example
+    // a CLI rotation), in which case nothing is written. Takes no lock itself (R18).
+    public function stageNextKey(VaultDb $db, int $userId, #[\SensitiveParameter] string $sk1, #[\SensitiveParameter] string $sk2): ?string
+    {
+        $sidHash = $this->sidHash();
+        if ($sidHash === null || (int) $this->userSession->getId() !== $userId) {
+            return null;
+        }
+        $row = $db->fetchOne('SELECT * FROM vault_sessions WHERE sid_hash = ? AND user_id = ?', [$sidHash, $userId]);
+        $sessionKey = $row === null ? null : $this->cookieKey();
+        if ($sessionKey === null) {
+            return null;
+        }
+        $current = '';
+        try {
+            $nonce = base64_decode((string) $row['nonce'], true);
+            $ct = base64_decode((string) $row['enc_sk'], true);
+            if ($nonce === false || $ct === false) {
+                return null;
+            }
+            $ad = self::ad($sidHash, $userId, (int) $row['created_at']);
+            $current = Aead::open($nonce, $ct, $sessionKey, $ad);
+            if (! hash_equals($current, $sk1)) {
+                return null;
+            }
+            $box = Aead::seal($sk2, $sessionKey, $ad);
+        } catch (CryptoException) {
+            return null;
+        } finally {
+            sodium_memzero($sessionKey);
+            sodium_memzero($current);
+        }
+        $db->execute(
+            'UPDATE vault_sessions SET nonce_next = ?, enc_sk_next = ? WHERE sid_hash = ? AND user_id = ?',
+            [base64_encode($box['nonce']), base64_encode($box['ct']), $sidHash, $userId]
+        );
+        return $sidHash;
     }
 
     // Deletes the user's vault sessions (only $sidHash's when given). Clears the cookie when the
@@ -186,6 +241,16 @@ class VaultSession extends Base
     public static function ad(string $sidHash, int $userId, int $createdAt): string
     {
         return Encoding::enc('session', self::CRYPTO_V, $sidHash, $userId, $createdAt);
+    }
+
+    private function openNext(array $row, #[\SensitiveParameter] string $sessionKey, string $ad): ?string
+    {
+        $nonce = base64_decode((string) $row['nonce_next'], true);
+        $ct = base64_decode((string) $row['enc_sk_next'], true);
+        if ($nonce === false || $ct === false) {
+            return null;
+        }
+        return Aead::open($nonce, $ct, $sessionKey, $ad);
     }
 
     private function cookieKey(): ?string
