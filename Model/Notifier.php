@@ -96,7 +96,7 @@ class Notifier extends Base
     // To the agent's owner, after the agent's vault key failed repeatedly.
     public function agentBadKey(int $agentId): bool
     {
-        $owner = $this->ownerOf($agentId);
+        $owner = AgentRoster::of($this->container)->ownerOf($agentId);
         return $owner !== null && $this->notice($owner, t('Vault: an agent\'s vault key was refused'),
             t('Repeated requests for your agent %s were refused because of a wrong vault key. See your Vault activity.', $this->username($agentId)));
     }
@@ -104,7 +104,7 @@ class Notifier extends Base
     // To the agent's owner, when the agent hit its read cap.
     public function agentRateLimited(int $agentId): bool
     {
-        $owner = $this->ownerOf($agentId);
+        $owner = AgentRoster::of($this->container)->ownerOf($agentId);
         return $owner !== null && $this->notice($owner, t('Vault: an agent hit its read limit'),
             t('Your agent %s reached its hourly limit of secret reads. See your Vault activity.', $this->username($agentId)));
     }
@@ -133,20 +133,6 @@ class Notifier extends Base
         $name = (string) ($user['name'] ?: $user['username']);
         $this->emailClient->send((string) $user['email'], $name, $subject, '<p>'.$this->e(t('Hello %s,', $name)).'</p>'.$html, 'Kanboard Vault', '');
         return true;
-    }
-
-    // The agent's owner from Agents' roster (class_exists guard), or null.
-    private function ownerOf(int $agentId): ?int
-    {
-        if (! class_exists('\Kanboard\Plugin\Agents\Model\AgentTable')) {
-            return null;
-        }
-        try {
-            $row = (new VaultDb($this->container))->fetchOne('SELECT owner_user_id FROM agents WHERE agent_user_id = ?', [$agentId]);
-        } catch (Throwable) {
-            return null;
-        }
-        return $row === null ? null : (int) $row['owner_user_id'];
     }
 
     private function username(int $userId): string

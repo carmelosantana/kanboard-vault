@@ -72,6 +72,10 @@ class PrincipalModel extends Base
         if ($user === null || (int) $user['is_active'] !== 1) {
             throw new RuntimeException('Vault: enrolment needs an active user');
         }
+        // An agent never holds a human principal (R47): agents enrol only through the agent path (T16). Generic error.
+        if (AgentRoster::of($this->container)->isAgent($userId)) {
+            throw new VaultException('enrol_refused');
+        }
         $this->checkPassphrase($passphrase, (string) $user['username'], (string) ($user['password'] ?? ''));
         if ($this->get($userId) !== null) {
             throw new VaultException('already_enrolled');

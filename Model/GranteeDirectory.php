@@ -3,7 +3,6 @@ namespace Kanboard\Plugin\Vault\Model;
 
 use Kanboard\Core\Base;
 use Kanboard\Core\Security\Role;
-use Throwable;
 
 // Who the sharing dialog may offer (spec: UI → The sharing dialog: "a user or an enrolled agent"). The picker never
 // shows more of the user directory than Kanboard already shows the actor:
@@ -64,7 +63,7 @@ class GranteeDirectory extends Base
         if ($actor['role'] === Role::APP_ADMIN) {
             $ids = array_map('intval', array_column((new VaultDb($this->container))->fetchAll('SELECT id FROM users'), 'id'));
         } else {
-            $ids = $this->agentsOf($actorId);
+            $ids = AgentRoster::of($this->container)->agentsOf($actorId);
             foreach ($this->projectPermissionModel->getProjectIds($actorId) as $projectId) {
                 foreach ($this->projectPermissionModel->getMembers($projectId) as $member) {
                     $ids[] = (int) $member['id'];
@@ -72,20 +71,5 @@ class GranteeDirectory extends Base
             }
         }
         return array_values(array_diff(array_unique($ids), [$actorId]));
-    }
-
-    // The actor's agents by Agents' roster; none when Agents is absent or its table can't be read (fewer, never more).
-    /** @return list<int> */
-    private function agentsOf(int $ownerId): array
-    {
-        if (! class_exists('\Kanboard\Plugin\Agents\Model\AgentTable')) {
-            return [];
-        }
-        try {
-            $rows = (new VaultDb($this->container))->fetchAll('SELECT agent_user_id FROM agents WHERE owner_user_id = ?', [$ownerId]);
-        } catch (Throwable) {
-            return [];
-        }
-        return array_map('intval', array_column($rows, 'agent_user_id'));
     }
 }

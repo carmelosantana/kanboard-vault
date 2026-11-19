@@ -6,7 +6,6 @@ use InvalidArgumentException;
 use Kanboard\Core\Base;
 use Kanboard\Core\Security\Role;
 use LogicException;
-use Throwable;
 
 // The audit log (spec: Audit). vault_audit is append-only: rows are inserted here and deleted only by purge()
 // (retention). Each action may fill only the columns ALLOW lists for it; record() throws a LogicException on an
@@ -116,7 +115,7 @@ class AuditModel extends Base
         }
         $offset = max(0, $offset);
         $limit = max(1, min(self::PAGE_LIMIT, $limit));
-        $people = array_values(array_unique([$viewerId, ...$this->agentsOf($viewerId)]));
+        $people = array_values(array_unique([$viewerId, ...AgentRoster::of($this->container)->agentsOf($viewerId)]));
         $in = RecipientResolver::marks($people);
         $targets = RecipientResolver::marks(self::TARGET_OWNS);
         $where = [
@@ -229,23 +228,6 @@ class AuditModel extends Base
         }
         $p = $this->vdb()->fetchOne('SELECT kind FROM vault_principals WHERE user_id = ?', [$actorId]);
         return $p !== null && $p['kind'] === 'agent' ? 'agent' : 'human';
-    }
-
-    // The viewer's agents by Agents' roster, behind a class_exists guard; none when Agents is absent or its table
-    // can't be read (fewer rows shown, never more).
-    /** @return list<int> */
-    private function agentsOf(int $ownerId): array
-    {
-        $class = '\Kanboard\Plugin\Agents\Model\AgentTable';
-        if (! class_exists($class)) {
-            return [];
-        }
-        try {
-            $rows = $this->vdb()->fetchAll('SELECT agent_user_id FROM agents WHERE owner_user_id = ?', [$ownerId]);
-        } catch (Throwable) {
-            return [];
-        }
-        return array_map('intval', array_column($rows, 'agent_user_id'));
     }
 
     private function isAdmin(int $userId): bool

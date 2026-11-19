@@ -190,13 +190,15 @@ test('rename group sends the new name through save', async () => {
   assert.deepEqual(JSON.parse(JSON.stringify(saves)), [{ type: 'group', id: 7, payload: { name: 'Infra 2' } }]);
   assert.ok(p.calls.filter((c) => c.action === 'tree').length >= 2, 'the tree reloads');
 
-  // A read grantee isn't offered it.
-  const ro = loadPage({
-    api: (action) => action === 'tree' ? { ok: true, groups: [{ ...GROUP, permission: 'read', shared_by: 'Ana' }], shared_entries: false } : { ok: true, entries: [], next_offset: null },
-  });
-  await flush();
-  q(ro.doc, '[data-group-id="7"]').click();
-  await flush();
-  assert.equal(q(ro.doc, '[data-vault-action="rename-group"]').hidden, true);
-  assert.equal(shareButton(ro.doc).hidden, true, 'and can\'t share');
+  // Read and edit grantees aren't offered it (R50: renaming is the owner's).
+  for (const permission of ['read', 'edit']) {
+    const ro = loadPage({
+      api: (action) => action === 'tree' ? { ok: true, groups: [{ ...GROUP, permission, shared_by: 'Ana' }], shared_entries: false } : { ok: true, entries: [], next_offset: null },
+    });
+    await flush();
+    q(ro.doc, '[data-group-id="7"]').click();
+    await flush();
+    assert.equal(q(ro.doc, '[data-vault-action="rename-group"]').hidden, true, permission);
+    assert.equal(shareButton(ro.doc).hidden, true, permission + ' can\'t share');
+  }
 });

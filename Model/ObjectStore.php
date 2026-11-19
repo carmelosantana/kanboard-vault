@@ -22,7 +22,7 @@ use ValueError;
 // read is the one generic not_found, so "exists but not yours" looks like "no such object".
 //
 // Authorisation has one gate: effectivePermission() ('owner'|'edit'|'read'|null). Reads need any permission,
-// updateEntry, updateGroup (R45) and creating an entry in a group need edit or owner, and everything else (sub-groups, delete,
+// updateEntry and creating an entry in a group need edit or owner, and everything else (updateGroup too, R50) (sub-groups, delete,
 // and GrantModel's grant, move and revoke) needs owner. effectiveRecipients() only builds the recipient set
 // that DEKs are sealed to. Both delegate to RecipientResolver (owner plus live direct and ancestor grants).
 //
@@ -205,8 +205,8 @@ class ObjectStore extends Base
     }
 
     // R45: renames a group or edits its metadata. $payload holds only the keys to change (name, icon, notes); the rest
-    // are kept from the current payload, so a rename never drops the icon or notes. A payload write like updateEntry:
-    // the edit gate (owner or an edit grantee), then beforeWrite (expiry reconciliation, the write barrier) under the
+    // are kept from the current payload, so a rename never drops the icon or notes. Owner only (R50: decision 10's
+    // Edit is editing and adding entries, not the group itself). A payload write like updateEntry: the gate, then beforeWrite (expiry reconciliation, the write barrier) under the
     // same exclusive lock, then the merged payload sealed under the group's current DEK and epoch. Groups carry no
     // version, so the last write wins.
     public function updateGroup(int $actorId, int $groupId, #[\SensitiveParameter] array $payload, #[\SensitiveParameter] string $sk): void
@@ -214,7 +214,7 @@ class ObjectStore extends Base
         EntryPayload::validateGroup($payload + ['name' => 'unchanged']);
         $this->lock()->exclusive(function () use ($actorId, $groupId, $payload, $sk): void {
             $db = $this->vdb();
-            $this->requirePermission('group', $groupId, $actorId, self::CAN_EDIT);
+            $this->requirePermission('group', $groupId, $actorId, self::OWNER_ONLY);
             $this->beforeWrite('group', $groupId, $actorId, $sk);
             $row = $this->fetchObject($db, 'group', $groupId);
             $json = EntryPayload::encode(EntryPayload::validateGroup(array_merge($this->decryptFor($db, 'group', $row, $actorId, $sk), $payload)));

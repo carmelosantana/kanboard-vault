@@ -560,22 +560,31 @@ class GrantTest extends Base
         $this->assertSame(['id' => $bad, 'group_id' => $g, 'integrity_error' => true], $list[1]);
     }
 
-    // R45: a group's name and metadata are a payload write like an entry's: the gate is edit (owner or an edit
-    // grantee), never read. A refused rename changes nothing. Kills: updateGroup gated on read; the gate dropped.
-    public function testReadGranteeCannotRenameGroup(): void
+    // R45 + R50: a group's name and metadata are owner only. Decision 10's Edit is editing and adding entries, so an edit
+    // grantee still edits and adds entries inside the group but can't rename it; a read grantee or a stranger can't
+    // either. A refused rename changes nothing. Kills: updateGroup gated on edit (R50) or on read; the gate dropped.
+    public function testEditGranteeCannotRenameGroup(): void
     {
         $g = $this->store()->createGroup($this->alice, null, ['name' => 'Infra', 'icon' => 'server', 'notes' => 'racks']);
+        $e = $this->entry($g, 'inside');
         $this->grant('group', $g, $this->carol, 'read');
         $this->grant('group', $g, $this->bob, 'edit');
         $before = $this->row('SELECT nonce, ciphertext, key_epoch FROM vault_groups WHERE id = ?', [$g]);
-        $this->assertVaultError('not_found', fn () => $this->store()->updateGroup($this->carol, $g, ['name' => 'hijacked'], $this->carolSk));
-        $this->assertVaultError('not_found', fn () => $this->store()->updateGroup($this->dave, $g, ['name' => 'hijacked'], $this->daveSk));
+        foreach ([[$this->bob, $this->bobSk], [$this->carol, $this->carolSk], [$this->dave, $this->daveSk]] as [$who, $sk]) {
+            $this->assertVaultError('not_found', fn () => $this->store()->updateGroup($who, $g, ['name' => 'hijacked'], $sk));
+        }
         $this->assertSame($before, $this->row('SELECT nonce, ciphertext, key_epoch FROM vault_groups WHERE id = ?', [$g]));
+        $this->assertSame([], array_values(array_filter($this->auditActionsFor('group', $g), fn (string $a): bool => $a === 'update')));
 
-        $this->store()->updateGroup($this->bob, $g, ['name' => 'Infra 2'], $this->bobSk);
+        // The edit grantee still edits and adds entries in it.
+        $this->assertSame(2, $this->store()->updateEntry($this->bob, $e, 1, ['title' => 'edited by bob'], $this->bobSk));
+        $added = $this->store()->createEntry($this->bob, $g, ['title' => 'added by bob']);
+        $this->assertSame('added by bob', $this->title($this->alice, $added, $this->aliceSk));
+
+        $this->store()->updateGroup($this->alice, $g, ['name' => 'Infra 2'], $this->aliceSk);
         $this->assertSame(['name' => 'Infra 2', 'icon' => 'server', 'notes' => 'racks'], $this->store()->readGroup($this->carol, $g, $this->carolSk)['payload'], 'a rename keeps the icon and notes');
         $this->store()->updateGroup($this->alice, $g, ['notes' => 'cages'], $this->aliceSk);
-        $this->assertSame(['name' => 'Infra 2', 'icon' => 'server', 'notes' => 'cages'], $this->store()->readGroup($this->alice, $g, $this->aliceSk)['payload']);
+        $this->assertSame(['name' => 'Infra 2', 'icon' => 'server', 'notes' => 'cages'], $this->store()->readGroup($this->bob, $g, $this->bobSk)['payload']);
         $this->assertVaultError('payload_invalid', fn () => $this->store()->updateGroup($this->alice, $g, ['name' => ''], $this->aliceSk));
         $this->assertVaultError('payload_invalid', fn () => $this->store()->updateGroup($this->alice, $g, ['title' => 'x'], $this->aliceSk));
         $this->assertSame(2, count(array_filter($this->auditActionsFor('group', $g), fn (string $a): bool => $a === 'update')));
@@ -589,11 +598,10 @@ class GrantTest extends Base
         $parent = $this->group(null, 'parent');
         $g = $this->group($parent, 'child');
         $this->grant('group', $parent, $this->carol, 'read', $this->now + 30);
-        $this->grant('group', $g, $this->bob, 'edit');
         $carolCopy = $this->stolenDek('group', $g, $this->carol, $this->carolSk);
         $this->now += 30;
 
-        $this->store()->updateGroup($this->bob, $g, ['name' => 'renamed'], $this->bobSk);
+        $this->store()->updateGroup($this->alice, $g, ['name' => 'renamed'], $this->aliceSk);
         $this->assertSame(0, $this->countRows("SELECT COUNT(*) FROM vault_grants WHERE grantee_id = ?", [$this->carol]), 'the expired ancestor grant was reconciled');
         $this->assertSame(2, $this->epoch('group', $g), 're-keyed before the write');
         $this->assertNull($this->queued('group', $g));

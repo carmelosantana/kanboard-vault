@@ -15,7 +15,7 @@
  * and a reveal writes only into the view it was clicked in; only the latest entry load renders. The editor sends one
  * save at a time (M6), and every open or close of it bumps data-vault-editor-session on the form, which the generator
  * checks before it writes (T13 minor 1). Share buttons carry data-vault-share-type/-id/-label for vault-share.js
- * (owner only); Rename sends a group's new name through vault/save (R45).
+ * (owner only); Rename (owner only, R50) sends a group's new name through vault/save (R45).
  */
 (function (win) {
   'use strict';
@@ -285,7 +285,7 @@
     ui.listEmpty.textContent = title === null ? ui.selectGroupText : msg('no_entries');
     var group = ui.current && ui.current.group;
     ui.deleteGroup.hidden = !(group && group.permission === 'owner');
-    ui.renameGroup.hidden = !(group && canEdit(group.permission) && !group.integrity_error);
+    ui.renameGroup.hidden = !(group && group.permission === 'owner' && !group.integrity_error);
     shareTarget(ui.shareGroup, group && group.permission === 'owner' ? 'group' : null, group && group.id, group && group.name);
     hideDetail();
   }
@@ -699,7 +699,7 @@
     });
   }
 
-  // R45: a rename changes only the name (the server keeps the icon and notes). Owner or edit grantee.
+  // R45: a rename changes only the name (the server keeps the icon and notes). Owner only (R50).
   function renameGroup() {
     var g = ui.current && ui.current.group;
     if (!g) {

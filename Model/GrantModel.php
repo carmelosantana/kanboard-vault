@@ -294,12 +294,17 @@ class GrantModel extends Base
     }
 
     // Spec, Agents (decision 5): agents read the entries granted to them and never overwrite entries a human shared
-    // with them, so a grant to an agent is read only (agent_read_only), whichever path makes it. This is the one hook
+    // with them, so a grant to an agent is read only (agent_read_only), whichever path makes it (R47). An agent is a
+    // user on the Agents roster (AgentRoster, the spec's definition) or a principal of kind agent, so neither a human
+    // principal held by a roster agent nor an unreadable roster lets Edit through. This is the one hook
     // for any further agent limit on grants (T16): $expiresAt is passed for a maximum expiry, which v1 doesn't set.
     private function checkAgentGrant(VaultDb $db, int $granteeId, string $perm, ?int $expiresAt): void
     {
+        if ($perm === ObjectStore::READ) {
+            return;
+        }
         $p = $db->fetchOne('SELECT kind FROM vault_principals WHERE user_id = ?', [$granteeId]);
-        if ($p !== null && $p['kind'] === 'agent' && $perm !== ObjectStore::READ) {
+        if (($p !== null && $p['kind'] === 'agent') || AgentRoster::of($this->container)->isAgent($granteeId)) {
             throw new VaultException('agent_read_only');
         }
     }
