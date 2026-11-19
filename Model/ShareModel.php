@@ -21,7 +21,14 @@ use PDO;
 //               reveal, compared with hash_equals.
 //   ciphertext  base64 AES-256-GCM output (tag included), at most MAX_CIPHERTEXT bytes; iv base64 of 12 bytes; salt
 //               base64 of 16 bytes when there is a passphrase, '' otherwise. The AD is enc("share", 1, share_id,
-//               expires_at, has_passphrase), so the reveal returns expires_at and has_passphrase too.
+//               expires_at, has_passphrase), so the reveal returns expires_at and has_passphrase too. Its field types
+//               (Encoding::enc): "share" a string; 1 an int64; share_id the 32-character lowercase hex STRING as it is
+//               in the link (not its 16 raw bytes); expires_at an int64 (Unix seconds, as reserve() returned it);
+//               has_passphrase an int64, 0 or 1. Test/fixtures/enc-vectors.json (made by PHP) pins the bytes, and
+//               the browser checks itself against it (Test/js/vault-onetime.test.mjs).
+//   create      has_passphrase is sent as the string '0' or '1' and is required; there is no default.
+//   key         k without a passphrase; with one, HKDF-SHA256(k ‖ Argon2id(p, salt, t=3, m=64 MiB, p=1, 32 bytes),
+//               salt = '', info = "vault/share/v1"). The server never derives it; Assets/js/vault-onetime.js does.
 //
 //   reserve()   (creator, their sid_hash, 1h|1d|7d): a reservation row holding only id_hash, bound to the creator and
 //               their session for RESERVATION_TTL seconds, with the share expiry the AD will carry.
@@ -35,6 +42,9 @@ use PDO;
 //               already burned. The id alone can never burn a link. After commit the creator gets the notice (R19).
 //   revoke()    the creator deletes an unviewed link by id_hash.
 //   listMine()  the creator's live links with their labels opened by sk.
+//   Labels and key rotation (R58): while a rotation is in progress a new label is sealed to the rotation's new public
+//               key, and every sweep batch re-seals the creator's labels that still open with the old key
+//               (resealLabels), so labels survive the rotation and the old key opens none of them afterwards.
 //
 // Expired rows are removed by the purge (Purger::expiredShares, share_expire audited); expired reservations too.
 class ShareModel extends Base
@@ -240,7 +250,7 @@ class ShareModel extends Base
         };
         $shareId = $str('share_id');
         $burnHash = $str('burn_hash');
-        $hasPassphrase = $body['has_passphrase'] ?? '0';
+        $hasPassphrase = $body['has_passphrase'] ?? null;
         if (! in_array($hasPassphrase, ['0', '1', 0, 1, true, false], true)) {
             throw new VaultException('payload_invalid');
         }
@@ -278,14 +288,51 @@ class ShareModel extends Base
         return $raw;
     }
 
+    // Sealed to the creator's public key, or to the rotation's new key while a rotation is in progress (R58): a label
+    // made between the sweep's last batch and finish would otherwise stay sealed to a key that finish retires.
+    // Called inside finalize's exclusive transaction, which orders it against the rotation's start and finish.
     private function sealLabel(VaultDb $db, int $creatorId, string $idHash, string $label): string
     {
         $p = $db->fetchOne('SELECT public_key FROM vault_principals WHERE user_id = ?', [$creatorId]);
-        $pk = $p === null ? false : base64_decode((string) $p['public_key'], true);
+        $r = $db->fetchOne('SELECT new_pk FROM vault_rotations WHERE user_id = ?', [$creatorId]);
+        $key = $r !== null ? (string) $r['new_pk'] : ($p === null ? '' : (string) $p['public_key']);
+        $pk = $p === null ? false : base64_decode($key, true);
         if ($pk === false || strlen($pk) !== SODIUM_CRYPTO_BOX_PUBLICKEYBYTES) {
             throw new VaultException('not_enrolled');
         }
+        return self::seal($idHash, $label, $pk);
+    }
+
+    private static function seal(string $idHash, string $label, string $pk): string
+    {
         return base64_encode(sodium_crypto_box_seal(Encoding::enc('share_label', $idHash, $label), $pk));
+    }
+
+    // R58: re-seals the creator's labels that open with sk1 to pk2. RotationService::sweepBatch calls it inside the
+    // batch's exclusive transaction, after its bridge check has proven sk1 and pk2. Labels that don't open with sk1
+    // (already re-sealed, or none) are left as they are. Returns how many were re-sealed.
+    public static function resealLabels(VaultDb $db, int $creatorId, #[\SensitiveParameter] string $sk1, string $pk2): int
+    {
+        $rows = $db->fetchAll('SELECT id_hash, sealed_label FROM vault_shares WHERE creator_id = ? AND sealed_label IS NOT NULL', [$creatorId]);
+        if ($rows === []) {
+            return 0;
+        }
+        $keypair = sodium_crypto_box_keypair_from_secretkey_and_publickey($sk1, sodium_crypto_box_publickey_from_secretkey($sk1));
+        $n = 0;
+        try {
+            foreach ($rows as $row) {
+                $idHash = (string) $row['id_hash'];
+                $label = self::openLabel((string) $row['sealed_label'], $keypair, $idHash);
+                if ($label === null) {
+                    continue;
+                }
+                $db->execute('UPDATE vault_shares SET sealed_label = ? WHERE id_hash = ?', [self::seal($idHash, $label, $pk2), $idHash]);
+                $n++;
+            }
+        } finally {
+            sodium_memzero($keypair);
+        }
+        return $n;
     }
 
     private static function openLabel(string $sealed, #[\SensitiveParameter] string $keypair, string $idHash): ?string

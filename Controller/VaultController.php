@@ -5,6 +5,7 @@ use Kanboard\Plugin\Vault\Model\AgentRoster;
 use Kanboard\Plugin\Vault\Model\RecoveryService;
 use Kanboard\Plugin\Vault\Model\UnlockService;
 use Kanboard\Plugin\Vault\Model\VaultException;
+use Kanboard\Plugin\Vault\Model\ShareModel;
 use Kanboard\Plugin\Vault\Model\VaultSettings;
 
 // The Vault page and its session endpoints (spec: UI → States, Unlocked sessions).
@@ -48,6 +49,8 @@ class VaultController extends BaseVaultController
                     $params['notices'] = (new RecoveryService($this->container))->takeNotices($userId);
                     $params['failed_attempts'] = $this->principals()->failedAttemptsSinceLastUnlock($userId);
                     $params['agents_available'] = AgentRoster::of($this->container)->available();
+                    $max = (int) (new VaultSettings($this->container))->get('vault_share_max_expiry');
+                    $params['share_expiries'] = array_keys(array_filter(ShareModel::EXPIRIES, static fn (int $s): bool => $s <= $max));
                 }
             }
             $this->respond()->html($this->helper->layout->app('Vault:vault/'.$template, $params));

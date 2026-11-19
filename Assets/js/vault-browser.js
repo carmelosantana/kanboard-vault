@@ -359,6 +359,7 @@
   function hideDetail() {
     ui.entryReq++;
     ui.entry = null;
+    ui.detail.removeAttribute('data-vault-entry-id');
     ui.detail.hidden = true;
     ui.detailEmpty.hidden = false;
     closeEditor();
@@ -419,6 +420,8 @@
     ui.editBtn.hidden = !canEdit(entry.permission);
     ui.deleteBtn.hidden = entry.permission !== 'owner';
     shareTarget(ui.shareEntry, entry.permission === 'owner' ? 'entry' : null, entry.id, entry.title);
+    // The shown entry's id, for vault-onetime.js's one-time link buttons.
+    ui.detail.setAttribute('data-vault-entry-id', String(entry.id));
     fillMove(entry);
     ui.detail.hidden = false;
     ui.detailEmpty.hidden = true;

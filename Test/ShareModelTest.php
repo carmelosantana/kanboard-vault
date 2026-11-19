@@ -4,7 +4,10 @@ require_once __DIR__.'/Support/ServiceFixture.php';
 require_once __DIR__.'/Support/ShareSpyNotifier.php';
 
 use Kanboard\Plugin\Vault\Model\Purger;
+use Kanboard\Plugin\Vault\Crypto\Kdf;
+use Kanboard\Plugin\Vault\Crypto\Wraps;
 use Kanboard\Plugin\Vault\Model\RateLimitAudit;
+use Kanboard\Plugin\Vault\Model\RotationService;
 use Kanboard\Plugin\Vault\Model\ShareModel;
 use Kanboard\Plugin\Vault\Model\VaultException;
 use Kanboard\Plugin\Vault\Test\Support\Fixtures;
@@ -363,5 +366,66 @@ class ShareModelTest extends Base
 
         $this->now += 3600;
         $this->assertSame([ShareModel::idHash($b)], array_column($this->shares()->listMine($this->alice, $sk), 'id_hash'), 'expired links are not listed');
+    }
+
+    // T17 minor M1: has_passphrase is in the AD, so the browser always sends it ('0' or '1'). A body without it is
+    // refused rather than defaulted. Kills: validBody's `?? '0'` default restored.
+    public function testMissingHasPassphraseIsRefused(): void
+    {
+        $r = $this->shares()->reserve($this->alice, $this->sidHash(), '1d');
+        $burn = self::burn();
+        $body = $this->body($r['share_id'], $burn);
+        unset($body['has_passphrase']);
+        $this->assertVaultError('payload_invalid', fn () => $this->shares()->finalize($this->alice, $this->sidHash(), $body));
+        $this->assertSame(0, $this->shareCount());
+    }
+
+    // R58: a label sealed to the creator's old public key would stop opening after a key rotation. The rotation sweep
+    // re-seals the creator's labels to the new key (after its bridge check, in the batch's transaction), and a link
+    // created while a rotation is in progress is sealed to the new key straight away, so a label made between the
+    // sweep's last batch and finish isn't stranded. Afterwards the old sk opens none of them. Kills: no re-seal in the
+    // sweep (the first label is null), sealLabel ignoring the rotation in progress (the third is null), a re-seal that
+    // keeps the old key (the old sk still opens it).
+    public function testLabelsFollowAKeyRotation(): void
+    {
+        $g = $this->store()->createGroup($this->alice, null, ['name' => 'g']);
+        $this->store()->createEntry($this->alice, $g, ['title' => 'e', 'password' => 'p']);
+        [$before] = $this->share('1d', ['label' => 'made before']);
+        $sk1 = $this->skFor($this->alice, Fixtures::PASSPHRASE);
+
+        $crash = new RotationService($this->container, $this->slots(), $this->argon(), $this->clock(), $this->session(),
+            static function (string $point): void {
+                if ($point === 'start') {
+                    throw new \RuntimeException('injected crash');
+                }
+            });
+        try {
+            $crash->requestManual($this->alice, $sk1, Fixtures::PASSPHRASE, self::IP);
+            $this->fail('the injected crash');
+        } catch (\RuntimeException $e) {
+            $this->assertSame('injected crash', $e->getMessage());
+        }
+        [$during] = $this->share('1d', ['label' => 'made mid-rotation']);
+        $pending = $this->row("SELECT * FROM vault_wraps WHERE user_id = ? AND status = 'pending'", [$this->alice]);
+        $rot = $this->row('SELECT new_pk FROM vault_rotations WHERE user_id = ?', [$this->alice]);
+        $kek = Kdf::kek(($this->argon())(Fixtures::PASSPHRASE, base64_decode($pending['kdf_salt']), (int) $pending['kdf_ops'], (int) $pending['kdf_mem']), 'passphrase');
+        $sk2 = Wraps::unwrap($pending, $kek, base64_decode($rot['new_pk']));
+
+        $afterSweep = null;
+        $finishing = new RotationService($this->container, $this->slots(), $this->argon(), $this->clock(), $this->session(),
+            function (string $point) use (&$afterSweep): void {
+                if ($point === 'batch' && $afterSweep === null) {
+                    [$afterSweep] = $this->share('1d', ['label' => 'made before finish']);
+                }
+            });
+        $finishing->complete($this->alice, $sk1, $sk2);
+        $this->assertNull($this->row('SELECT * FROM vault_rotations WHERE user_id = ?', [$this->alice]), 'the rotation finished');
+        $this->assertNotNull($afterSweep);
+
+        $labels = array_column($this->shares()->listMine($this->alice, $sk2), 'label', 'id_hash');
+        $this->assertSame('made before', $labels[ShareModel::idHash($before)]);
+        $this->assertSame('made mid-rotation', $labels[ShareModel::idHash($during)]);
+        $this->assertSame('made before finish', $labels[ShareModel::idHash($afterSweep)]);
+        $this->assertSame([null, null, null], array_values(array_column($this->shares()->listMine($this->alice, $sk1), 'label')), 'the old key opens none');
     }
 }

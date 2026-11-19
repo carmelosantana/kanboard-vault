@@ -7,5 +7,6 @@
     <h3 class="vault-tree-head"><?= t('Shared with me') ?></h3>
     <ul class="vault-tree-list" data-vault-tree="shared"></ul>
     <button type="button" class="vault-node" data-vault-action="shared-entries" hidden><?= t('Entries shared with me') ?></button>
+    <button type="button" class="vault-node vault-activity-link" data-vault-action="onetime-new"><i class="fa fa-link" aria-hidden="true"></i> <?= t('One-time links') ?></button>
     <button type="button" class="vault-node vault-activity-link" data-vault-action="activity"><i class="fa fa-history" aria-hidden="true"></i> <?= t('Activity') ?></button>
 </nav>

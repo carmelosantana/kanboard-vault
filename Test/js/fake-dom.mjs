@@ -190,8 +190,9 @@ export function template(name) {
 export const WORDLIST_URL = '/plugins/Vault/Assets/vendor/eff_large_wordlist.txt';
 
 // The unlocked Vault page. api(action, body) answers each KBVault.api call; return a Promise to hold it. fetch, confirm
-// and prompt stand in for the window's.
-export function loadPage({ api, crypto, wordlist = '', math = Math, fetch, confirm = () => true, prompt = () => null } = {}) {
+// and prompt stand in for the window's. onetime: {Worker, scriptSrc} also loads the one-time link dialog and
+// vault-onetime.js (T18), with that Worker class and document.currentScript.src.
+export function loadPage({ api, crypto, wordlist = '', math = Math, fetch, confirm = () => true, prompt = () => null, onetime = null } = {}) {
   const doc = new Doc();
   const calls = [];
   const fetches = [];
@@ -202,13 +203,19 @@ export function loadPage({ api, crypto, wordlist = '', math = Math, fetch, confi
       <li><button type="button" data-vault-action="new-entry">Entry</button></li>
       <li><button type="button" data-vault-action="new-group">Group</button></li>
     </ul>
-    <div id="vault-app" data-vault-state="unlocked" data-messages='{"failed":"Something went wrong.","saved":"Saved.","from":"from"}'>
+    <div id="vault-app" data-vault-state="unlocked" data-messages='{"failed":"Something went wrong.","saved":"Saved.","from":"from"}'
+         data-endpoints='{"share_show":"/?controller=VaultShareController&amp;action=show&amp;plugin=Vault"}'>
       <div class="vault-panes" data-vault-panes>${tpl('tree')}${tpl('list')}<section class="vault-detail">${tpl('detail')}${tpl('edit')}</section></div>
-      ${tpl('share_dialog')}${tpl('activity')}
+      ${tpl('share_dialog')}${tpl('activity')}${onetime ? tpl('onetime_dialog') : ''}
     </div>
     <p class="vault-toast" data-vault-toast role="status" hidden></p>`);
   const panel = doc.querySelector('[data-vault-generator]');
   if (panel) panel.setAttribute('data-wordlist', WORDLIST_URL);
+  const otDialog = doc.querySelector('[data-vault-onetime]');
+  if (otDialog) otDialog.setAttribute('data-wordlist', WORDLIST_URL);
+  // The parser keeps entities as written; the browser would have decoded the attribute.
+  const app = doc.getElementById('vault-app');
+  app.setAttribute('data-endpoints', app.getAttribute('data-endpoints').replace(/&amp;/g, '&'));
   const window = {
     document: doc,
     URL,
@@ -216,7 +223,12 @@ export function loadPage({ api, crypto, wordlist = '', math = Math, fetch, confi
     navigator: { clipboard: { writeText: () => Promise.resolve() } },
     setTimeout: () => 0,
     clearTimeout: () => {},
-    location: { reload: () => {} },
+    location: { reload: () => {}, href: 'https://kb.test/?controller=VaultController&action=index&plugin=Vault' },
+    Worker: onetime ? onetime.Worker : undefined,
+    TextEncoder,
+    TextDecoder,
+    atob,
+    btoa,
     prompt,
     confirm,
     fetch: (url) => {
@@ -233,6 +245,11 @@ export function loadPage({ api, crypto, wordlist = '', math = Math, fetch, confi
   const ctx = vm.createContext({ window, Math: math });
   for (const f of ['vault-browser.js', 'vault-generator.js', 'vault-share.js']) {
     vm.runInContext(readFileSync(path(`Assets/js/${f}`), 'utf8'), ctx, { filename: f });
+  }
+  if (onetime) {
+    doc.currentScript = { src: onetime.scriptSrc };
+    vm.runInContext(readFileSync(path('Assets/js/vault-onetime.js'), 'utf8'), ctx, { filename: 'vault-onetime.js' });
+    doc.currentScript = null;
   }
   const messages = {};
   if (panel) {

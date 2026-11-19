@@ -31,6 +31,7 @@ use ValueError;
 //           no longer an effective recipient, or when its rows open with neither sk1 nor sk2. A DEK that opens
 //           but whose payload or crypto_v doesn't is kept: the object stays old-generation, is reported as an
 //           integrity error (integrityErrors(); complete() throws integrity_error) and finish stays refused.
+//           Each batch also re-seals the principal's one-time link labels to the new key (R58, ShareModel).
 //   finish  refused while an old-generation row remains; otherwise the pending wraps become active, the bridge
 //           is deleted, public_key = new_pk, key_gen + 1, enc_sk_next moves to enc_sk, rotating is cleared.
 //
@@ -514,6 +515,8 @@ class RotationService extends Base
         if (! $bridgeOk) {
             throw new RuntimeException('Vault: the rotation bridge does not open to the current key; the sweep stops');
         }
+        // R58: one-time link labels sealed to the old key are re-sealed to the new one in this transaction.
+        ShareModel::resealLabels($db, $userId, $sk1, $pk2);
         $gen = $principal['key_gen'];
         $stored = $db->fetchOne('SELECT sweep_type, sweep_id FROM vault_rotations WHERE user_id = ?', [$userId]);
         $cursor = $stored === null || $stored['sweep_type'] === null ? null : [(string) $stored['sweep_type'], (int) $stored['sweep_id']];

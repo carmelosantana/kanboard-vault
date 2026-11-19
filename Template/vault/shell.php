@@ -15,6 +15,7 @@
 <?= $this->asset->js('plugins/Vault/Assets/js/vault-browser.js') ?>
 <?= $this->asset->js('plugins/Vault/Assets/js/vault-generator.js') ?>
 <?= $this->asset->js('plugins/Vault/Assets/js/vault-share.js') ?>
+<?= $this->asset->js('plugins/Vault/Assets/js/vault-onetime.js') ?>
 <?php if ($failed_attempts >= \Kanboard\Plugin\Vault\Model\PrincipalModel::NOTIFY_AFTER): ?>
 <p class="alert alert-error vault-banner"><?= t('There were %d failed attempts to unlock your vault before this unlock. If they weren\'t yours, change your vault passphrase.', $failed_attempts) ?></p>
 <?php endif ?>
@@ -36,5 +37,6 @@
     </section>
 </div>
 <?= $this->render('Vault:vault/share_dialog', ['client' => $client]) ?>
+<?= $this->render('Vault:vault/onetime_dialog', ['share_expiries' => $share_expiries ?? ['1h', '1d', '7d']]) ?>
 <?= $this->render('Vault:vault/activity') ?>
 <p class="vault-toast" data-vault-toast role="status" hidden></p>
