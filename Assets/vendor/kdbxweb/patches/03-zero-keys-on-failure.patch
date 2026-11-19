@@ -1,0 +1,128 @@
+--- a/kdbxweb.js
++++ b/kdbxweb.js
+@@ -459,7 +459,15 @@
+         blockDataForHash.set(new Uint8Array(blockData), 4 + 8);
+         blockDataForHashView.setInt32(0, blockIndex, true);
+         blockDataForHashView.setInt32(8, blockLength, true);
+-        return CryptoEngine.hmacSha256(blockKey, blockDataForHash.buffer);
++        // Vault patch 03: zero the block's HMAC key once its HMAC is made or has failed.
++        const zeroKey = () => (0, byte_utils_1.zeroBuffer)(blockKey);
++        return CryptoEngine.hmacSha256(blockKey, blockDataForHash.buffer).then((hmac) => {
++            zeroKey();
++            return hmac;
++        }, (e) => {
++            zeroKey();
++            throw e;
++        });
+     });
+ }
+ function decrypt(data, key) {
+@@ -2301,6 +2309,18 @@
+ const KeyEncryptorAes = __webpack_require__(/*! ../crypto/key-encryptor-aes */ "./crypto/key-encryptor-aes.ts");
+ const KeyEncryptorKdf = __webpack_require__(/*! ../crypto/key-encryptor-kdf */ "./crypto/key-encryptor-kdf.ts");
+ const int64_1 = __webpack_require__(/*! ../utils/int64 */ "./utils/int64.ts");
++// Vault patch 03: run fn, then zero the given key buffers whether it resolved, rejected or threw. Upstream zeroed
++// keys on the success path only, so a wrong password or a corrupt file left them in memory.
++function zeroAfter(fn, ...keys) {
++    const zero = () => keys.forEach((key) => key && (0, byte_utils_1.zeroBuffer)(key));
++    return Promise.resolve().then(fn).then((result) => {
++        zero();
++        return result;
++    }, (e) => {
++        zero();
++        throw e;
++    });
++}
+ class KdbxFormat {
+     constructor(kdbx) {
+         this.preserveXml = false;
+@@ -2341,7 +2361,7 @@
+             if (!(0, byte_utils_1.arrayBufferEquals)(expectedHeaderSha, headerSha)) {
+                 throw new kdbx_error_1.KdbxError(consts_1.ErrorCodes.FileCorrupt, 'header hash mismatch');
+             }
+-            return this.computeKeysV4().then((keys) => {
++            return this.computeKeysV4().then((keys) => zeroAfter(() => {
+                 return this.getHeaderHmac(stm, keys.hmacKey).then((headerHmac) => {
+                     const expectedHeaderHmac = stm.readBytes(headerHmac.byteLength);
+                     if (!(0, byte_utils_1.arrayBufferEquals)(expectedHeaderHmac, headerHmac)) {
+@@ -2368,7 +2388,7 @@
+                         });
+                     });
+                 });
+-            });
++            }, keys.hmacKey, keys.cipherKey));
+         });
+     }
+     loadXml(xmlStr) {
+@@ -2473,7 +2493,7 @@
+     decryptXmlV3(stm) {
+         const data = stm.readBytesToEnd();
+         return this.getMasterKeyV3().then((masterKey) => {
+-            return this.decryptData(data, masterKey).then((data) => {
++            return zeroAfter(() => this.decryptData(data, masterKey), masterKey).then((data) => {
+                 (0, byte_utils_1.zeroBuffer)(masterKey);
+                 data = this.trimStartBytesV3(data);
+                 return HashedBlockTransform.decrypt(data).then((data) => {
+@@ -2512,7 +2532,7 @@
+         });
+     }
+     getMasterKeyV3() {
+-        return this.kdbx.credentials.getHash().then((credHash) => {
++        return this.kdbx.credentials.getHash().then((credHash) => zeroAfter(() => {
+             if (!this.kdbx.header.transformSeed ||
+                 !this.kdbx.header.keyEncryptionRounds ||
+                 !this.kdbx.header.masterSeed) {
+@@ -2545,7 +2565,7 @@
+                     });
+                 });
+             });
+-        });
++        }, credHash));
+     }
+     trimStartBytesV3(data) {
+         if (!this.kdbx.header.streamStartBytes) {
+@@ -2587,7 +2607,7 @@
+         }
+         const src = stm.readBytesNoAdvance(0, this.kdbx.header.endPos);
+         return HmacBlockTransform.getHmacKey(key, new int64_1.Int64(0xffffffff, 0xffffffff)).then((keySha) => {
+-            return CryptoEngine.hmacSha256(keySha, src);
++            return zeroAfter(() => CryptoEngine.hmacSha256(keySha, src), keySha);
+         });
+     }
+     checkHeaderHashV3(stm) {
+@@ -2616,10 +2636,13 @@
+         if (!(kdfSalt instanceof ArrayBuffer)) {
+             throw new kdbx_error_1.KdbxError(consts_1.ErrorCodes.FileCorrupt, 'no salt');
+         }
+-        return this.kdbx.credentials.getHash(kdfSalt).then((credHash) => {
++        return this.kdbx.credentials.getHash(kdfSalt).then((credHash) => zeroAfter(() => {
+             return KeyEncryptorKdf.encrypt(credHash, kdfParams).then((encKey) => {
+                 (0, byte_utils_1.zeroBuffer)(credHash);
+                 if (!encKey || encKey.byteLength !== 32) {
++                    if (encKey) {
++                        (0, byte_utils_1.zeroBuffer)(encKey);
++                    }
+                     return Promise.reject(new kdbx_error_1.KdbxError(consts_1.ErrorCodes.Unsupported, 'bad derived key'));
+                 }
+                 const keyWithSeed = new Uint8Array(65);
+@@ -2628,15 +2651,15 @@
+                 keyWithSeed[64] = 1;
+                 (0, byte_utils_1.zeroBuffer)(encKey);
+                 (0, byte_utils_1.zeroBuffer)(masterSeed);
+-                return Promise.all([
+-                    CryptoEngine.sha256(keyWithSeed.buffer.slice(0, 64)),
++                const cipherKeySrc = keyWithSeed.buffer.slice(0, 64);
++                return zeroAfter(() => Promise.all([
++                    CryptoEngine.sha256(cipherKeySrc),
+                     CryptoEngine.sha512(keyWithSeed.buffer)
+-                ]).then((keys) => {
+-                    (0, byte_utils_1.zeroBuffer)(keyWithSeed);
++                ]), cipherKeySrc, keyWithSeed).then((keys) => {
+                     return { cipherKey: keys[0], hmacKey: keys[1] };
+                 });
+             });
+-        });
++        }, credHash));
+     }
+     decryptData(data, cipherKey) {
+         const cipherId = this.kdbx.header.dataCipherUuid;

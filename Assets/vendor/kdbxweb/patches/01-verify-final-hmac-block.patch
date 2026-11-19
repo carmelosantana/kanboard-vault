@@ -1,0 +1,31 @@
+--- a/kdbxweb.js
++++ b/kdbxweb.js
+@@ -485,13 +485,21 @@
+                 });
+             }
+             else {
+-                const ret = new Uint8Array(totalLength);
+-                let offset = 0;
+-                for (let i = 0; i < buffers.length; i++) {
+-                    ret.set(new Uint8Array(buffers[i]), offset);
+-                    offset += buffers[i].byteLength;
+-                }
+-                return Promise.resolve(ret.buffer);
++                // Vault patch 01: the final, empty block has an HMAC too (over its index, a zero length and no
++                // data), as encrypt() writes it. Verify it, so a stream cut at a block boundary and closed with a
++                // forged empty block is refused instead of read as the whole file.
++                return getBlockHmac(key, blockIndex, 0, new ArrayBuffer(0)).then((calculatedBlockHash) => {
++                    if (!(0, byte_utils_1.arrayBufferEquals)(calculatedBlockHash, blockHash)) {
++                        throw new kdbx_error_1.KdbxError(consts_1.ErrorCodes.FileCorrupt, 'invalid hash block');
++                    }
++                    const ret = new Uint8Array(totalLength);
++                    let offset = 0;
++                    for (let i = 0; i < buffers.length; i++) {
++                        ret.set(new Uint8Array(buffers[i]), offset);
++                        offset += buffers[i].byteLength;
++                    }
++                    return ret.buffer;
++                });
+             }
+         };
+         return next();

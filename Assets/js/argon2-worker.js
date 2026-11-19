@@ -5,7 +5,9 @@
 // application/octet-stream, which a browser refuses for a module script.
 //
 // Messages in:
-//   {id, type: 'argon2id' | 'argon2d', password, salt, t, m, p, dkLen}  password and salt are Uint8Array; m in KiB
+//   {id, type: 'argon2id' | 'argon2d', password, salt, t, m, p, dkLen, version?}
+//                                      password and salt are Uint8Array; m in KiB; version 0x13 (the default) or 0x10,
+//                                      the two a KDBX header may name (vault-kdbx.js passes it through)
 //   {id, type: 'blake2b', data, dkLen}                                  BLAKE2b with a dkLen-byte digest, no key
 // Replies: {id, hash} (a Uint8Array, transferred) or {id, error} (a fixed message, never an input).
 //
@@ -35,12 +37,13 @@ async function run(msg) {
     throw new Error('bad_type');
   }
   const { password, salt, t, m, p, dkLen } = msg;
+  const version = msg.version === undefined ? 0x13 : msg.version;
   if (!bytes(password) || !bytes(salt) || salt.length < 8 || !int(t, 1, MAX_T) || !int(p, 1, MAX_P)
-    || !int(m, 8 * p, MAX_M) || !int(dkLen, 16, 64)) {
+    || !int(m, 8 * p, MAX_M) || !int(dkLen, 16, 64) || (version !== 0x13 && version !== 0x10)) {
     throw new Error('bad_params');
   }
   try {
-    return await fn(password, salt, { t, m, p, dkLen, maxmem: MAX_M * 1024 });
+    return await fn(password, salt, { t, m, p, dkLen, version, maxmem: MAX_M * 1024 });
   } finally {
     password.fill(0);
   }

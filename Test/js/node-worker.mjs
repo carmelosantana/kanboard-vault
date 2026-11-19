@@ -1,6 +1,7 @@
 // The Worker class the Vault JS tests hand to the page in place of the browser's (not a *.test.mjs). It runs the
 // real Assets/js/argon2-worker.js in a node worker thread through node-worker-entry.mjs, and counts what it is
-// asked: workers.started, workers.messages (each message's type) and workers.terminated.
+// asked: workers.started, workers.messages (each message's type) and workers.terminated. If the log has a replies
+// array, every reply's data is kept there too.
 import { Worker as ThreadWorker } from 'node:worker_threads';
 
 const ENTRY = new URL('./node-worker-entry.mjs', import.meta.url);
@@ -17,7 +18,10 @@ export function workerClass(log = { started: [], messages: [], terminated: 0 }) 
       const target = String(url) === WORKER_FILE || /\/Assets\/js\/argon2-worker\.js$/.test(new URL(String(url)).pathname) ? WORKER_FILE : null;
       if (!target) throw new Error('unexpected worker URL ' + url);
       this.thread = new ThreadWorker(ENTRY, { workerData: { url: target } });
-      this.thread.on('message', (data) => this.emit('message', { data }));
+      this.thread.on('message', (data) => {
+        if (log.replies) log.replies.push(data);
+        this.emit('message', { data });
+      });
       this.thread.on('error', (e) => this.emit('error', { message: String(e && e.message) }));
     }
     emit(type, ev) {

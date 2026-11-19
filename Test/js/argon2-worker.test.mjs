@@ -97,6 +97,24 @@ test('the worker refuses out-of-range parameters with a fixed error', () => {
   ]);
 });
 
+test('the worker takes the Argon2 version a KDBX header names (0x13 by default, or 0x10) and refuses others', async () => {
+  const { argon2d } = await import(new URL('../../Assets/vendor/noble-hashes/argon2.js', import.meta.url));
+  const base = { type: 'argon2d', password: { hex: '01'.repeat(32) }, salt: { hex: '02'.repeat(32) }, t: 2, m: 64, p: 1, dkLen: 32 };
+  const r = worker([
+    { ...base, id: 1 },
+    { ...base, id: 2, version: 0x13 },
+    { ...base, id: 3, version: 0x10 },
+    { ...base, id: 4, version: 0x12 },
+    { ...base, id: 5, version: '19' },
+  ]);
+  const want = (version) => hex(argon2d(new Uint8Array(32).fill(1), new Uint8Array(32).fill(2), { t: 2, m: 64, p: 1, dkLen: 32, version }));
+  assert.deepEqual(r.replies, [
+    { id: 1, hash: want(0x13) }, { id: 2, hash: want(0x13) }, { id: 3, hash: want(0x10) },
+    { id: 4, error: 'bad_params' }, { id: 5, error: 'bad_params' },
+  ]);
+  assert.notEqual(want(0x10), want(0x13));
+});
+
 test('argon2-worker.js has no eval, no WebAssembly and only relative imports', () => {
   const src = readFileSync(path('Assets/js/argon2-worker.js'), 'utf8').replace(/^\s*\/\/.*$/gm, '');
   assert.doesNotMatch(src, /eval\(|new Function|WebAssembly|importScripts|fetch\(/);

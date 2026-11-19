@@ -1,0 +1,14 @@
+--- a/kdbxweb.js
++++ b/kdbxweb.js
+@@ -5379,8 +5379,10 @@
+ function parse(xml) {
+     const parser = createDOMParser();
+     let doc;
++    // Vault patch 02: keep tab (\x09), which XML 1.0 allows like LF and CR; upstream deleted every tab from every
++    // unprotected value (keeweb/kdbxweb#63). Only the control characters XML 1.0 forbids are removed.
+     // eslint-disable-next-line no-control-regex
+-    xml = xml.replace(/[\x00-\x09\x0B-\x0C\x0E-\x1F]/g, '');
++    xml = xml.replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F]/g, '');
+     try {
+         doc = parser.parseFromString(xml, 'application/xml');
+     }

@@ -1,6 +1,6 @@
 # Vendored files
 
-Each file here is byte-identical to its upstream source. Test/js/vault-generator.test.mjs and Test/js/argon2-worker.test.mjs check the sha256 values below.
+Each file here is byte-identical to its upstream source, except `kdbxweb/kdbxweb.js`, which is upstream plus the reviewed patches in `kdbxweb/patches/` (below). Test/js/vault-generator.test.mjs, Test/js/argon2-worker.test.mjs and Test/js/kdbx-patches.test.mjs check the sha256 values below.
 
 ## eff_large_wordlist.txt
 
@@ -40,3 +40,34 @@ The file is unchanged. Vault uses the words only, as data.
 | `noble-hashes/LICENSE` | `4f221aee6e072336700c408c68ab3b96a3fc09f6aebe6f48f1bd99e5ef13faec` |
 
 The README notes that Argon2 is outside noble's audit scope; the RFC 9106 KAT and the libsodium cross-check above are Vault's own check of it.
+
+## kdbxweb/ (kdbxweb 2.1.1, KDBX read and write)
+
+| | |
+|---|---|
+| What | `dist/kdbxweb.js` from kdbxweb 2.1.1, the **non-minified** webpack UMD build (321,788 bytes upstream), plus `LICENSE`. The spec's choice: non-minified so the local patches stay reviewable |
+| Source | `npm pack kdbxweb@2.1.1 --ignore-scripts` (https://registry.npmjs.org/kdbxweb/-/kdbxweb-2.1.1.tgz), into a fresh, empty directory and extracted into another; nothing installed or run |
+| Retrieved | 2026-11-19 |
+| Tarball integrity | `sha512-z+a2+BEzyK2kUh0xDekY7gwc9CkbzSetUyvc78NKVawxV06UG1KYbg9W9hZCJdQPYizIVePTvQsYUXIO1qtAhQ==` (shasum `d30c6db3741dbc596a84860c46d491c2309f59c6`): the local tarball's sha512 and sha1 equal the registry's `dist.integrity` and `dist.shasum` |
+| Provenance | **None** (published 2021, before npm provenance existed; `/-/npm/v1/attestations/kdbxweb@2.1.1` answers 404). Checked instead: the registry's ECDSA P-256 signature over `kdbxweb@2.1.1:<integrity>` verifies with npm's registry key `SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA` (valid until 2025-01-29, so valid for a 2021 publish); all 31 `lib/*.ts` sources in the tarball have the same git blob ids as tag `2.1.1` of github.com/keeweb/kdbxweb (commit `9b86a035a53f1827e427a0fc081bdcccc24f4f1b`, 2021-09-06, antelle). The repository does not commit `dist/`, so the bundle was not rebuilt: it was scanned as below and the regions the patches touch were read in full |
+| Vet (2026-11-19) | Published 2021-09-06T19:57:25Z, still `latest` (no release since, so no fresh-publish risk); one maintainer, `antelle`, who also published it; the repo moved to the keeweb org and has had only docs commits since. No `preinstall`/`install`/`postinstall` scripts (build/test only). Dependencies `@xmldom/xmldom ^0.7.4` and `fflate ^0.7.1`: fflate is bundled into `dist/kdbxweb.js`; xmldom and Node's `crypto` are UMD externals the browser branch never loads (`root["crypto"]`, `root["@xmldom/xmldom"]`; kdbxweb uses `globalThis.DOMParser`/`XMLSerializer` and WebCrypto when they exist). Scan of the bundle: no `eval`, `WebAssembly`, `fetch`, `XMLHttpRequest`, `importScripts` or network URL; the only `new Function` is webpack's global-object fallback, reached only if `globalThis` is not an object (never in a supported browser), so the CSP needs no `unsafe-eval`; fflate's Blob-URL worker helpers are bundled but kdbxweb calls only `gzipSync`/`gunzipSync`. No red flag |
+| Licence | MIT, © 2021 Antelle; `kdbxweb/LICENSE` (the bundle's first line keeps the notice too). The bundled fflate is MIT (© Arjun Barrett, `101arrowz`); its notice is not in the bundle, so it is recorded here |
+| Used by | `Assets/js/vault-kdbx.js` (`window.KBVaultKdbx`), loaded after `kdbxweb.js` as classic scripts on the page. Argon2 is wired through `kdbxweb.CryptoEngine.setArgon2Impl` to `Assets/js/argon2-worker.js` (the noble files above; vetted in T18, see that section). No WebAssembly |
+
+| File | sha256 |
+|---|---|
+| `kdbxweb/kdbxweb.js (upstream)` | `d3b59272b72c8fc0dc340e2ab68940a54669bdbcc5a92e65ace9cb001d9eb169` |
+| `kdbxweb/kdbxweb.js (patched)` | `d843a25af03fac19952fb250eafc05f4ee9a7417b9015af09184e8a0ff2c996d` |
+| `kdbxweb/LICENSE` | `5328cd70623b0154a3d13ce41d57d6d4e9fda5b6db2e8ed994d29c3598c374a8` |
+
+### Local patches
+
+`kdbxweb/kdbxweb.js` is the upstream file with these three patches applied in order (unified diffs against the bundle, written by hand; each change carries a `Vault patch NN` comment in the file). The `@keenext/kdbxweb` fork (2.2.0-keenext.2, its `FORK.md` and bundle read from `npm pack --ignore-scripts`, never installed) was used only as a reference for what to fix; it rewrites the sources in TypeScript `async`/`await`, so no code was copied. `kdbx-patches.test.mjs` (`vendored file sha256 matches VENDOR.md after patches`) un-applies the patches from the vendored file, checks the result's sha256 against the upstream value above, then re-applies them and compares byte for byte.
+
+| Patch | What and why | Upstream | Test |
+|---|---|---|---|
+| `kdbxweb/patches/01-verify-final-hmac-block.patch` | In KDBX 4's HMAC block stream, upstream checks every block's HMAC except the final, empty block's. A stream cut at a block boundary and closed with a forged empty block was read as the whole file. The patch verifies that block's HMAC (index, zero length, no data, as `encrypt()` writes it) and refuses a mismatch as `FileCorrupt: invalid hash block` | No upstream issue or PR (none among keeweb/kdbxweb's 63 issues and PRs on 2026-11-19); the code is `decrypt()` in https://github.com/keeweb/kdbxweb/blob/2.1.1/lib/crypto/hmac-block-transform.ts. The keenext `FORK.md` lists the same fix | `final HMAC block is verified` (the `tampered-final-block.kdbx` fixture, one bit flipped in that HMAC, and a forged truncation of a two-block stream) |
+| `kdbxweb/patches/02-preserve-tabs.patch` | Before parsing the inner XML, upstream deletes the characters `\x00–\x09`, `\x0B–\x0C`, `\x0E–\x1F`. That range includes tab, which XML 1.0 allows, so every tab vanished from every unprotected value (user name, URL, notes, custom fields). The patch keeps `\x09`; the forbidden characters are still removed. Other whitespace (spaces, LF, CR) was never touched | https://github.com/keeweb/kdbxweb/pull/63 (open; the same one-character range change) | `tabs and whitespace preserved` (KDBX 4 and 3.1 fixtures whose values hold tabs and leading, trailing and doubled spaces, protected and not) |
+| `kdbxweb/patches/03-zero-keys-on-failure.patch` | Upstream zeroes keys only on the success path, so a wrong password or a corrupt file left them in memory: the credential hash when the KDF fails or is cancelled, KDBX 3's master key, KDBX 4's cipher and HMAC keys; and it never zeroes the header and per-block HMAC keys or the copy of master seed ‖ derived key hashed into the cipher key. The patch adds a `zeroAfter()` helper that zeroes the given buffers when a step resolves, rejects or throws, and uses it on those keys; a derived key of the wrong length is zeroed too. Not covered: the inner random stream key (kdbxweb keeps it for protected values) and the save path's own top-level key handling (`saveV4`, `encryptXmlV3`), which Task 23 decides on | No upstream issue or PR (checked as above); related: https://github.com/keeweb/kdbxweb/issues/9 (2016, zeroing intermediate KDF results, closed). The keenext `FORK.md` lists the same fix | `keys zeroed on failed load` (spies on `Uint8Array.prototype.fill(0)` and WebCrypto digests: KDBX 4 wrong password, tampered final block, KDBX 3.1 wrong password, KDF refused, and a successful load) |
+
+The 4.1 write bug (upstream #49) is not patched: Vault writes KDBX 4.0 (spec). Twofish is not supported upstream, and the import pre-check refuses it (Task 22).
