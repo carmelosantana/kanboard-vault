@@ -282,7 +282,8 @@ class ObjectStore extends Base
     }
 
     // Spec "Expiry reconciliation on write" and "Write barrier", for a payload write of an existing object.
-    // Runs inside the caller's exclusive lock (or its own): expired sources on the object and its ancestors
+    // Runs inside the caller's exclusive lock (or its own): principals of deleted users are swept (R26), expired
+    // sources on the object and its ancestors
     // are removed for their whole subtrees, then, if the object is queued, the writer re-keys it inline. Rotation
     // uses the same barrier: an object that still holds an old-generation key row for a rotating principal is
     // re-keyed inline too (the rotating principal gets its next key only). A writer who can't re-key it gets
@@ -292,6 +293,8 @@ class ObjectStore extends Base
         $this->lock()->exclusive(function () use ($type, $id, $actorId, $sk): void {
             $db = $this->vdb();
             $rekeyer = $this->rekeyer();
+            // R26: a deleted Kanboard user's principal is swept into re-keys first, as the purge would.
+            (new Purger($this->container))->sweepOrphans($this->now());
             $this->grants()->reconcileExpired($type, $id);
             if (! $rekeyer->processQueued($db, $type, $id, $actorId, $sk)) {
                 throw new VaultException('not_found');

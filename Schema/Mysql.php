@@ -1,7 +1,7 @@
 <?php
 namespace Kanboard\Plugin\Vault\Schema;
 
-const VERSION = 1;
+const VERSION = 2;
 
 // Binary values are base64 TEXT (entry and group ciphertext LONGTEXT); timestamps are Unix seconds.
 // Ownership references to users(id) cascade; provenance columns (created_by, granted_by, audit actor/target) are SET NULL.
@@ -209,4 +209,35 @@ function version_1($pdo)
         read_cap_per_hour INT NOT NULL,
         FOREIGN KEY(agent_user_id) REFERENCES users(id) ON DELETE CASCADE
     ) ENGINE=InnoDB CHARSET=utf8mb4');
+}
+
+// R26: a principal outlives its Kanboard user row (see Sqlite.php version_2). vault_principals.user_id loses its
+// FK to users; live_user_id references users ON DELETE SET NULL so the purge can find a deleted user's principal;
+// grants and key rows cascade off vault_principals. MySQL names FKs itself, so they are looked up by column.
+function version_2($pdo)
+{
+    $pdo->exec('ALTER TABLE vault_meta ADD COLUMN org_pk TEXT NULL, ADD COLUMN last_purge_at BIGINT NULL');
+
+    drop_user_fk($pdo, 'vault_principals', 'user_id');
+    $pdo->exec('ALTER TABLE vault_principals ADD COLUMN live_user_id INT NULL, ADD COLUMN rotate_requested INT NOT NULL DEFAULT 0, ADD COLUMN notices INT NOT NULL DEFAULT 0');
+    $pdo->exec('UPDATE vault_principals SET live_user_id = user_id');
+    $pdo->exec('ALTER TABLE vault_principals ADD CONSTRAINT vault_principals_live_user_fk FOREIGN KEY(live_user_id) REFERENCES users(id) ON DELETE SET NULL');
+
+    drop_user_fk($pdo, 'vault_grants', 'grantee_id');
+    $pdo->exec('DELETE FROM vault_grants WHERE grantee_id NOT IN (SELECT user_id FROM vault_principals)');
+    $pdo->exec('ALTER TABLE vault_grants ADD CONSTRAINT vault_grants_grantee_fk FOREIGN KEY(grantee_id) REFERENCES vault_principals(user_id) ON DELETE CASCADE');
+
+    drop_user_fk($pdo, 'vault_keys', 'principal_id');
+    $pdo->exec('DELETE FROM vault_keys WHERE principal_id NOT IN (SELECT user_id FROM vault_principals)');
+    $pdo->exec('ALTER TABLE vault_keys ADD CONSTRAINT vault_keys_principal_fk FOREIGN KEY(principal_id) REFERENCES vault_principals(user_id) ON DELETE CASCADE');
+}
+
+function drop_user_fk($pdo, string $table, string $column): void
+{
+    $stmt = $pdo->prepare("SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? AND REFERENCED_TABLE_NAME = 'users'");
+    $stmt->execute([$table, $column]);
+    foreach ($stmt->fetchAll(\PDO::FETCH_COLUMN) as $name) {
+        $pdo->exec('ALTER TABLE '.$table.' DROP FOREIGN KEY `'.str_replace('`', '', (string) $name).'`');
+    }
 }

@@ -100,6 +100,7 @@ class PrincipalModel extends Base
                         'key_gen' => 1,
                         'state' => 'active',
                         'created_at' => $now,
+                        'live_user_id' => $userId,
                     ], null);
                 } catch (PDOException) {
                     // Raced by another enrolment of the same user: the primary key says so.
@@ -142,6 +143,17 @@ class PrincipalModel extends Base
     public static function noticeBucket(int $userId): string
     {
         return 'unlock:notice:'.$userId;
+    }
+
+    // The enrolment rules for a new passphrase (length, not the username, not the login password), for the
+    // recovery flows. not_found for an unknown user.
+    public function validateNewPassphrase(int $userId, #[\SensitiveParameter] string $passphrase): void
+    {
+        $user = (new VaultDb($this->container))->fetchOne('SELECT username, password FROM users WHERE id = ?', [$userId]);
+        if ($user === null) {
+            throw new VaultException('not_found');
+        }
+        $this->checkPassphrase($passphrase, (string) $user['username'], (string) ($user['password'] ?? ''));
     }
 
     private function checkPassphrase(#[\SensitiveParameter] string $passphrase, string $username, #[\SensitiveParameter] string $loginHash): void

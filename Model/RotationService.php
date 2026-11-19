@@ -104,7 +104,9 @@ class RotationService extends Base
             if ($rekeyer->rotation($db, $userId) !== null) {
                 throw new VaultException('rotation_in_progress');
             }
-            $others = $db->fetchOne("SELECT 1 AS x FROM vault_wraps WHERE user_id = ? AND method <> 'passphrase'", [$userId]);
+            // The org wrap and the recovery code are rebuilt without the user (start() re-seals the one and flags the
+            // other as replaced); a hardware key or an agent key must be presented, which this ceremony can't do.
+            $others = $db->fetchOne("SELECT 1 AS x FROM vault_wraps WHERE user_id = ? AND method NOT IN ('passphrase', 'org', 'recovery')", [$userId]);
             if ($others !== null) {
                 throw new VaultException('rotation_needs_factors');
             }
@@ -190,6 +192,7 @@ class RotationService extends Base
                     'phase' => 'sweep',
                     'started_at' => $now,
                 ], null);
+                $oldMethods = array_column($db->fetchAll('SELECT DISTINCT method FROM vault_wraps WHERE user_id = ?', [$userId]), 'method');
                 // The old wraps go in this transaction: from here on the old credentials open nothing.
                 $db->execute('DELETE FROM vault_wraps WHERE user_id = ?', [$userId]);
                 $newGen = $principal['key_gen'] + 1;
@@ -212,7 +215,17 @@ class RotationService extends Base
                     $w = Wraps::wrap($sk2, $f['kek'], $userId, $f['method'], $f['credential_id'], $wrapId);
                     $db->execute('UPDATE vault_wraps SET nonce = ?, wrapped_sk = ? WHERE id = ?', [$w['nonce'], $w['wrapped_sk'], $wrapId]);
                 }
-                $db->execute("UPDATE vault_principals SET state = 'rotating' WHERE user_id = ?", [$userId]);
+                // Rebuilt without the user (spec): an org wrap is re-sealed to the org key, as a pending wrap of sk2, if
+                // the policy still allows one; a recovery code that wasn't replaced by a factor is gone, and the user
+                // is told once. Any queued rotation (a lowered policy) is satisfied by this one.
+                $settings = new VaultSettings($this->container);
+                $orgPk = $settings->orgPublicKey();
+                if (in_array('org', $oldMethods, true) && $orgPk !== null && $settings->get(VaultSettings::POLICY) === VaultSettings::POLICY_CODE_ORG) {
+                    RecoveryService::insertOrgWrap($db, $userId, $sk2, $orgPk, $newGen, 'pending', $now);
+                }
+                $notice = in_array('recovery', $oldMethods, true) && ! in_array('recovery', array_column($factors, 'method'), true)
+                    ? RecoveryService::NOTICE_RECOVERY_RESET : 0;
+                $db->execute("UPDATE vault_principals SET state = 'rotating', rotate_requested = 0, notices = notices | ? WHERE user_id = ?", [$notice, $userId]);
                 $keep = $this->session->stageNextKey($db, $userId, $sk1, $sk2);
                 if ($keep === null) {
                     $db->execute('DELETE FROM vault_sessions WHERE user_id = ?', [$userId]);

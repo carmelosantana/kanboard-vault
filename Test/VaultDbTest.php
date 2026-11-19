@@ -32,8 +32,8 @@ class VaultDbTest extends Base
 {
     private function migrate(): void
     {
-        require_once __DIR__.'/../Schema/Sqlite.php';
-        \Kanboard\Plugin\Vault\Schema\version_1($this->container['db']->getConnection());
+        require_once __DIR__.'/Support/Migrate.php';
+        vault_test_migrate($this->container['db']->getConnection());
     }
 
     private function rows(string $table): int

@@ -4,6 +4,9 @@ namespace Kanboard\Plugin\Vault;
 use Kanboard\Core\Plugin\Base;
 use Kanboard\Core\Security\AuthenticationManager;
 use Kanboard\Core\Session\SessionManager;
+use Kanboard\Plugin\Vault\Console\OrgKeygenCommand;
+use Kanboard\Plugin\Vault\Console\OrgRecoverCommand;
+use Kanboard\Plugin\Vault\Console\PurgeCommand;
 use Kanboard\Plugin\Vault\Subscriber\AuthSubscriber;
 
 class Plugin extends Base
@@ -19,6 +22,10 @@ class Plugin extends Base
         $subscriber = new AuthSubscriber($this->container);
         $this->container['dispatcher']->addListener(AuthenticationManager::EVENT_SUCCESS, [$subscriber, 'onAuthSuccess']);
         $this->container['dispatcher']->addListener(SessionManager::EVENT_DESTROY, [$subscriber, 'onSessionDestroy']);
+
+        $this->cli->add(new OrgKeygenCommand($this->container));
+        $this->cli->add(new OrgRecoverCommand($this->container));
+        $this->cli->add(new PurgeCommand($this->container));
     }
 
     public function isSupported(): bool

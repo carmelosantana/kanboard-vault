@@ -38,8 +38,8 @@ class GrantConcurrencyTest extends Base
         $pdo = VaultTestFileDb::connect($this->path);
         foreach ([$this->alice, $this->bob, $this->carol] as $id) {
             $kp = sodium_crypto_box_keypair();
-            $pdo->prepare("INSERT INTO vault_principals (user_id, kind, public_key, key_gen, state, created_at) VALUES (?, 'human', ?, 1, 'active', ?)")
-                ->execute([$id, base64_encode(sodium_crypto_box_publickey($kp)), self::NOW]);
+            $pdo->prepare("INSERT INTO vault_principals (user_id, kind, public_key, key_gen, state, created_at, live_user_id) VALUES (?, 'human', ?, 1, 'active', ?, ?)")
+                ->execute([$id, base64_encode(sodium_crypto_box_publickey($kp)), self::NOW, $id]);
             $this->sk[$id] = sodium_crypto_box_secretkey($kp);
         }
     }

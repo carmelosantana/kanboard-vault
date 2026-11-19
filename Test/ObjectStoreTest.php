@@ -62,8 +62,8 @@ class ObjectStoreTest extends Base
     private function enrol(int $userId, int $keyGen = 1): string
     {
         $keypair = sodium_crypto_box_keypair();
-        $this->pdo()->prepare("INSERT INTO vault_principals (user_id, kind, public_key, key_gen, state, created_at) VALUES (?, 'human', ?, ?, 'active', ?)")
-            ->execute([$userId, base64_encode(sodium_crypto_box_publickey($keypair)), $keyGen, $this->now]);
+        $this->pdo()->prepare("INSERT INTO vault_principals (user_id, kind, public_key, key_gen, state, created_at, live_user_id) VALUES (?, 'human', ?, ?, 'active', ?, ?)")
+            ->execute([$userId, base64_encode(sodium_crypto_box_publickey($keypair)), $keyGen, $this->now, $userId]);
         return sodium_crypto_box_secretkey($keypair);
     }
 

@@ -26,8 +26,8 @@ class SchemaTest extends Base
 
     private function migrate(): void
     {
-        require_once __DIR__.'/../Schema/Sqlite.php';
-        \Kanboard\Plugin\Vault\Schema\version_1($this->container['db']->getConnection());
+        require_once __DIR__.'/Support/Migrate.php';
+        vault_test_migrate($this->container['db']->getConnection());
     }
 
     public function testCreatesEveryTable(): void
@@ -89,20 +89,60 @@ class SchemaTest extends Base
 
         $src = file_get_contents(__DIR__.'/../Schema/Sqlite.php');
         $this->assertSame(0, preg_match('/\bid INTEGER PRIMARY KEY,/', $src), 'every SQLite surrogate key is AUTOINCREMENT');
-        $this->assertSame(8, substr_count($src, 'id INTEGER PRIMARY KEY AUTOINCREMENT'));
+        $this->assertSame(9, substr_count($src, 'id INTEGER PRIMARY KEY AUTOINCREMENT'), 'v1 tables plus the v2 rebuild of vault_grants');
     }
 
-    public function testCascadeOnUserDelete(): void
+    // R26: deleting a user no longer deletes the principal (the purge must first turn its grants and key rows into
+    // re-keys). Its live_user_id becomes NULL, which is how the purge finds it; wraps and sessions still cascade.
+    // Deleting the principal then takes its grants and key rows with it.
+    public function testUserDeleteOrphansPrincipalAndPrincipalDeleteCascades(): void
     {
         $this->migrate();
         $uid = $this->container['userModel']->create(['username' => 'bob', 'password' => 'secret123']);
         $this->assertSame(2, $uid);
         $db = $this->container['db'];
-        $db->table('vault_principals')->insert(['user_id' => 2] + self::ROWS['vault_principals']);
-        $this->assertSame(1, $db->table('vault_principals')->eq('user_id', 2)->count());
+        $db->table('vault_principals')->insert(['user_id' => 2, 'live_user_id' => 2] + self::ROWS['vault_principals']);
+        $db->table('vault_wraps')->insert(['user_id' => 2] + self::ROWS['vault_wraps']);
+        $db->table('vault_grants')->insert(['grantee_id' => 2] + self::ROWS['vault_grants']);
+        $db->table('vault_keys')->insert(['principal_id' => 2] + self::ROWS['vault_keys']);
 
         $this->assertTrue($this->container['userModel']->remove(2));
-        $this->assertSame(0, $db->table('vault_principals')->eq('user_id', 2)->count());
+        $p = $db->table('vault_principals')->eq('user_id', 2)->findOne();
+        $this->assertNotNull($p, 'the principal outlives the user row');
+        $this->assertNull($p['live_user_id']);
+        $this->assertSame(0, $db->table('vault_wraps')->eq('user_id', 2)->count(), 'wraps still cascade off users');
+        $this->assertSame(1, $db->table('vault_grants')->eq('grantee_id', 2)->count(), 'grants wait for the purge');
+        $this->assertSame(1, $db->table('vault_keys')->eq('principal_id', 2)->count(), 'key rows wait for the purge');
+
+        $this->assertTrue($db->table('vault_principals')->eq('user_id', 2)->remove());
+        $this->assertSame(0, $db->table('vault_grants')->eq('grantee_id', 2)->count());
+        $this->assertSame(0, $db->table('vault_keys')->eq('principal_id', 2)->count());
+    }
+
+    // A v1 install migrates to v2 with its rows, ids and AUTOINCREMENT counters intact; live_user_id is filled in.
+    public function testVersion2MigratesAVersion1Install(): void
+    {
+        require_once __DIR__.'/../Schema/Sqlite.php';
+        $pdo = $this->container['db']->getConnection();
+        \Kanboard\Plugin\Vault\Schema\version_1($pdo);
+        $db = $this->container['db'];
+        $db->table('vault_principals')->insert(self::ROWS['vault_principals']);
+        foreach ([1, 2, 3] as $i) {
+            $db->table('vault_grants')->insert(['subject_id' => $i] + self::ROWS['vault_grants']);
+        }
+        $db->table('vault_grants')->eq('id', 3)->remove();
+        $db->table('vault_keys')->insert(self::ROWS['vault_keys']);
+
+        \Kanboard\Plugin\Vault\Schema\version_2($pdo);
+
+        $this->assertSame('1', (string) $db->table('vault_principals')->eq('user_id', 1)->findOneColumn('live_user_id'));
+        $this->assertSame([1, 2], array_map('intval', $db->table('vault_grants')->asc('id')->findAllByColumn('id')));
+        $this->assertSame(1, $db->table('vault_keys')->count());
+        $db->table('vault_grants')->insert(['subject_id' => 9] + self::ROWS['vault_grants']);
+        $this->assertSame(4, (int) $db->getLastId(), 'the AUTOINCREMENT counter survived the rebuild');
+        $this->assertArrayHasKey('org_pk', $db->table('vault_meta')->findOne());
+        $fks = $pdo->query('PRAGMA foreign_key_list(vault_grants)')->fetchAll(\PDO::FETCH_ASSOC);
+        $this->assertContains(['vault_principals', 'grantee_id', 'CASCADE'], array_map(static fn ($f) => [$f['table'], $f['from'], $f['on_delete']], $fks));
     }
 
     private function users(string ...$names): void
@@ -117,6 +157,7 @@ class SchemaTest extends Base
         $this->migrate();
         $this->users('owner', 'editor'); // ids 2 and 3
         $db = $this->container['db'];
+        $db->table('vault_principals')->insert(['user_id' => 2, 'live_user_id' => 2] + self::ROWS['vault_principals']);
         $db->table('vault_groups')->insert(['owner_id' => 2] + self::ROWS['vault_groups']);
         $db->table('vault_entries')->insert(['owner_id' => 2, 'created_by' => 3] + self::ROWS['vault_entries']);
         $db->table('vault_grants')->insert(['grantee_id' => 2, 'granted_by' => 3] + self::ROWS['vault_grants']);
@@ -148,22 +189,34 @@ class SchemaTest extends Base
         $this->assertNull($rows[0]['target_user_id']);
     }
 
-    public function testAllThreeDialectsDeclareVersion1(): void
+    public function testAllThreeDialectsDeclareVersion2(): void
     {
         $tables = array_merge(['vault_meta'], array_keys(self::ROWS));
         foreach (['Sqlite', 'Mysql', 'Postgres'] as $d) {
             $src = file_get_contents(__DIR__."/../Schema/$d.php");
-            $this->assertStringContainsString('const VERSION = 1;', $src, $d);
+            $this->assertStringContainsString('const VERSION = 2;', $src, $d);
             $this->assertStringContainsString('function version_1($pdo)', $src, $d);
+            $this->assertStringContainsString('function version_2($pdo)', $src, $d);
+            // Comments mention constraints too; count code only.
+            [$v1, $v2] = explode('function version_2($pdo)', preg_replace('#^\s*//.*$#m', '', $src));
             foreach ($tables as $t) {
-                $this->assertStringContainsString("CREATE TABLE IF NOT EXISTS $t (", $src, "$d: $t");
+                $this->assertStringContainsString("CREATE TABLE IF NOT EXISTS $t (", $v1, "$d: $t");
             }
-            $this->assertStringContainsString('INSERT INTO vault_meta', $src, $d);
+            $this->assertStringContainsString('INSERT INTO vault_meta', $v1, $d);
             foreach (['created_by', 'granted_by', 'actor_user_id', 'target_user_id'] as $col) {
-                $this->assertMatchesRegularExpression("/FOREIGN KEY\\($col\\) REFERENCES users\\(id\\) ON DELETE SET NULL/", $src, "$d: $col");
+                $this->assertMatchesRegularExpression("/FOREIGN KEY\\($col\\) REFERENCES users\\(id\\) ON DELETE SET NULL/", $v1, "$d: $col");
             }
-            $this->assertSame(4, substr_count($src, 'ON DELETE SET NULL'), "$d: only provenance columns are SET NULL");
+            $this->assertSame(4, substr_count($v1, 'ON DELETE SET NULL'), "$d v1: only provenance columns are SET NULL");
+            // v2 (R26): live_user_id SET NULL; grants and key rows cascade off vault_principals.
+            $this->assertMatchesRegularExpression('/FOREIGN KEY\\(live_user_id\\) REFERENCES users\\(id\\) ON DELETE SET NULL/', $v2, $d);
+            $this->assertMatchesRegularExpression('/FOREIGN KEY\\(grantee_id\\) REFERENCES vault_principals\\(user_id\\) ON DELETE CASCADE/', $v2, $d);
+            $this->assertMatchesRegularExpression('/FOREIGN KEY\\(principal_id\\) REFERENCES vault_principals\\(user_id\\) ON DELETE CASCADE/', $v2, $d);
+            foreach (['org_pk', 'last_purge_at', 'rotate_requested', 'notices'] as $col) {
+                $this->assertStringContainsString($col, $v2, "$d: $col");
+            }
         }
+        $this->assertStringContainsString('vault_principals_user_id_fkey', file_get_contents(__DIR__.'/../Schema/Postgres.php'));
+        $this->assertStringContainsString("REFERENCED_TABLE_NAME = 'users'", file_get_contents(__DIR__.'/../Schema/Mysql.php'));
         $mysql = file_get_contents(__DIR__.'/../Schema/Mysql.php');
         $this->assertSame(2, substr_count($mysql, 'ciphertext LONGTEXT NOT NULL'), 'entry and group ciphertext are LONGTEXT');
     }

@@ -13,7 +13,9 @@ use RuntimeException;
 // (the owner can't open a DEK they must hold; or, per row of a list, an entitled entry that fails to decrypt),
 // rotation_in_progress (a rotation is already under way), rotation_needs_factors (the principal has wraps other
 // than a passphrase, whose ceremony must present them), rotation_incomplete (finish refused: old-generation key
-// rows remain).
+// rows remain), policy_forbids (the recovery policy doesn't allow a recovery code), recovery_failed (org recovery:
+// a bad org secret, an unknown user, a policy below code_org or no org wrap; one code for all), org_key_exists
+// (vault:org-keygen without --replace).
 class VaultException extends RuntimeException
 {
     public function __construct(private string $errorCode)

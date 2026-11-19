@@ -44,8 +44,8 @@ trait VaultFixture
     protected function setUpVault(): void
     {
         putenv('VAULT_DEV_INSECURE_LOCALHOST'); // the localhost dev exception is off unless a test opts in
-        require_once __DIR__.'/../../Schema/Sqlite.php';
-        \Kanboard\Plugin\Vault\Schema\version_1($this->container['db']->getConnection());
+        require_once __DIR__.'/Migrate.php';
+        vault_test_migrate($this->container['db']->getConnection());
         $this->jar = new VaultRecordingCookieJar();
         $this->slotDir = sys_get_temp_dir().'/vault-t5-'.bin2hex(random_bytes(6)).'/vault';
         $this->alice = (int) $this->container['userModel']->create(['username' => 'alice-the-auditor', 'password' => $this->alicePassword]);
@@ -161,8 +161,8 @@ trait VaultFixture
         $sk = sodium_crypto_box_secretkey($keypair);
         $salt = random_bytes(SODIUM_CRYPTO_PWHASH_SALTBYTES);
         $pdo = $this->pdo();
-        $pdo->prepare('INSERT INTO vault_principals (user_id, kind, public_key, key_gen, state, created_at) VALUES (?, ?, ?, 1, ?, ?)')
-            ->execute([$userId, 'human', base64_encode(sodium_crypto_box_publickey($keypair)), 'active', $this->now]);
+        $pdo->prepare('INSERT INTO vault_principals (user_id, kind, public_key, key_gen, state, created_at, live_user_id) VALUES (?, ?, ?, 1, ?, ?, ?)')
+            ->execute([$userId, 'human', base64_encode(sodium_crypto_box_publickey($keypair)), 'active', $this->now, $userId]);
         $pdo->prepare("INSERT INTO vault_wraps (user_id, method, kdf_salt, kdf_ops, kdf_mem, status, key_gen, nonce, wrapped_sk, crypto_v, created_at) VALUES (?, 'passphrase', ?, ?, ?, 'active', 1, '', '', 1, ?)")
             ->execute([$userId, base64_encode($salt), $ops, $mem, $this->now]);
         $wrapId = (int) $pdo->lastInsertId();

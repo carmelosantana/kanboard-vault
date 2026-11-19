@@ -28,8 +28,9 @@ class UnlockService extends Base
     private RateLimiter $limiter;
     private Closure $clock;
     private RotationService $rotation;
+    private RecoveryService $recovery;
 
-    public function __construct($container, ?ArgonSlots $slots = null, ?callable $argon2 = null, ?VaultSession $session = null, ?RateLimiter $limiter = null, ?callable $clock = null, ?RotationService $rotation = null)
+    public function __construct($container, ?ArgonSlots $slots = null, ?callable $argon2 = null, ?VaultSession $session = null, ?RateLimiter $limiter = null, ?callable $clock = null, ?RotationService $rotation = null, ?RecoveryService $recovery = null)
     {
         parent::__construct($container);
         $this->slots = $slots ?? new ArgonSlots($container);
@@ -38,6 +39,7 @@ class UnlockService extends Base
         $this->clock = $clock !== null ? Closure::fromCallable($clock) : static fn (): int => time();
         $this->limiter = $limiter ?? new RateLimiter($container, null, $this->clock);
         $this->rotation = $rotation ?? new RotationService($container, $this->slots, $this->argon2, $this->clock, $this->session);
+        $this->recovery = $recovery ?? new RecoveryService($container, $this->slots, $this->argon2, $this->clock, $this->rotation);
     }
 
     public static function userBucket(int $userId): string
@@ -83,7 +85,7 @@ class UnlockService extends Base
             $this->recordSuccess($userId, $ipBucket);
             $this->upgradeKdf($wrap, $sk, $passphrase);
             if (empty($wrap['resume'])) {
-                return $this->session->create($userId, $sk);
+                return $this->openSession($userId, $sk, $passphrase);
             }
             return $this->resumeRotation($userId, $sk);
         } finally {
@@ -116,6 +118,33 @@ class UnlockService extends Base
         } finally {
             sodium_memzero($keys['sk1']);
             sodium_memzero($keys['sk2']);
+        }
+    }
+
+    // Recovery-policy housekeeping (RecoveryService::reconcileAtUnlock): it may add the org wrap, or start a queued
+    // rotation, in which case the session holds both keys and the rotation runs to the end as at resume (R33). The
+    // unlock has already succeeded, so a failure here is logged (the class only) and never fails it.
+    private function openSession(int $userId, #[\SensitiveParameter] string $sk, #[\SensitiveParameter] string $passphrase): string
+    {
+        $sk2 = null;
+        try {
+            $sk2 = $this->recovery->reconcileAtUnlock($userId, $sk, $passphrase);
+        } catch (\Throwable $e) {
+            $this->logger->warning('Vault: recovery policy housekeeping for user '.$userId.' failed at unlock ('.get_class($e).')');
+        }
+        if ($sk2 === null) {
+            return $this->session->create($userId, $sk);
+        }
+        try {
+            $sessionKey = $this->session->create($userId, $sk, $sk2);
+            try {
+                $this->rotation->complete($userId, $sk, $sk2);
+            } catch (\Throwable $e) {
+                $this->logger->warning('Vault: key rotation for user '.$userId.' could not complete at unlock and stays pending ('.get_class($e).')');
+            }
+            return $sessionKey;
+        } finally {
+            sodium_memzero($sk2);
         }
     }
 

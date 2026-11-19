@@ -1,7 +1,7 @@
 <?php
 namespace Kanboard\Plugin\Vault\Schema;
 
-const VERSION = 1;
+const VERSION = 2;
 
 // Binary values are base64 TEXT; timestamps are Unix seconds.
 // Ownership references to users(id) cascade; provenance columns (created_by, granted_by, audit actor/target) are SET NULL.
@@ -207,4 +207,25 @@ function version_1($pdo)
         read_cap_per_hour INTEGER NOT NULL,
         FOREIGN KEY(agent_user_id) REFERENCES users(id) ON DELETE CASCADE
     )');
+}
+
+// R26: a principal outlives its Kanboard user row (see Sqlite.php version_2). vault_principals.user_id loses its
+// FK to users; live_user_id references users ON DELETE SET NULL so the purge can find a deleted user's principal;
+// grants and key rows cascade off vault_principals. The v1 FKs carry Postgres's default names.
+function version_2($pdo)
+{
+    $pdo->exec('ALTER TABLE vault_meta ADD COLUMN org_pk TEXT, ADD COLUMN last_purge_at BIGINT');
+
+    $pdo->exec('ALTER TABLE vault_principals DROP CONSTRAINT IF EXISTS vault_principals_user_id_fkey');
+    $pdo->exec('ALTER TABLE vault_principals ADD COLUMN live_user_id INTEGER, ADD COLUMN rotate_requested INTEGER NOT NULL DEFAULT 0, ADD COLUMN notices INTEGER NOT NULL DEFAULT 0');
+    $pdo->exec('UPDATE vault_principals SET live_user_id = user_id');
+    $pdo->exec('ALTER TABLE vault_principals ADD CONSTRAINT vault_principals_live_user_fk FOREIGN KEY(live_user_id) REFERENCES users(id) ON DELETE SET NULL');
+
+    $pdo->exec('ALTER TABLE vault_grants DROP CONSTRAINT IF EXISTS vault_grants_grantee_id_fkey');
+    $pdo->exec('DELETE FROM vault_grants WHERE grantee_id NOT IN (SELECT user_id FROM vault_principals)');
+    $pdo->exec('ALTER TABLE vault_grants ADD CONSTRAINT vault_grants_grantee_fk FOREIGN KEY(grantee_id) REFERENCES vault_principals(user_id) ON DELETE CASCADE');
+
+    $pdo->exec('ALTER TABLE vault_keys DROP CONSTRAINT IF EXISTS vault_keys_principal_id_fkey');
+    $pdo->exec('DELETE FROM vault_keys WHERE principal_id NOT IN (SELECT user_id FROM vault_principals)');
+    $pdo->exec('ALTER TABLE vault_keys ADD CONSTRAINT vault_keys_principal_fk FOREIGN KEY(principal_id) REFERENCES vault_principals(user_id) ON DELETE CASCADE');
 }

@@ -342,10 +342,12 @@ class Rekeyer extends Base
         return $r === null ? null : (int) $r['key_epoch'];
     }
 
+    // A principal whose Kanboard user was deleted (live_user_id NULL, R26) counts as not enrolled, so nothing is
+    // ever sealed to it again; the purge (or the next write) sweeps it into re-keys.
     /** @return array{public_key:string,key_gen:int}|null  public_key as raw bytes */
     public function principal(VaultDb $db, int $userId): ?array
     {
-        $row = $db->fetchOne('SELECT public_key, key_gen FROM vault_principals WHERE user_id = ?', [$userId]);
+        $row = $db->fetchOne('SELECT public_key, key_gen FROM vault_principals WHERE user_id = ? AND live_user_id IS NOT NULL', [$userId]);
         if ($row === null) {
             return null;
         }

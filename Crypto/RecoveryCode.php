@@ -26,7 +26,7 @@ final class RecoveryCode
     /** Returns the 20-byte secret, or throws on a bad character, length or checksum. */
     public static function parse(#[\SensitiveParameter] string $input): string
     {
-        $chars = strtr(strtoupper(preg_replace('/[\s\-_.]+/', '', $input)), ['I' => '1', 'L' => '1', 'O' => '0']);
+        $chars = self::normalize($input);
         if (strlen($chars) !== self::DATA_CHARS + 2) {
             throw new CryptoException('recovery code: wrong length');
         }
@@ -41,7 +41,22 @@ final class RecoveryCode
         return $secret;
     }
 
-    /** The 2 check characters for a 20-byte secret. */
+    /**
+     * Case-folded, separators dropped, I/L→1 and O→0. Shared with OrgSecret.
+     * @internal
+     */
+    public static function normalize(#[\SensitiveParameter] string $input): string
+    {
+        return strtr(strtoupper((string) preg_replace('/[\s\-_.]+/', '', $input)), ['I' => '1', 'L' => '1', 'O' => '0']);
+    }
+
+    /** True when every character is in the Crockford alphabet. @internal */
+    public static function inAlphabet(#[\SensitiveParameter] string $chars): bool
+    {
+        return strspn($chars, self::ALPHABET) === strlen($chars);
+    }
+
+    /** The 2 check characters for a 20-byte secret (OrgSecret uses them for 32 bytes). */
     public static function check(#[\SensitiveParameter] string $secret): string
     {
         $c = self::crc16($secret) >> 6;
@@ -61,7 +76,8 @@ final class RecoveryCode
         return $crc;
     }
 
-    private static function encode(#[\SensitiveParameter] string $bytes): string
+    /** Crockford base32, MSB first; a partial last character is zero-padded. @internal */
+    public static function encode(#[\SensitiveParameter] string $bytes): string
     {
         $out = '';
         $buffer = 0;
@@ -75,10 +91,14 @@ final class RecoveryCode
             }
             $buffer &= (1 << $bits) - 1;
         }
+        if ($bits > 0) {
+            $out .= self::ALPHABET[($buffer << (5 - $bits)) & 31];
+        }
         return $out;
     }
 
-    private static function decode(#[\SensitiveParameter] string $chars): string
+    /** The inverse of encode(); leftover padding bits are dropped (callers check canonical form). @internal */
+    public static function decode(#[\SensitiveParameter] string $chars): string
     {
         $out = '';
         $buffer = 0;

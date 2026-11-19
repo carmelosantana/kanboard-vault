@@ -29,6 +29,26 @@ class SodiumGateTest extends Base
         $this->assertSame([], $this->container['hook']->getListeners('template:layout:top'));
     }
 
+    // The console commands exist only when Vault is active (spec: vault:org-keygen, vault:org-recover, vault:purge).
+    public function testConsoleCommandsRegisteredOnlyWithSodium(): void
+    {
+        $names = ['vault:org-keygen', 'vault:org-recover', 'vault:purge'];
+        $without = new class($this->container) extends Plugin {
+            public function isSupported(): bool { return false; }
+        };
+        $without->initialize();
+        foreach ($names as $n) {
+            $this->assertFalse($this->container['cli']->has($n), $n);
+        }
+        $with = new class($this->container) extends Plugin {
+            public function isSupported(): bool { return true; }
+        };
+        $with->initialize();
+        foreach ($names as $n) {
+            $this->assertTrue($this->container['cli']->has($n), $n);
+        }
+    }
+
     public function testNoticeRendersForAdminsOnly(): void
     {
         $src = file_get_contents(__DIR__.'/../Template/layout/sodium_notice.php');

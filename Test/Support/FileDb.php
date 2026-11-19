@@ -6,11 +6,11 @@ class VaultTestFileDb
 {
     public static function create(): string
     {
-        require_once __DIR__.'/../../Schema/Sqlite.php';
+        require_once __DIR__.'/Migrate.php';
         $path = tempnam(sys_get_temp_dir(), 'vault-test-').'.sqlite';
         $pdo = self::connect($path);
         $pdo->exec('PRAGMA journal_mode=wal'); // Kanboard's default (DB_WAL_MODE).
-        \Kanboard\Plugin\Vault\Schema\version_1($pdo);
+        vault_test_migrate($pdo);
         return $path;
     }
 
