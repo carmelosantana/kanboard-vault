@@ -419,7 +419,10 @@ class ObjectStore extends Base
             $db = $this->vdb();
             $rekeyer = $this->rekeyer();
             // R26: a deleted Kanboard user's principal is swept into re-keys first, as the purge would.
-            (new Purger($this->container))->sweepOrphans($this->now());
+            $purger = new Purger($this->container);
+            $purger->sweepOrphans($this->now());
+            // T7: a disabled agent's grants go the same way first, so nothing new is written under a DEK it holds.
+            $purger->sweepDisabledAgents($this->now());
             $this->grants()->reconcileExpired($type, $id);
             if (! $rekeyer->processQueued($db, $type, $id, $actorId, $sk)) {
                 throw new VaultException('not_found');

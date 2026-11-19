@@ -14,6 +14,7 @@ use Kanboard\Core\Base;
 //                      holds a key row for is queued at its current epoch, and then the principal is deleted,
 //                      taking what's left with it. The write barrier covers the queued objects until a holder
 //                      re-keys them. ObjectStore::beforeWrite runs the same sweep, so a write can't beat the purge.
+//   disabled agents    T7: every grant to a disabled agent, through GrantModel::removeSource (also before writes).
 //   expired grants     the removal procedure (GrantModel::removeSource), never a bare DELETE.
 //   orphaned rows      R8(b): grants (through removeSource), key rows and re-key queue rows whose object is gone.
 //   sessions, challenges, share reservations and shares past their expiry (each share expiry is audited for its
@@ -56,6 +57,7 @@ class Purger extends Base
         }
         $counts = ['ran' => true];
         $counts['orphan_principals'] = $this->sweepOrphans($now);
+        $counts['disabled_agents'] = $this->sweepDisabledAgents($now);
         $counts['policy_wraps'] = (new RecoveryService($this->container))->pruneForPolicy();
         $counts['expired_grants'] = $this->expiredGrants($now);
         $counts['orphan_rows'] = $this->orphanRows($now);
@@ -93,6 +95,25 @@ class Purger extends Base
                 // Explicit as well as cascaded: the key rows must not outlive the principal even without FK enforcement.
                 $db->execute('DELETE FROM vault_keys WHERE principal_id = ?', [$principalId]);
                 $db->execute('DELETE FROM vault_principals WHERE user_id = ? AND live_user_id IS NULL', [$principalId]);
+            }
+            return count($ids);
+        });
+    }
+
+    // T7 carry / spec "Removals while nobody is unlocked": a disabled agent loses every grant source it holds, each
+    // through GrantModel::removeSource (its key rows go, every covered object is queued, a revoke is audited). What it
+    // owns, its Agent-created group, stays with the owner's Edit grant. Runs in the caller's exclusive transaction
+    // (ObjectStore::beforeWrite) or its own. Returns how many grants were removed.
+    public function sweepDisabledAgents(int $now): int
+    {
+        return $this->lock()->exclusive(function () use ($now): int {
+            $ids = array_map('intval', array_column($this->vdb()->fetchAll(
+                "SELECT g.id FROM vault_grants g JOIN vault_principals p ON p.user_id = g.grantee_id JOIN users u ON u.id = p.live_user_id
+                 WHERE p.kind = 'agent' AND u.is_active <> 1 ORDER BY g.id"
+            ), 'id'));
+            $grants = new GrantModel($this->container, static fn (): int => $now);
+            foreach ($ids as $id) {
+                $grants->removeSource($id);
             }
             return count($ids);
         });

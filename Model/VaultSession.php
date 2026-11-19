@@ -160,7 +160,8 @@ class VaultSession extends Base
             $this->lock($rowUser, $sidHash);
             return null;
         }
-        if (! $this->userIsActive($userId)) {
+        // T14: a roster agent has no UI vault (a session from before its adoption dies here).
+        if (! $this->userIsActive($userId) || AgentRoster::of($this->container)->isAgent($userId)) {
             $this->lock($userId);
             return null;
         }

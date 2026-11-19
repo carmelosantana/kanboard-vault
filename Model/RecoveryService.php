@@ -497,7 +497,9 @@ class RecoveryService extends Base
         }
         $p = $this->livePrincipal($db, $userId);
         $active = $db->fetchOne('SELECT is_active FROM users WHERE id = ?', [$userId]);
-        if ($p === null || $p['kind'] !== 'human' || $p['state'] !== 'active' || $active === null || (int) $active['is_active'] !== 1) {
+        // T14: a roster agent never recovers a human vault (agent enrolment converts a principal left from before).
+        if ($p === null || $p['kind'] !== 'human' || $p['state'] !== 'active' || $active === null || (int) $active['is_active'] !== 1
+            || AgentRoster::of($this->container)->isAgent($userId)) {
             return null;
         }
         $w = $db->fetchOne(

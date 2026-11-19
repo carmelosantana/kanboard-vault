@@ -11,6 +11,8 @@ class VaultTestFileDb
         $pdo = self::connect($path);
         $pdo->exec('PRAGMA journal_mode=wal'); // Kanboard's default (DB_WAL_MODE).
         vault_test_migrate($pdo);
+        // The users columns Vault reads (the unit-test container has Kanboard's own table).
+        $pdo->exec('CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, is_active INTEGER NOT NULL DEFAULT 1, api_access_token TEXT, email TEXT, name TEXT, role TEXT)');
         return $path;
     }
 

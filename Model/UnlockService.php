@@ -186,10 +186,12 @@ class UnlockService extends Base
         }
         $db = new VaultDb($this->container);
         $principal = $db->fetchOne(
-            'SELECT p.public_key, p.key_gen FROM vault_principals p JOIN users u ON u.id = p.user_id WHERE p.user_id = ? AND u.is_active = 1',
+            'SELECT p.kind, p.public_key, p.key_gen FROM vault_principals p JOIN users u ON u.id = p.user_id WHERE p.user_id = ? AND u.is_active = 1',
             [$userId]
         );
-        if ($principal === null) {
+        // T14: an agent never unlocks as a human, not even with a human principal left from before its adoption (agent
+        // enrolment converts that one).
+        if ($principal === null || $principal['kind'] !== 'human' || AgentRoster::of($this->container)->isAgent($userId)) {
             return null;
         }
         $rotation = $db->fetchOne('SELECT new_pk FROM vault_rotations WHERE user_id = ?', [$userId]);

@@ -16,10 +16,26 @@ class AgentRoster extends Base
 {
     private const AGENT_TABLE = '\Kanboard\Plugin\Agents\Model\AgentTable';
 
+    private string $rosterClass;
+
+    // $rosterClass: the class whose presence means Agents is installed (tests name a missing one).
+    public function __construct($container, string $rosterClass = self::AGENT_TABLE)
+    {
+        parent::__construct($container);
+        $this->rosterClass = $rosterClass;
+    }
+
     // The container's roster ('vaultAgentRoster', which tests may set) or a new one.
     public static function of($container): self
     {
         return isset($container['vaultAgentRoster']) ? $container['vaultAgentRoster'] : new self($container);
+    }
+
+    // Is the Agents plugin installed (the spec's class_exists guard)? Without it the agent API refuses with
+    // agents_unavailable and nobody is an agent.
+    public function available(): bool
+    {
+        return class_exists($this->rosterClass);
     }
 
     public function isAgent(int $userId): bool
@@ -42,7 +58,7 @@ class AgentRoster extends Base
     /** @return list<array<string,mixed>> */
     private function query(string $sql, array $params): array
     {
-        if (! class_exists(self::AGENT_TABLE)) {
+        if (! $this->available()) {
             return [];
         }
         try {

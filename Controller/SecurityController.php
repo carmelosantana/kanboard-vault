@@ -110,13 +110,6 @@ class SecurityController extends BaseVaultController
         return ['SecurityController', 'index'];
     }
 
-    private function requireTransport(): void
-    {
-        if (! $this->vaultSession()->transportAllowed()) {
-            throw new VaultException('https_required');
-        }
-    }
-
     private function ceremonyDone(string $result, string $ceremony): void
     {
         $policy = (string) (new VaultSettings($this->container))->get(VaultSettings::POLICY);

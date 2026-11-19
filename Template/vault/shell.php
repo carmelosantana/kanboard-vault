@@ -5,6 +5,9 @@
         <li><button type="button" class="btn" data-vault-action="new-entry"><i class="fa fa-plus" aria-hidden="true"></i> <?= t('Entry') ?></button></li>
         <li><button type="button" class="btn" data-vault-action="new-group"><i class="fa fa-folder" aria-hidden="true"></i> <?= t('Group') ?></button></li>
         <li><a class="btn" href="<?= $this->url->href('SecurityController', 'index', ['plugin' => 'Vault']) ?>" data-vault-link="security"><i class="fa fa-shield" aria-hidden="true"></i> <?= t('Security') ?></a></li>
+        <?php if (! empty($agents_available)): ?>
+        <li><a class="btn" href="<?= $this->url->href('VaultAgentController', 'index', ['plugin' => 'Vault']) ?>" data-vault-link="agents"><i class="fa fa-android" aria-hidden="true"></i> <?= t('Agents') ?></a></li>
+        <?php endif ?>
         <li><button type="button" class="btn" data-vault-action="lock"><i class="fa fa-lock" aria-hidden="true"></i> <?= t('Lock') ?></button></li>
     </ul>
 </div>

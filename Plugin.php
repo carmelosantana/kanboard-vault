@@ -4,6 +4,7 @@ namespace Kanboard\Plugin\Vault;
 use Kanboard\Core\Plugin\Base;
 use Kanboard\Core\Security\AuthenticationManager;
 use Kanboard\Core\Session\SessionManager;
+use Kanboard\Plugin\Vault\Api\VaultAgentProcedure;
 use Kanboard\Plugin\Vault\Console\OrgKeygenCommand;
 use Kanboard\Plugin\Vault\Console\OrgRecoverCommand;
 use Kanboard\Plugin\Vault\Console\PurgeCommand;
@@ -59,12 +60,24 @@ class Plugin extends Base
         $this->route->addRoute('vault/passphrase', 'SecurityController', 'passphrase', 'Vault');
         $this->route->addRoute('vault/rotate', 'SecurityController', 'rotate', 'Vault');
         $this->route->addRoute('vault/recovery-code', 'SecurityController', 'recoveryCode', 'Vault');
+        // The owner's agents (spec: Agents → Enrolment): enable vault access, re-enrol, the read cap.
+        $this->route->addRoute('vault/agents', 'VaultAgentController', 'index', 'Vault');
+        foreach (['enrol', 'reenrol', 'cap'] as $action) {
+            $this->route->addRoute('vault/agents/'.$action, 'VaultAgentController', $action, 'Vault');
+        }
         // Settings → Vault (admins only; SettingsController checks): the settings and the deployment checks.
         $this->route->addRoute('vault/settings', 'SettingsController', 'index', 'Vault');
         $this->route->addRoute('vault/settings/save', 'SettingsController', 'save', 'Vault');
         $this->hook->on('template:config:sidebar', ['template' => 'Vault:config/sidebar']);
         $this->hook->on('template:header:dropdown', ['template' => 'Vault:header/dropdown']);
         $this->hook->on('template:dashboard:sidebar', ['template' => 'Vault:dashboard/sidebar']);
+
+        // The agent API (spec: Agents → Methods). withObject, as Agents does: core wins any name clash, and the API ACL
+        // keys on the short class name, hence the Vault prefix. Registered even without Agents, so it can answer
+        // agents_unavailable. Kanboard always has its JSON-RPC server; only a bare test container lacks one.
+        if (isset($this->container['api'])) {
+            $this->api->getProcedureHandler()->withObject(new VaultAgentProcedure($this->container));
+        }
 
         $subscriber = new AuthSubscriber($this->container);
         $this->container['dispatcher']->addListener(AuthenticationManager::EVENT_SUCCESS, [$subscriber, 'onAuthSuccess']);

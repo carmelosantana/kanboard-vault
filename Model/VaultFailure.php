@@ -37,6 +37,8 @@ final class VaultFailure
         'rotation_incomplete' => [409, 'rotation_incomplete'],
         'policy_forbids' => [403, 'policy_forbids'],
         'agent_read_only' => [422, 'agent_read_only'],
+        'owner_not_enrolled' => [409, 'owner_not_enrolled'],
+        'agents_unavailable' => [409, 'agents_unavailable'],
     ];
 
     /** @return array{0:int,1:string} [status, reason] */

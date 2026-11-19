@@ -11,6 +11,7 @@ use Kanboard\Plugin\Vault\Model\Housekeeping;
 use Kanboard\Plugin\Vault\Model\PrincipalModel;
 use Kanboard\Plugin\Vault\Model\RecoveryService;
 use Kanboard\Plugin\Vault\Model\RotationService;
+use Kanboard\Plugin\Vault\Model\VaultException;
 use Kanboard\Plugin\Vault\Model\VaultFailure;
 use Kanboard\Plugin\Vault\Model\VaultSession;
 use Kanboard\Plugin\Vault\Model\VaultSettings;
@@ -66,6 +67,15 @@ abstract class BaseVaultController extends BaseController
             $this->redirectTo(['VaultController', 'index'], []);
         }
         throw new ResponseSent();
+    }
+
+    // Requests that create or return a long-lived secret (a passphrase, a recovery code, an agent's vault key) need HTTPS,
+    // or the opted-in dev localhost, as unlock does.
+    protected function requireTransport(): void
+    {
+        if (! $this->vaultSession()->transportAllowed()) {
+            throw new VaultException('https_required');
+        }
     }
 
     // Admin settings are for Kanboard app admins only. Anyone else gets the generic forbidden answer, hardened.
@@ -162,6 +172,7 @@ abstract class BaseVaultController extends BaseController
             $endpoints[$action] = $url($action, 'ShareGrantController');
         }
         $endpoints += ['passphrase' => $url('passphrase', 'SecurityController'), 'rotate' => $url('rotate', 'SecurityController'), 'recovery_code' => $url('recoveryCode', 'SecurityController')];
+        $endpoints += ['agent_enrol' => $url('enrol', 'VaultAgentController'), 'agent_reenrol' => $url('reenrol', 'VaultAgentController'), 'agent_cap' => $url('cap', 'VaultAgentController')];
         return [
             'csrf' => $this->token->getReusableCSRFToken(),
             'endpoints' => $endpoints,
@@ -211,6 +222,11 @@ abstract class BaseVaultController extends BaseController
             'confirm_new_code' => t('This replaces your current recovery code, if you have one. Continue?'),
             'code_group_mismatch' => t('That isn\'t group 3 of the code. Check what you wrote down.'),
             'code_saved' => t('Recovery code saved. Keep it somewhere safe and offline.'),
+            'owner_not_enrolled' => t('Set up your own vault first.'),
+            'agents_unavailable' => t('The Agents plugin is not installed.'),
+            'confirm_reenrol' => t('Re-enrol this agent? Its current vault key stops working, and what other people shared with it is unshared.'),
+            'key_shown' => t('Copy this key into the agent\'s settings now. It won\'t be shown again.'),
+            'key_cleared' => t('The key is cleared from this page.'),
         ];
     }
 

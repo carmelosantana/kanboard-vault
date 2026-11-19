@@ -23,7 +23,7 @@ use Throwable;
 //
 // A notice is best-effort and never fails the action that triggered it: callers send it after their change has
 // committed, and every public method returns false (logging the exception class only) instead of throwing. The
-// share-reveal and agent notices are hooks for T16/T18.
+// share-reveal notice is a hook for T18.
 class Notifier extends Base
 {
     // The container's notifier ('vaultNotifier', registered by the plugin) or a new one.
@@ -107,6 +107,13 @@ class Notifier extends Base
         $owner = AgentRoster::of($this->container)->ownerOf($agentId);
         return $owner !== null && $this->notice($owner, t('Vault: an agent hit its read limit'),
             t('Your agent %s reached its hourly limit of secret reads. See your Vault activity.', $this->username($agentId)));
+    }
+
+    // To a user whose share with an agent was removed when the agent was re-enrolled (spec: Re-enrolment step 4).
+    public function agentRekeyed(int $userId, int $agentId): bool
+    {
+        return $this->notice($userId, t('Vault: an agent was re-keyed; re-share?'),
+            t('The agent %s was given a new vault key, so what you shared with it was unshared. Share it again if the agent still needs it.', $this->username($agentId)));
     }
 
     private function notice(int $userId, string $subject, string $text): bool

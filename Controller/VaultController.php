@@ -1,6 +1,7 @@
 <?php
 namespace Kanboard\Plugin\Vault\Controller;
 
+use Kanboard\Plugin\Vault\Model\AgentRoster;
 use Kanboard\Plugin\Vault\Model\RecoveryService;
 use Kanboard\Plugin\Vault\Model\UnlockService;
 use Kanboard\Plugin\Vault\Model\VaultException;
@@ -46,6 +47,7 @@ class VaultController extends BaseVaultController
                     $template = 'shell';
                     $params['notices'] = (new RecoveryService($this->container))->takeNotices($userId);
                     $params['failed_attempts'] = $this->principals()->failedAttemptsSinceLastUnlock($userId);
+                    $params['agents_available'] = AgentRoster::of($this->container)->available();
                 }
             }
             $this->respond()->html($this->helper->layout->app('Vault:vault/'.$template, $params));
