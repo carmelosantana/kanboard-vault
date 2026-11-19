@@ -194,7 +194,7 @@ class SchemaTest extends Base
         $tables = array_merge(['vault_meta'], array_keys(self::ROWS));
         foreach (['Sqlite', 'Mysql', 'Postgres'] as $d) {
             $src = file_get_contents(__DIR__."/../Schema/$d.php");
-            $this->assertStringContainsString('const VERSION = 3;', $src, $d);
+            $this->assertStringContainsString('const VERSION = 4;', $src, $d);
             $this->assertStringContainsString('function version_1($pdo)', $src, $d);
             $this->assertStringContainsString('function version_2($pdo)', $src, $d);
             // Comments mention constraints too; count code only.
@@ -276,5 +276,28 @@ class SchemaTest extends Base
                 $this->assertStringNotContainsString('IF EXISTS', $v3, "$d drops the old CHECK loudly");
             }
         }
+    }
+
+    // v4 (T17): a reservation keeps the share expiry it was made with (that expiry is in the share's AD, so finalize
+    // must use exactly it); vault_shares carries crypto_v = 1 like every encrypted row; on MySQL the share ciphertext
+    // is MEDIUMTEXT, because a 64 KB payload in base64 is larger than TEXT's 64 KiB. Kills: a dialect missing a change,
+    // the MySQL column left TEXT (a 64 KB share would fail or be truncated there).
+    public function testVersion4ShareColumns(): void
+    {
+        require_once __DIR__.'/Support/Migrate.php';
+        $pdo = $this->container['db']->getConnection();
+        vault_test_migrate($pdo);
+        $res = array_column($pdo->query('PRAGMA table_info(vault_share_reservations)')->fetchAll(\PDO::FETCH_ASSOC), null, 'name');
+        $this->assertSame(['0', 1], [(string) $res['share_expires_at']['dflt_value'], (int) $res['share_expires_at']['notnull']]);
+        $shares = array_column($pdo->query('PRAGMA table_info(vault_shares)')->fetchAll(\PDO::FETCH_ASSOC), null, 'name');
+        $this->assertSame(['1', 1], [(string) $shares['crypto_v']['dflt_value'], (int) $shares['crypto_v']['notnull']]);
+        foreach (['Sqlite', 'Mysql', 'Postgres'] as $d) {
+            $src = preg_replace('#^\s*//.*$#m', '', file_get_contents(__DIR__."/../Schema/$d.php"));
+            $v4 = explode('function version_4($pdo)', $src)[1] ?? '';
+            $this->assertMatchesRegularExpression('/ALTER TABLE vault_share_reservations ADD COLUMN share_expires_at \w+ NOT NULL DEFAULT 0/', $v4, $d);
+            $this->assertMatchesRegularExpression('/ALTER TABLE vault_shares ADD COLUMN crypto_v \w+ NOT NULL DEFAULT 1/', $v4, $d);
+        }
+        $mysql = explode('function version_4($pdo)', file_get_contents(__DIR__.'/../Schema/Mysql.php'))[1];
+        $this->assertStringContainsString('ALTER TABLE vault_shares MODIFY ciphertext MEDIUMTEXT NOT NULL', $mysql);
     }
 }

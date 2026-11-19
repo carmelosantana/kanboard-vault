@@ -172,6 +172,11 @@ abstract class BaseVaultController extends BaseController
             $endpoints[$action] = $url($action, 'ShareGrantController');
         }
         $endpoints += ['passphrase' => $url('passphrase', 'SecurityController'), 'rotate' => $url('rotate', 'SecurityController'), 'recovery_code' => $url('recoveryCode', 'SecurityController')];
+        foreach (['reserve', 'create', 'revoke', 'mine'] as $action) {
+            $endpoints['share_'.$action] = $url($action, 'VaultShareController');
+        }
+        // The one-time link's base: vault-onetime.js (T18) appends &id=<share_id>#<fragment> to an absolute copy.
+        $endpoints['share_show'] = $url('show', 'VaultShareController');
         $endpoints += ['agent_enrol' => $url('enrol', 'VaultAgentController'), 'agent_reenrol' => $url('reenrol', 'VaultAgentController'), 'agent_cap' => $url('cap', 'VaultAgentController')];
         return [
             'csrf' => $this->token->getReusableCSRFToken(),

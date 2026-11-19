@@ -326,3 +326,33 @@
 .vault-readonly dt {
     font-weight: 600;
 }
+
+/* The one-time share page: a standalone page outside Kanboard's layout (Template/share/show.php). */
+.vault-reveal-page {
+    margin: 0;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--background, #f6f7f9);
+    color: var(--foreground, #1f2328);
+}
+
+.vault-reveal {
+    max-width: 40rem;
+    margin: 3rem auto;
+    padding: 1.5rem;
+    background: var(--card, #fff);
+    border: 1px solid var(--border, #d0d7de);
+    border-radius: 8px;
+}
+
+.vault-reveal-form label,
+.vault-reveal-form input,
+.vault-reveal-result textarea {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    margin-bottom: 0.75rem;
+}
+
+.vault-reveal-error {
+    color: #b42318;
+}

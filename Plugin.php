@@ -3,6 +3,7 @@ namespace Kanboard\Plugin\Vault;
 
 use Kanboard\Core\Plugin\Base;
 use Kanboard\Core\Security\AuthenticationManager;
+use Kanboard\Core\Security\Role;
 use Kanboard\Core\Session\SessionManager;
 use Kanboard\Plugin\Vault\Api\VaultAgentProcedure;
 use Kanboard\Plugin\Vault\Console\OrgKeygenCommand;
@@ -16,6 +17,7 @@ use Kanboard\Plugin\Vault\Model\ObjectStore;
 use Kanboard\Plugin\Vault\Model\PrincipalModel;
 use Kanboard\Plugin\Vault\Model\RecoveryService;
 use Kanboard\Plugin\Vault\Model\RotationService;
+use Kanboard\Plugin\Vault\Model\ShareModel;
 use Kanboard\Plugin\Vault\Model\UnlockService;
 use Kanboard\Plugin\Vault\Model\VaultSession;
 use Kanboard\Plugin\Vault\Subscriber\AuthSubscriber;
@@ -42,6 +44,7 @@ class Plugin extends Base
         $this->container['vaultGrants'] = static fn ($c): GrantModel => new GrantModel($c);
         $this->container['vaultRotation'] = static fn ($c): RotationService => new RotationService($c);
         $this->container['vaultRecovery'] = static fn ($c): RecoveryService => new RecoveryService($c);
+        $this->container['vaultShares'] = static fn ($c): ShareModel => new ShareModel($c);
 
         // The page and its POST endpoints (spec: UI). No template:layout:js or :css: Vault's own templates load
         // vault.js and vault.css, so nothing of Vault's runs on other pages.
@@ -64,6 +67,13 @@ class Plugin extends Base
         $this->route->addRoute('vault/agents', 'VaultAgentController', 'index', 'Vault');
         foreach (['enrol', 'reenrol', 'cap'] as $action) {
             $this->route->addRoute('vault/agents/'.$action, 'VaultAgentController', $action, 'Vault');
+        }
+        // One-time shares (spec: One-time shares). Only the page and Reveal are open to anyone with the link; they have
+        // no route, so the link keeps the spec's ?controller=VaultShareController&action=show&plugin=Vault&id= form.
+        // Creating, listing and revoking links need a login (the default APP_USER) and an unlocked vault.
+        $this->applicationAccessMap->add('VaultShareController', ['show', 'reveal'], Role::APP_PUBLIC);
+        foreach (['reserve', 'create', 'revoke', 'mine'] as $action) {
+            $this->route->addRoute('vault/share/'.$action, 'VaultShareController', $action, 'Vault');
         }
         // Settings → Vault (admins only; SettingsController checks): the settings and the deployment checks.
         $this->route->addRoute('vault/settings', 'SettingsController', 'index', 'Vault');

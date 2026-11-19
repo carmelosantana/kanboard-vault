@@ -1,7 +1,7 @@
 <?php
 namespace Kanboard\Plugin\Vault\Schema;
 
-const VERSION = 3;
+const VERSION = 4;
 
 // Binary values are base64 TEXT; timestamps are Unix seconds.
 // Ownership references to users(id) cascade; provenance columns (created_by, granted_by, audit actor/target) are SET NULL.
@@ -238,4 +238,12 @@ function version_3($pdo)
     $pdo->exec("ALTER TABLE vault_audit ADD CONSTRAINT vault_audit_actor_kind_check CHECK (actor_kind IN ('human', 'agent', 'public', 'cli', 'system'))");
 
     $pdo->exec('ALTER TABLE vault_rotations ADD COLUMN sweep_type VARCHAR(16), ADD COLUMN sweep_id INTEGER');
+}
+
+// T17: a reservation keeps the share expiry it was made with, because that expiry is in the share's AD and finalize
+// must store exactly it; vault_shares carries crypto_v = 1 like every encrypted row (its AD binds the same 1).
+function version_4($pdo)
+{
+    $pdo->exec('ALTER TABLE vault_share_reservations ADD COLUMN share_expires_at BIGINT NOT NULL DEFAULT 0');
+    $pdo->exec('ALTER TABLE vault_shares ADD COLUMN crypto_v INTEGER NOT NULL DEFAULT 1');
 }

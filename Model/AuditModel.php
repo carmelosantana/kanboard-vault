@@ -70,9 +70,10 @@ class AuditModel extends Base
     private const TARGET_OWNS = ['share_reveal', 'share_expire', 'rate_limited'];
     public const PAGE_LIMIT = 200;
 
-    private const IP_TRUNC = '~^(?:\d{1,3}\.\d{1,3}\.\d{1,3}\.0/24|[0-9a-f:]{2,39}/48)$~D';
-    private const SHARE_HASH = '/^[A-Za-z0-9_-]{16,128}$/D';
-    private const UA_MAX = 64;
+    // T10 carry, pinned to T17's formats: share_hash is ShareModel::idHash (64 lowercase hex), so a raw share id or
+    // burn capability (32 hex) or a share key can never be recorded; ip_trunc is exactly ClientIp::truncate's output;
+    // ua_family exactly UaFamily's.
+    private const SHARE_HASH = ShareModel::ID_HASH_PATTERN;
 
     private ?string $actorKind;
     private ?string $via;
@@ -199,7 +200,7 @@ class AuditModel extends Base
             if ($value !== null && ! in_array($column, self::ALLOW[$action], true)) {
                 throw new LogicException('Vault audit: '.$action.' may not fill '.$column);
             }
-            self::check($column, $value);
+            $this->check($column, $value);
             $row[$column] = $value;
         }
         $row['via'] = $context['via'] ?? $this->via ?? $this->processVia();
@@ -213,7 +214,7 @@ class AuditModel extends Base
         return $row;
     }
 
-    private static function check(string $column, mixed $value): void
+    private function check(string $column, mixed $value): void
     {
         if ($value === null) {
             return;
@@ -222,9 +223,9 @@ class AuditModel extends Base
             'actor_user_id', 'object_id', 'target_user_id' => is_int($value) && $value > 0,
             'count' => is_int($value) && $value >= 0,
             'object_type' => in_array($value, ObjectStore::TYPES, true),
-            'ip_trunc' => is_string($value) && preg_match(self::IP_TRUNC, $value) === 1,
+            'ip_trunc' => is_string($value) && $value !== '' && (new ClientIp($this->container))->truncate(explode('/', $value)[0]) === $value,
             'share_hash' => is_string($value) && preg_match(self::SHARE_HASH, $value) === 1,
-            'ua_family' => is_string($value) && $value !== '' && strlen($value) <= self::UA_MAX && preg_match('/^[\x20-\x7e]+$/D', $value) === 1,
+            'ua_family' => is_string($value) && UaFamily::isFamily($value),
         };
         if (! $ok) {
             throw new LogicException('Vault audit: invalid value for '.$column);

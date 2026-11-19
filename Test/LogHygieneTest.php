@@ -8,6 +8,7 @@ use Kanboard\Plugin\Vault\Crypto\RecoveryCode;
 use Kanboard\Plugin\Vault\Model\PrincipalModel;
 use Kanboard\Plugin\Vault\Model\Purger;
 use Kanboard\Plugin\Vault\Model\RotationService;
+use Kanboard\Plugin\Vault\Model\ShareModel;
 use Kanboard\Plugin\Vault\Model\VaultSettings;
 use Kanboard\Plugin\Vault\Test\Support\Fixtures;
 use KanboardTests\units\Base;
@@ -87,7 +88,7 @@ class LogHygieneTest extends Base
 
         $audit = json_encode($this->auditRows(), JSON_THROW_ON_ERROR);
         $this->assertGreaterThan(20, count($this->auditRows()), 'the run audited its actions');
-        $this->assertCount(2, $this->mails, 'the failure notice and the org recovery notice');
+        $this->assertCount(3, $this->mails, 'the failure notice, the share-reveal notice and the org recovery notice');
         $haystacks = ['Kanboard log' => $kb, 'PHP error log' => $php, 'vault_audit' => $audit, 'emails' => implode("\n", $this->mails)];
         $needles = array_merge(Fixtures::SECRETS, $this->generated);
         $this->assertGreaterThan(count(Fixtures::SECRETS), count($needles));
@@ -120,6 +121,22 @@ class LogHygieneTest extends Base
         $sk = $this->unlockAs($this->alice, Fixtures::PASSPHRASE, 'sid-alice');
         $this->generated[] = $sk;
         $this->assertGreaterThan(0, (new PrincipalModel($this->container))->failedAttemptsSinceLastUnlock($this->alice));
+
+        // A one-time share (T17): created with a label, a wrong b, the reveal (which emails the creator, R19), the
+        // list. Its id, b (hex and raw) and label are needles too.
+        $shares = new ShareModel($this->container, $this->clock());
+        $burn = bin2hex(random_bytes(16));
+        $label = 'VaultFixtureSecret-sharelabel-'.bin2hex(random_bytes(4));
+        $sidHash = (string) $this->session()->sidHash();
+        $reserved = $shares->reserve($this->alice, $sidHash, '1d');
+        array_push($this->generated, $burn, hex2bin($burn), $label, $reserved['share_id']);
+        $shares->finalize($this->alice, $sidHash, [
+            'share_id' => $reserved['share_id'], 'ciphertext' => base64_encode(random_bytes(64)), 'iv' => base64_encode(random_bytes(12)),
+            'salt' => '', 'has_passphrase' => '0', 'burn_hash' => ShareModel::burnHash($burn), 'label' => $label,
+        ]);
+        $this->assertNull($shares->reveal($reserved['share_id'], bin2hex(random_bytes(16)), self::IP));
+        $this->assertNotNull($shares->reveal($reserved['share_id'], $burn, self::IP, 'Firefox 140 / Linux'));
+        $shares->listMine($this->alice, $sk);
 
         // Objects, grants, moves, revokes, re-keys.
         $s = $this->store();

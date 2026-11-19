@@ -26,6 +26,15 @@ final class UaFamily
         'Linux' => '~\bLinux\b~',
     ];
 
+    // Exactly a value fromUserAgent can return: a fixed browser name with a major version, or Other; a fixed OS name or
+    // Other. The audit refuses anything else (T10 carry), so no raw User-Agent text can reach vault_audit.
+    public static function isFamily(string $value): bool
+    {
+        $browsers = implode('|', array_keys(self::BROWSERS));
+        $systems = implode('|', array_keys(self::SYSTEMS));
+        return preg_match('~^(?:(?:'.$browsers.') \d{1,4}|Other) / (?:'.$systems.'|Other)$~D', $value) === 1;
+    }
+
     public static function fromRequest(Request $request): ?string
     {
         return self::fromUserAgent($request->getServerVariable('HTTP_USER_AGENT'));

@@ -1,7 +1,7 @@
 <?php
 namespace Kanboard\Plugin\Vault\Schema;
 
-const VERSION = 3;
+const VERSION = 4;
 
 // Binary values are base64 TEXT (entry and group ciphertext LONGTEXT); timestamps are Unix seconds.
 // Ownership references to users(id) cascade; provenance columns (created_by, granted_by, audit actor/target) are SET NULL.
@@ -252,6 +252,16 @@ function version_3($pdo)
     $pdo->exec("ALTER TABLE vault_audit ADD CONSTRAINT vault_audit_actor_kind_chk CHECK (actor_kind IN ('human', 'agent', 'public', 'cli', 'system'))");
 
     $pdo->exec('ALTER TABLE vault_rotations ADD COLUMN sweep_type VARCHAR(16) NULL, ADD COLUMN sweep_id INT NULL');
+}
+
+// T17: a reservation keeps the share expiry it was made with, because that expiry is in the share's AD and finalize
+// must store exactly it; vault_shares carries crypto_v = 1 like every encrypted row (its AD binds the same 1).
+// A 64 KB payload in base64 is about 87 KB, larger than TEXT's 64 KiB, so the share ciphertext becomes MEDIUMTEXT.
+function version_4($pdo)
+{
+    $pdo->exec('ALTER TABLE vault_share_reservations ADD COLUMN share_expires_at BIGINT NOT NULL DEFAULT 0');
+    $pdo->exec('ALTER TABLE vault_shares ADD COLUMN crypto_v INT NOT NULL DEFAULT 1');
+    $pdo->exec('ALTER TABLE vault_shares MODIFY ciphertext MEDIUMTEXT NOT NULL');
 }
 
 function drop_user_fk($pdo, string $table, string $column): void

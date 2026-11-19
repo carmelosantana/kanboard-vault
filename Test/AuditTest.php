@@ -6,6 +6,8 @@ use Kanboard\Plugin\Vault\Console\OrgKeygenCommand;
 use Kanboard\Plugin\Vault\Model\AuditModel;
 use Kanboard\Plugin\Vault\Model\Purger;
 use Kanboard\Plugin\Vault\Model\RotationService;
+use Kanboard\Plugin\Vault\Model\ShareModel;
+use Kanboard\Plugin\Vault\Model\UaFamily;
 use Kanboard\Plugin\Vault\Model\VaultException;
 use Kanboard\Plugin\Vault\Model\VaultLock;
 use Kanboard\Plugin\Vault\Model\VaultSettings;
@@ -46,7 +48,7 @@ class AuditTest extends Base
     {
         return match ($column) {
             'object_type' => 'entry',
-            'share_hash' => str_repeat('ab', 16),
+            'share_hash' => str_repeat('ab', 32),
             'ip_trunc' => '203.0.113.0/24',
             'ua_family' => 'Firefox 140 / Linux',
             'count' => 3,
@@ -180,9 +182,9 @@ class AuditTest extends Base
         $this->audit(null, 'api')->record('lock', ['actor_user_id' => $this->bob]);
         $this->audit(null, 'api')->record('lock', ['actor_user_id' => $this->alice]);
         // R39: no actor in a web request is the system (a purge's share expiry, a rate-limit summary), not a human.
-        $this->audit(null, 'ui')->record('share_expire', ['target_user_id' => $this->alice, 'share_hash' => str_repeat('ab', 16)]);
-        $this->audit(null, null)->record('share_expire', ['target_user_id' => $this->alice, 'share_hash' => str_repeat('ab', 16)]);
-        $this->audit(null, 'ui')->record('share_expire', ['target_user_id' => $this->alice, 'share_hash' => str_repeat('ab', 16), 'actor_kind' => 'public']);
+        $this->audit(null, 'ui')->record('share_expire', ['target_user_id' => $this->alice, 'share_hash' => str_repeat('ab', 32)]);
+        $this->audit(null, null)->record('share_expire', ['target_user_id' => $this->alice, 'share_hash' => str_repeat('ab', 32)]);
+        $this->audit(null, 'ui')->record('share_expire', ['target_user_id' => $this->alice, 'share_hash' => str_repeat('ab', 32), 'actor_kind' => 'public']);
         $got = array_map(static fn (array $r): array => [$r['actor_kind'], $r['via']], $this->auditRows());
         $this->assertSame([['human', 'api'], ['cli', 'cli'], ['cli', 'cli'], ['agent', 'api'], ['human', 'api'], ['system', 'ui'], ['cli', 'cli'], ['public', 'ui']], $got);
     }
@@ -233,7 +235,7 @@ class AuditTest extends Base
         $a->record('update', ['actor_user_id' => $bob, 'object_type' => 'entry', 'object_id' => $aliceEntry]);              // 2 alice (entry), bob (actor)
         $a->record('grant', ['actor_user_id' => $alice, 'object_type' => 'group', 'object_id' => $aliceGroup, 'target_user_id' => $bob]); // 3 alice
         $a->record('unlock', ['actor_user_id' => $bob]);                                                                     // 4 bob
-        $a->record('share_reveal', ['target_user_id' => $alice, 'share_hash' => str_repeat('cd', 16)]);                      // 5 alice (share)
+        $a->record('share_reveal', ['target_user_id' => $alice, 'share_hash' => str_repeat('cd', 32)]);                      // 5 alice (share)
         $a->record('policy_change', ['actor_user_id' => self::ADMIN]);                                                       // 6 admin
         $a->record('org_recovery', ['target_user_id' => $bob]);                                                              // 7 admin
         $a->record('update', ['actor_user_id' => $carol, 'object_type' => 'entry', 'object_id' => $aliceEntry + 99]);       // 8 carol
@@ -455,10 +457,78 @@ class AuditTest extends Base
     public function testShareExpireAudited(): void
     {
         $this->pdo()->prepare("INSERT INTO vault_shares (id_hash, burn_hash, creator_id, ciphertext, iv, salt, has_passphrase, sealed_label, created_at, expires_at) VALUES (?, 'b', ?, 'c', 'i', 's', 0, NULL, 0, ?)")
-            ->execute([str_repeat('ef', 16), $this->bob, $this->now - 1]);
+            ->execute([str_repeat('ef', 32), $this->bob, $this->now - 1]);
         (new Purger($this->container))->run($this->now, true);
         $rows = $this->auditRows('share_expire');
         $this->assertCount(1, $rows);
-        $this->assertSame([$this->bob, str_repeat('ef', 16)], [(int) $rows[0]['target_user_id'], $rows[0]['share_hash']]);
+        $this->assertSame([$this->bob, str_repeat('ef', 32)], [(int) $rows[0]['target_user_id'], $rows[0]['share_hash']]);
+    }
+
+    // T10 carry: share_hash is exactly ShareModel's id hash (64 lowercase hex: BLAKE2b-256 of the share id), so a raw
+    // share id or burn capability (32 hex), a content key k (base64url) or the whole fragment can never be recorded.
+    // Kills: the old loose pattern (it took 32-hex values, so a raw id or b), a case-insensitive pattern.
+    public function testShareHashIsAnIdHashOnly(): void
+    {
+        $id = bin2hex(random_bytes(16));
+        $this->audit()->record('share_create', ['actor_user_id' => $this->alice, 'share_hash' => ShareModel::idHash($id)]);
+        $refused = [
+            'raw share id' => $id,
+            'raw burn b' => bin2hex(random_bytes(16)),
+            'key k (base64url)' => rtrim(strtr(base64_encode(random_bytes(32)), '+/', '-_'), '='),
+            'fragment k||b' => rtrim(strtr(base64_encode(random_bytes(48)), '+/', '-_'), '='),
+            'upper-case hash' => strtoupper(ShareModel::idHash($id)),
+            '63 hex' => substr(ShareModel::idHash($id), 1),
+            '65 hex' => ShareModel::idHash($id).'0',
+        ];
+        foreach ($refused as $what => $value) {
+            try {
+                $this->audit()->record('share_create', ['actor_user_id' => $this->alice, 'share_hash' => $value]);
+                $this->fail("accepted $what");
+            } catch (LogicException) {
+            }
+        }
+        $this->assertCount(1, $this->auditRows());
+    }
+
+    // T10 carry: ua_family is exactly what UaFamily builds, "<Browser> <major> / <OS>" from its fixed names, or Other.
+    // A raw User-Agent, a full version, an OS version or a free-text value is refused. Kills: the old printable-ASCII
+    // check (it took any short string, so a raw UA fragment).
+    public function testUaFamilyShape(): void
+    {
+        $uas = [
+            'Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0',
+            'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+            'curl/8.5.0',
+        ];
+        foreach ($uas as $ua) {
+            $this->audit()->record('unlock', ['actor_user_id' => $this->alice, 'ua_family' => UaFamily::fromUserAgent($ua)]);
+        }
+        $this->assertSame(['Firefox 140 / Linux', 'Edge 131 / Windows', 'Safari 17 / iOS', 'Other / Other'], array_column($this->auditRows(), 'ua_family'));
+        foreach (['Firefox 140.0.1 / Linux', 'Firefox 140 / Linux 6.1', 'Mozilla/5.0 (X11)', 'Netscape 4 / Linux', 'Firefox / Linux', 'Firefox 12345 / Linux', 'firefox 140 / linux', 'Firefox 140 / Linux '] as $bad) {
+            try {
+                $this->audit()->record('unlock', ['actor_user_id' => $this->alice, 'ua_family' => $bad]);
+                $this->fail("accepted $bad");
+            } catch (LogicException) {
+            }
+        }
+        $this->assertCount(4, $this->auditRows());
+    }
+
+    // T10 carry: ip_trunc is exactly ClientIp::truncate's output: a canonical IPv4 /24 or IPv6 /48 network with its
+    // host bits zero. Kills: the old pattern (it took 999.1.1.0/24, an IPv6 with host bits set, a non-canonical IPv6).
+    public function testIpTruncShape(): void
+    {
+        foreach (['203.0.113.0/24', '2001:db8:1::/48'] as $ok) {
+            $this->audit()->record('unlock', ['actor_user_id' => $this->alice, 'ip_trunc' => $ok]);
+        }
+        foreach (['999.1.1.0/24', '203.0.113.7/24', '203.0.113.0/48', '2001:db8:1:2::/48', '2001:0db8:1::/48', '::::/48', '2001:db8:1::/24', '::ffff:203.0.113.0/48', 'fe80::/48 '] as $bad) {
+            try {
+                $this->audit()->record('unlock', ['actor_user_id' => $this->alice, 'ip_trunc' => $bad]);
+                $this->fail("accepted $bad");
+            } catch (LogicException) {
+            }
+        }
+        $this->assertCount(2, $this->auditRows());
     }
 }
