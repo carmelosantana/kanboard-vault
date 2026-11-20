@@ -20,6 +20,8 @@ final class VaultFailure
         'busy' => [429, 'rate_limited'],
         'busy_global' => [503, 'busy'],
         'https_required' => [403, 'https_required'],
+        // R72: a Steward switch-user session is active (SwitchedSessionGuard).
+        'switched' => [403, 'switched'],
         'locked' => [401, 'locked'],
         'passphrase_weak' => [422, 'passphrase_weak'],
         'passphrase_reuse' => [422, 'passphrase_reuse'],

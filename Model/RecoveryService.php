@@ -135,6 +135,8 @@ class RecoveryService extends Base
         if ($userId <= 0) {
             throw new VaultException('unlock_failed');
         }
+        // R72: never while a Steward switch-user session is active; before the slot, the throttles and any secret.
+        (new SwitchedSessionGuard($this->container, $this->clock))->refuseUnlock($userId, $ip);
         $slot = $this->slots->acquire($userId);
         if ($slot === null) {
             throw new VaultException($this->slots->lastBusy() === ArgonSlots::BUSY_GLOBAL ? 'busy_global' : 'busy');

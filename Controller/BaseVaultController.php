@@ -12,6 +12,7 @@ use Kanboard\Plugin\Vault\Model\Housekeeping;
 use Kanboard\Plugin\Vault\Model\PrincipalModel;
 use Kanboard\Plugin\Vault\Model\RecoveryService;
 use Kanboard\Plugin\Vault\Model\RotationService;
+use Kanboard\Plugin\Vault\Model\SwitchedSessionGuard;
 use Kanboard\Plugin\Vault\Model\VaultException;
 use Kanboard\Plugin\Vault\Model\VaultFailure;
 use Kanboard\Plugin\Vault\Model\VaultSession;
@@ -27,7 +28,8 @@ use Throwable;
 //   requireUnlocked()  the session's sk (sk2 while a rotation runs), or the locked view / a JSON "locked". It is
 //                      called before any vault lock is taken (R18). While an admin requires hardware keys and the
 //                      user has fewer than two, only the hardware-key page is open (hw_enrolment_required, or a
-//                      redirect there): spec, Hardware keys → Enrolment.
+//                      redirect there): spec, Hardware keys → Enrolment. While a Steward switch-user session is
+//                      active the session locks and the answer is 'switched' (R72, SwitchedSessionGuard).
 //   handle()           runs every action, the page included: the opportunistic purge first, then the action; any
 //                      failure goes to fail() with VaultFailure::map's fixed reason (no stack, no detail; T6/R28).
 //   succeed()/fail()   answer vault.js (X-Requested-With) with JSON, and a native form POST (no JS) with a redirect
@@ -71,6 +73,10 @@ abstract class BaseVaultController extends BaseController
                 $this->redirectTo(['HardwareKeyController', 'index'], []);
             }
             throw new ResponseSent();
+        }
+        // R72: a session locked because a Steward switch-user session is active says why (secretKey locked it).
+        if ((new SwitchedSessionGuard($this->container))->isSwitched()) {
+            throw new VaultException('switched');
         }
         if ($this->request->isAjax()) {
             $this->fail(401, 'locked');
@@ -245,6 +251,7 @@ abstract class BaseVaultController extends BaseController
             'rate_limited' => t('Too many attempts. Wait a while, then try again.'),
             'busy' => t('The server is busy. Try again in a few seconds.'),
             'https_required' => t('Vault needs HTTPS. Open Kanboard over https:// to use it.'),
+            'switched' => t('Vault can\'t be unlocked while you\'re signed in as another user.'),
             'passphrase_mismatch' => t('The passphrases don\'t match.'),
             'passphrase_weak' => t('Use at least %d characters, and not your username.', PrincipalModel::MIN_PASSPHRASE_CHARS),
             'passphrase_reuse' => t('Don\'t reuse your Kanboard login password.'),

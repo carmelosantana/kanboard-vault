@@ -165,6 +165,11 @@ class VaultSession extends Base
             $this->lock($userId);
             return null;
         }
+        // R72: while a Steward switch-user session is active this session's unlock dies on its next Vault request.
+        if ((new SwitchedSessionGuard($this->container))->isSwitched()) {
+            $this->lock($userId, $sidHash);
+            return null;
+        }
         $now = $this->now();
         if ($now >= (int) $row['idle_expires_at'] || $now >= (int) $row['abs_expires_at']) {
             $this->lock($userId, $sidHash);

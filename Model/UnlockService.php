@@ -9,8 +9,8 @@ use Kanboard\Plugin\Vault\Crypto\Wraps;
 
 // Passphrase unlock, and passphrase-plus-key unlock (spec: Unlocked sessions, Throttling, Hardware keys → Unlock).
 // Order of work (R15):
-//   transport check → the principal's Argon2 slot (busy: 429 / busy_global: 503) → per-principal back-off →
-//   per-IP failure bucket → [$prf: the relying party, then the fresh assertion, verified against a single-use
+//   transport check → not while switched (R72: SwitchedSessionGuard) → the principal's Argon2 slot (busy: 429 /
+//   busy_global: 503) → per-principal back-off → per-IP failure bucket → [$prf: the relying party, then the fresh assertion, verified against a single-use
 //   'unlock' challenge and the user's own credential (HardwareKeys)] → Argon2 → unwrap and public-key check →
 //   record the outcome → KDF upgrade → session.
 // With $prf the wrap is that key's passphrase+prf wrap and its KEK takes the PRF output with the passphrase:
@@ -77,6 +77,8 @@ class UnlockService extends Base
         if ($userId <= 0) {
             throw new VaultException('unlock_failed');
         }
+        // R72: never while a Steward switch-user session is active; before the slot, the throttles and Argon2.
+        (new SwitchedSessionGuard($this->container, $this->clock))->refuseUnlock($userId, $ip);
         $slot = $this->slots->acquire($userId);
         if ($slot === null) {
             throw new VaultException($this->slots->lastBusy() === ArgonSlots::BUSY_GLOBAL ? 'busy_global' : 'busy');

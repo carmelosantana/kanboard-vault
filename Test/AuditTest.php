@@ -78,14 +78,16 @@ class AuditTest extends Base
             'policy_change' => ['actor_user_id'],
             // R37 (spec addendum at T25): an integrity fault the rotation sweep keeps, operator-visible.
             'integrity_error' => $objectCols,
+            // R72 (spec addendum at T24b): an unlock refused while a Steward switch-user session is active.
+            'unlock_refused' => $sessionCols,
         ];
         $norm = static function (array $t): array {
             ksort($t);
             return array_map(static function (array $c): array { sort($c); return $c; }, $t);
         };
         $this->assertSame($norm($expected), $norm(AuditModel::ALLOW));
-        // The spec's Actions table lists these 27, plus integrity_error (R37).
-        $this->assertCount(28, AuditModel::ALLOW);
+        // The spec's Actions table lists these 27, plus integrity_error (R37) and unlock_refused (R72).
+        $this->assertCount(29, AuditModel::ALLOW);
     }
 
     public static function actions(): array

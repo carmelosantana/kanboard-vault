@@ -57,6 +57,9 @@ class AuditModel extends Base
         // R37 (spec addendum at T25): an object the rotation sweep keeps for an integrity fault, so it is
         // operator-visible (R31's safety relies on it).
         'integrity_error' => self::OBJECT,
+        // R72 (spec addendum at T24b): an unlock or recovery-code use refused while a Steward switch-user session is
+        // active (SwitchedSessionGuard). Not a failed guess: no streak, no back-off.
+        'unlock_refused' => self::SESSION,
     ];
     // The columns an action may fill; id, created_at, action, actor_kind and via are on every row.
     public const COLUMNS = ['actor_user_id', 'object_type', 'object_id', 'share_hash', 'target_user_id', 'ip_trunc', 'ua_family', 'count'];
