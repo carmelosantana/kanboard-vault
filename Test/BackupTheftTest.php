@@ -4,7 +4,9 @@ require_once __DIR__.'/Support/AgentFixture.php';
 
 use Kanboard\Plugin\Vault\Model\HardwareKeys;
 use Kanboard\Plugin\Vault\Model\Importer;
+use Kanboard\Plugin\Vault\Model\Rekeyer;
 use Kanboard\Plugin\Vault\Model\ShareModel;
+use Kanboard\Plugin\Vault\Model\VaultDb;
 use Kanboard\Plugin\Vault\Model\VaultSettings;
 use Kanboard\Plugin\Vault\Test\Support\Fixtures;
 use Kanboard\Plugin\Vault\Test\Support\SoftAuthenticator;
@@ -16,15 +18,16 @@ use PicoDb\Database;
 // (titles, usernames, passwords, notes, group names) appears anywhere in the dump."
 //
 // The install runs on a real SQLite file in WAL mode (Kanboard's default), not the suite's :memory: DB, so the dump is
-// what a thief copies off the disk: the main file, the -wal and -shm files (freed pages and stale WAL frames
-// included: SQLite does not zero them), the file again after a checkpoint, a logical dump of every table, Kanboard's
-// config.php, the environment and the Argon2 slot directory. Every secret-bearing path writes first: entries and
-// groups (every payload slot), a nested group, read and edit grants to a user, a grant to an agent, an agent-written
-// entry, both kinds of one-time share (with and without a passphrase) with a sealed label, an import, a recovery code,
-// org-key escrow, a hardware key (WebAuthn PRF wrap, the rotation it triggers), a passphrase change and an unlocked
-// vault session. Each fixture marker and each secret the run generated (vault keys, the session cookie, PRF outputs,
-// the recovery code, the org secret, the agent's vault key, the one-time share key and burn) is searched for raw, as
-// hex, and as base64 and base64url at all three byte alignments (so a value base64ed inside a bigger blob is found).
+// what a thief copies off the disk: the main file, the -wal and -shm files (freed pages and stale WAL frames included:
+// SQLite does not zero them), the file again after a checkpoint, a logical dump of every table, Kanboard's config.php,
+// the environment, the Argon2 slot directory and Kanboard's DATA_DIR/*.log. Every secret-bearing path writes first:
+// entries and groups (every payload slot), a nested group, read and edit grants to a user, a grant to an agent, an
+// agent-written entry, both kinds of one-time share (with and without a passphrase) with a sealed label, an import, a
+// recovery code, org-key escrow, a hardware key (WebAuthn PRF wrap, the rotation it triggers), a passphrase change and
+// an unlocked vault session, and one wrong unlock. Each fixture marker and each secret the run generated (vault keys,
+// the session cookie, PRF outputs, the recovery code, the org secret, the agent's vault key, the one-time share key and
+// burn, the wrong guess, an entry's and a group's DEK) is searched for raw, as hex, and as base64 and base64url at all
+// three byte alignments (so a value base64ed inside a bigger blob is found).
 class BackupTheftTest extends Base
 {
     use AgentFixture;
@@ -161,6 +164,10 @@ class BackupTheftTest extends Base
         $sk = $this->unlockAs($this->alice, Fixtures::NEW_PASSPHRASE, 'sid-alice-2');
         $this->generated[] = $sk;
         $this->generated[] = $this->jar->last()['value'];
+        // One wrong unlock (M13): the guess is refused and recorded as a failure, and is stored nowhere.
+        $wrong = 'VaultWrongGuess-'.bin2hex(random_bytes(8));
+        $this->generated[] = $wrong;
+        $this->assertVaultError('unlock_failed', fn () => $this->unlockService()->unlock($this->alice, $wrong, self::IP));
         $this->assertSame(Fixtures::UPDATED_PASSWORD, $s->readField($this->alice, $entry, 'password', $sk));
 
         // A hardware key: its PRF wrap; registering it rotates nothing (the passphrase wrap stays with one key).
@@ -178,6 +185,15 @@ class BackupTheftTest extends Base
         $this->generated[] = $sk;
         // The vault stays unlocked: its session row is in the backup.
         $this->assertSame(1, $this->countRows('SELECT COUNT(*) FROM vault_sessions WHERE user_id = ?', [$this->alice]));
+
+        // The DEKs themselves (M13): an entry's and a group's, opened through Rekeyer::openDek at their current epoch.
+        $rekeyer = new Rekeyer($this->container, $this->clock());
+        foreach ([['entry', $entry, 'vault_entries'], ['group', $top, 'vault_groups']] as [$type, $id, $table]) {
+            $epoch = (int) $this->row('SELECT key_epoch FROM '.$table.' WHERE id = ?', [$id])['key_epoch'];
+            $dek = $rekeyer->openDek(new VaultDb($this->container), $type, $id, $epoch, $this->alice, $sk);
+            $this->assertSame(32, strlen((string) $dek), "the $type DEK opens");
+            $this->generated[] = $dek;
+        }
     }
 
     /** @return array<string,string> what a backup holds, by name */
@@ -207,6 +223,12 @@ class BackupTheftTest extends Base
             $slots .= $f."\n".(is_file($f) ? (string) file_get_contents($f) : '');
         }
         $dump['argon2 slot dir'] = $slots;
+        // Kanboard's own logs (debug.log and any other *.log in DATA_DIR) go into backups of the data directory (M13).
+        $logs = '';
+        foreach (glob(DATA_DIR.'/*.log') ?: [] as $f) {
+            $logs .= $f."\n".(string) file_get_contents($f);
+        }
+        $dump['DATA_DIR logs'] = $logs;
         return $dump;
     }
 
