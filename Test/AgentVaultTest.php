@@ -367,6 +367,26 @@ class AgentVaultTest extends Base
         $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_keys WHERE principal_id = ? AND object_type = ? AND object_id = ?', [$this->dave, 'entry', $ae]));
     }
 
+    // Final review M1: a new entry or group in a group still shared with a just-disabled agent was sealed to that agent
+    // until the next purge (up to a minute). Both create paths sweep disabled agents first, as beforeWrite does.
+    // Kills: the sweep missing from createEntry or from createGroup.
+    public function testCreateInGroupSharedWithDisabledAgentIsNotSealedToIt(): void
+    {
+        $this->enrolDave();
+        [$g] = $this->sharedEntry($this->alice, $this->aliceSk(), 'Alice shared');
+        $this->container['userModel']->disable($this->dave);
+
+        $e = $this->store()->createEntry($this->alice, $g, Fixtures::entry('After disable'));
+        $this->assertSame(0, $this->countRows("SELECT COUNT(*) FROM vault_keys WHERE principal_id = ? AND object_type = 'entry' AND object_id = ?", [$this->dave, $e]), 'createEntry');
+        $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_grants WHERE grantee_id = ?', [$this->dave]));
+
+        $this->container['userModel']->enable($this->dave);
+        $this->grants()->grant($this->alice, 'group', $g, $this->dave, 'read', null, $this->aliceSk());
+        $this->container['userModel']->disable($this->dave);
+        $sub = $this->store()->createGroup($this->alice, $g, ['name' => 'After disable sub']);
+        $this->assertSame(0, $this->countRows("SELECT COUNT(*) FROM vault_keys WHERE principal_id = ? AND object_type = 'group' AND object_id = ?", [$this->dave, $sub]), 'createGroup');
+    }
+
     // T10 minor: the agent's owner sees the agent's audit rows in the activity view; nobody else does.
     // Kills: AuditModel::visibleTo without the roster branch.
     public function testOwnerSeesTheAgentsRows(): void

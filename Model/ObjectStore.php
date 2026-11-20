@@ -63,6 +63,8 @@ class ObjectStore extends Base
             return $this->lock()->exclusive(function () use ($actorId, $parentId, $json): int {
                 $db = $this->vdb();
                 $this->requirePrincipal($db, $actorId);
+                // M1: a just-disabled agent's grants go first, so the new object is never sealed to it.
+                (new Purger($this->container))->sweepDisabledAgents($this->now());
                 if ($parentId !== null) {
                     $this->requirePermission('group', $parentId, $actorId, self::OWNER_ONLY);
                     $this->grants()->reconcileExpired('group', $parentId);
@@ -97,6 +99,7 @@ class ObjectStore extends Base
             return $this->lock()->exclusive(function () use ($actorId, $groupId, $json): int {
                 $db = $this->vdb();
                 $this->requirePrincipal($db, $actorId);
+                (new Purger($this->container))->sweepDisabledAgents($this->now());
                 $this->requirePermission('group', $groupId, $actorId, self::CAN_EDIT);
                 $this->grants()->reconcileExpired('group', $groupId);
                 $group = $this->fetchObject($db, 'group', $groupId) ?? throw new VaultException('not_found');
