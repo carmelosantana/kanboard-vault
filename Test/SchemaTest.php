@@ -351,4 +351,22 @@ class SchemaTest extends Base
         $mysql = explode('function version_4($pdo)', file_get_contents(__DIR__.'/../Schema/Mysql.php'))[1];
         $this->assertStringContainsString('ALTER TABLE vault_shares MODIFY ciphertext MEDIUMTEXT NOT NULL', $mysql);
     }
+
+    // Final review I5: vault_test_dump is the logical backup three secondary backup-theft proofs search. Plain
+    // json_encode wrote "/" as "\/", so a base64 needle containing "/" never matched and assertStringNotContainsString
+    // passed vacuously; on a non-UTF-8 value it returned false and the whole table vanished from the dump. Kills: the
+    // flags dropped (the "/" needle is missed) or a table silently left out.
+    public function testDumpKeepsSlashesAndEveryTable(): void
+    {
+        $this->migrate();
+        $pdo = $this->container['db']->getConnection();
+        $needle = 'ab/cd+ef/gh==';
+        $pdo->prepare('INSERT INTO vault_rate (bucket, tokens, updated_at) VALUES (?, 1, 1)')->execute([$needle]);
+        $this->assertStringContainsString($needle, vault_test_dump($pdo));
+        if (DB_DRIVER === 'sqlite') {
+            // Only SQLite stores invalid UTF-8 in a TEXT column; MariaDB and Postgres refuse it on insert.
+            $pdo->prepare('INSERT INTO vault_rate (bucket, tokens, updated_at) VALUES (?, 1, 1)')->execute(["bad\xff"]);
+            $this->assertStringContainsString($needle, vault_test_dump($pdo), 'a non-UTF-8 row does not drop the table');
+        }
+    }
 }

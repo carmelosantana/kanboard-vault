@@ -70,13 +70,14 @@ function vault_test_column_info(\PDO $pdo, string $table): array
     return $out;
 }
 
-// Every row of every table, as JSON: what a stolen logical backup of the database holds.
+// Every row of every table, as JSON: what a stolen logical backup of the database holds. Slashes stay unescaped, so a
+// base64 needle with "/" can match, and invalid UTF-8 is substituted rather than dropping the table (final review I5).
 function vault_test_dump(\PDO $pdo): string
 {
     $q = $pdo->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'mysql' ? '`' : '"';
     $dump = '';
     foreach (vault_test_tables($pdo) as $t) {
-        $dump .= json_encode($pdo->query('SELECT * FROM '.$q.$t.$q)->fetchAll(\PDO::FETCH_ASSOC));
+        $dump .= json_encode($pdo->query('SELECT * FROM '.$q.$t.$q)->fetchAll(\PDO::FETCH_ASSOC), JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
     }
     return $dump;
 }
