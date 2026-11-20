@@ -211,54 +211,75 @@ function version_1($pdo)
     ) ENGINE=InnoDB CHARSET=utf8mb4');
 }
 
+// Resuming (final review I2): MySQL commits each DDL statement on its own, and Kanboard's SchemaHandler records the
+// version only after the last one ran, so a failure in v3 or v4 leaves the earlier versions applied with the version
+// unchanged, and the next request runs them again. Every version here is idempotent: each step checks the catalogue
+// (add_column, add_constraint, the FK and CHECK lookups) and skips what is already done. A failure is a PDOException,
+// the one type SchemaHandler catches (it then rolls back and re-enables FK checks). v3 reads
+// information_schema.CHECK_CONSTRAINTS, so the floor is MySQL 8.0.16 / MariaDB 10.3.10 (README).
+
 // R26: a principal outlives its Kanboard user row (see Sqlite.php version_2). vault_principals.user_id loses its
 // FK to users; live_user_id references users ON DELETE SET NULL so the purge can find a deleted user's principal;
-// grants and key rows cascade off vault_principals. MySQL names FKs itself, so they are looked up by column.
+// grants and key rows cascade off vault_principals. MySQL names FKs itself, so they are looked up by column, and the
+// migration fails if one is left (final review I1).
 function version_2($pdo)
 {
-    $pdo->exec('ALTER TABLE vault_meta ADD COLUMN org_pk TEXT NULL, ADD COLUMN last_purge_at BIGINT NULL');
+    add_column($pdo, 'vault_meta', 'org_pk', 'TEXT NULL');
+    add_column($pdo, 'vault_meta', 'last_purge_at', 'BIGINT NULL');
 
     drop_user_fk($pdo, 'vault_principals', 'user_id');
-    $pdo->exec('ALTER TABLE vault_principals ADD COLUMN live_user_id INT NULL, ADD COLUMN rotate_requested INT NOT NULL DEFAULT 0, ADD COLUMN notices INT NOT NULL DEFAULT 0');
-    $pdo->exec('UPDATE vault_principals SET live_user_id = user_id');
-    $pdo->exec('ALTER TABLE vault_principals ADD CONSTRAINT vault_principals_live_user_fk FOREIGN KEY(live_user_id) REFERENCES users(id) ON DELETE SET NULL');
+    add_column($pdo, 'vault_principals', 'live_user_id', 'INT NULL');
+    add_column($pdo, 'vault_principals', 'rotate_requested', 'INT NOT NULL DEFAULT 0');
+    add_column($pdo, 'vault_principals', 'notices', 'INT NOT NULL DEFAULT 0');
+    // Only rows not yet linked, and only to a user that exists: a re-run never relinks a deleted user's principal.
+    $pdo->exec('UPDATE vault_principals SET live_user_id = user_id WHERE live_user_id IS NULL AND user_id IN (SELECT id FROM users)');
+    add_constraint($pdo, 'vault_principals', 'vault_principals_live_user_fk', 'FOREIGN KEY(live_user_id) REFERENCES users(id) ON DELETE SET NULL');
 
     drop_user_fk($pdo, 'vault_grants', 'grantee_id');
     $pdo->exec('DELETE FROM vault_grants WHERE grantee_id NOT IN (SELECT user_id FROM vault_principals)');
-    $pdo->exec('ALTER TABLE vault_grants ADD CONSTRAINT vault_grants_grantee_fk FOREIGN KEY(grantee_id) REFERENCES vault_principals(user_id) ON DELETE CASCADE');
+    add_constraint($pdo, 'vault_grants', 'vault_grants_grantee_fk', 'FOREIGN KEY(grantee_id) REFERENCES vault_principals(user_id) ON DELETE CASCADE');
 
     drop_user_fk($pdo, 'vault_keys', 'principal_id');
     $pdo->exec('DELETE FROM vault_keys WHERE principal_id NOT IN (SELECT user_id FROM vault_principals)');
-    $pdo->exec('ALTER TABLE vault_keys ADD CONSTRAINT vault_keys_principal_fk FOREIGN KEY(principal_id) REFERENCES vault_principals(user_id) ON DELETE CASCADE');
+    add_constraint($pdo, 'vault_keys', 'vault_keys_principal_fk', 'FOREIGN KEY(principal_id) REFERENCES vault_principals(user_id) ON DELETE CASCADE');
 }
 
 // R39: actor_kind gains 'system'; R32: vault_rotations keeps the sweep cursor (see Sqlite.php version_3).
 // MySQL turns a column CHECK into a table constraint it names itself (vault_audit_chk_N), which only DROP CONSTRAINT
 // removes. MariaDB keeps it a column-level constraint named after the column, which DROP CONSTRAINT can't remove
-// ("Can't DROP CONSTRAINT `actor_kind`", found on a real MariaDB in T24) and which MODIFY drops. So: the CHECK on
-// actor_kind is found by its clause (it throws if there is none, rather than leaving the old list or no list in
-// place), MODIFY drops MariaDB's, every one still there afterwards (MySQL's) is dropped by name, and none may remain.
+// ("Can't DROP CONSTRAINT `actor_kind`", found on a real MariaDB in T24) and which MODIFY drops. The new, named CHECK
+// is added first and the old list (found by its clause: human, without system) dropped after, so a run stopped at any
+// point leaves at least one actor_kind CHECK in place, and a re-run finishes the job. Neither CHECK there at all is an
+// error, rather than leaving the column unchecked.
 function version_3($pdo)
 {
-    $find = function () use ($pdo): array {
+    $old = function () use ($pdo): array {
         $stmt = $pdo->prepare("SELECT CONSTRAINT_NAME FROM information_schema.CHECK_CONSTRAINTS
-            WHERE CONSTRAINT_SCHEMA = DATABASE() AND CHECK_CLAUSE LIKE '%actor_kind%' AND CHECK_CLAUSE LIKE '%human%'");
+            WHERE CONSTRAINT_SCHEMA = DATABASE() AND CHECK_CLAUSE LIKE '%actor_kind%' AND CHECK_CLAUSE LIKE '%human%'
+              AND CHECK_CLAUSE NOT LIKE '%system%'");
         $stmt->execute();
         return $stmt->fetchAll(\PDO::FETCH_COLUMN);
     };
-    if ($find() === []) {
-        throw new \RuntimeException('Vault schema v3: the actor_kind CHECK on vault_audit was not found');
+    $hasNew = constraint_exists($pdo, 'vault_audit', 'vault_audit_actor_kind_chk');
+    if (! $hasNew && $old() === []) {
+        throw new \PDOException('Vault schema v3: the actor_kind CHECK on vault_audit was not found');
     }
-    $pdo->exec('ALTER TABLE vault_audit MODIFY actor_kind VARCHAR(16) NOT NULL');
-    foreach ($find() as $name) {
-        $pdo->exec('ALTER TABLE vault_audit DROP CONSTRAINT `'.str_replace('`', '', (string) $name).'`');
+    add_constraint($pdo, 'vault_audit', 'vault_audit_actor_kind_chk', "CHECK (actor_kind IN ('human', 'agent', 'public', 'cli', 'system'))");
+    if ($old() !== []) {
+        $pdo->exec('ALTER TABLE vault_audit MODIFY actor_kind VARCHAR(16) NOT NULL');
+        foreach ($old() as $name) {
+            $pdo->exec('ALTER TABLE vault_audit DROP CONSTRAINT `'.str_replace('`', '', (string) $name).'`');
+        }
+        if ($old() !== []) {
+            throw new \PDOException('Vault schema v3: the old actor_kind CHECK on vault_audit could not be dropped');
+        }
     }
-    if ($find() !== []) {
-        throw new \RuntimeException('Vault schema v3: the old actor_kind CHECK on vault_audit could not be dropped');
+    if (! constraint_exists($pdo, 'vault_audit', 'vault_audit_actor_kind_chk')) {
+        throw new \PDOException('Vault schema v3: the actor_kind CHECK on vault_audit is missing');
     }
-    $pdo->exec("ALTER TABLE vault_audit ADD CONSTRAINT vault_audit_actor_kind_chk CHECK (actor_kind IN ('human', 'agent', 'public', 'cli', 'system'))");
 
-    $pdo->exec('ALTER TABLE vault_rotations ADD COLUMN sweep_type VARCHAR(16) NULL, ADD COLUMN sweep_id INT NULL');
+    add_column($pdo, 'vault_rotations', 'sweep_type', 'VARCHAR(16) NULL');
+    add_column($pdo, 'vault_rotations', 'sweep_id', 'INT NULL');
 }
 
 // T17: a reservation keeps the share expiry it was made with, because that expiry is in the share's AD and finalize
@@ -266,17 +287,64 @@ function version_3($pdo)
 // A 64 KB payload in base64 is about 87 KB, larger than TEXT's 64 KiB, so the share ciphertext becomes MEDIUMTEXT.
 function version_4($pdo)
 {
-    $pdo->exec('ALTER TABLE vault_share_reservations ADD COLUMN share_expires_at BIGINT NOT NULL DEFAULT 0');
-    $pdo->exec('ALTER TABLE vault_shares ADD COLUMN crypto_v INT NOT NULL DEFAULT 1');
+    add_column($pdo, 'vault_share_reservations', 'share_expires_at', 'BIGINT NOT NULL DEFAULT 0');
+    add_column($pdo, 'vault_shares', 'crypto_v', 'INT NOT NULL DEFAULT 1');
     $pdo->exec('ALTER TABLE vault_shares MODIFY ciphertext MEDIUMTEXT NOT NULL');
+}
+
+function column_exists($pdo, string $table, string $column): bool
+{
+    $stmt = $pdo->prepare('SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND LOWER(TABLE_NAME) = LOWER(?) AND LOWER(COLUMN_NAME) = LOWER(?)');
+    $stmt->execute([$table, $column]);
+    return (int) $stmt->fetchColumn() > 0;
+}
+
+// Adds the column unless it is already there (written for a re-run, so the statement shape matches the old one).
+function add_column($pdo, string $table, string $column, string $definition): void
+{
+    if (! column_exists($pdo, $table, $column)) {
+        $pdo->exec('ALTER TABLE '.$table.' ADD COLUMN '.$column.' '.$definition);
+    }
+}
+
+function constraint_exists($pdo, string $table, string $name): bool
+{
+    $stmt = $pdo->prepare('SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS
+        WHERE CONSTRAINT_SCHEMA = DATABASE() AND LOWER(TABLE_NAME) = LOWER(?) AND CONSTRAINT_NAME = ?');
+    $stmt->execute([$table, $name]);
+    return (int) $stmt->fetchColumn() > 0;
+}
+
+function add_constraint($pdo, string $table, string $name, string $definition): void
+{
+    if (! constraint_exists($pdo, $table, $name)) {
+        $pdo->exec('ALTER TABLE '.$table.' ADD CONSTRAINT '.$name.' '.$definition);
+    }
+}
+
+// The names of the FKs from $table.$column to users. Table names compare case-insensitively, so a server with
+// lower_case_table_names set either way finds them.
+function user_fks($pdo, string $table, string $column): array
+{
+    $stmt = $pdo->prepare("SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE
+        WHERE TABLE_SCHEMA = DATABASE() AND LOWER(TABLE_NAME) = LOWER(?) AND LOWER(COLUMN_NAME) = LOWER(?)
+          AND LOWER(REFERENCED_TABLE_NAME) = 'users'");
+    $stmt->execute([$table, $column]);
+    return $stmt->fetchAll(\PDO::FETCH_COLUMN);
 }
 
 function drop_user_fk($pdo, string $table, string $column): void
 {
-    $stmt = $pdo->prepare("SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE
-        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? AND REFERENCED_TABLE_NAME = 'users'");
-    $stmt->execute([$table, $column]);
-    foreach ($stmt->fetchAll(\PDO::FETCH_COLUMN) as $name) {
+    foreach (user_fks($pdo, $table, $column) as $name) {
         $pdo->exec('ALTER TABLE '.$table.' DROP FOREIGN KEY `'.str_replace('`', '', (string) $name).'`');
+    }
+    assert_no_user_fk($pdo, $table, $column);
+}
+
+function assert_no_user_fk($pdo, string $table, string $column): void
+{
+    if (user_fks($pdo, $table, $column) !== []) {
+        throw new \PDOException('Vault schema v2: '.$table.'.'.$column.' still has a foreign key to users');
     }
 }

@@ -15,7 +15,8 @@ so Vault does not defend against a compromised server. [docs/security.md](docs/s
 ## Requirements
 
 - Kanboard `>=1.2.47` and PHP `>=8.4`.
-- SQLite, MySQL 8.0 or later, MariaDB 10.2.4 or later, or Postgres.
+- SQLite, MySQL 8.0.16 or later, MariaDB 10.3.10 or later, or Postgres. Older MySQL and MariaDB releases have no
+  `information_schema.CHECK_CONSTRAINTS`, which the schema migration reads (MySQL before 8.0.16 also ignores CHECK).
 - The PHP **sodium** extension (`sodium_crypto_pwhash`). Without it Vault registers no routes and shows
   administrators a notice instead.
 - HTTPS. Vault refuses to unlock over plain HTTP.

@@ -224,8 +224,11 @@ class SchemaTest extends Base
                 $this->assertStringContainsString($col, $v2, "$d: $col");
             }
         }
-        $this->assertStringContainsString('vault_principals_user_id_fkey', file_get_contents(__DIR__.'/../Schema/Postgres.php'));
-        $this->assertStringContainsString("REFERENCED_TABLE_NAME = 'users'", file_get_contents(__DIR__.'/../Schema/Mysql.php'));
+        // Final review I1: the FKs to users are found in the catalogue, never dropped by an assumed name.
+        $pg = file_get_contents(__DIR__.'/../Schema/Postgres.php');
+        $this->assertStringContainsString('pg_constraint', $pg);
+        $this->assertStringNotContainsString('_fkey', $pg);
+        $this->assertStringContainsString("LOWER(REFERENCED_TABLE_NAME) = 'users'", file_get_contents(__DIR__.'/../Schema/Mysql.php'));
         $mysql = file_get_contents(__DIR__.'/../Schema/Mysql.php');
         $this->assertSame(2, substr_count($mysql, 'ciphertext LONGTEXT NOT NULL'), 'entry and group ciphertext are LONGTEXT');
     }
@@ -345,8 +348,9 @@ class SchemaTest extends Base
         foreach (['Sqlite', 'Mysql', 'Postgres'] as $d) {
             $src = preg_replace('#^\s*//.*$#m', '', file_get_contents(__DIR__."/../Schema/$d.php"));
             $v4 = explode('function version_4($pdo)', $src)[1] ?? '';
-            $this->assertMatchesRegularExpression('/ALTER TABLE vault_share_reservations ADD COLUMN share_expires_at \w+ NOT NULL DEFAULT 0/', $v4, $d);
-            $this->assertMatchesRegularExpression('/ALTER TABLE vault_shares ADD COLUMN crypto_v \w+ NOT NULL DEFAULT 1/', $v4, $d);
+            // MySQL adds each column through add_column (final review I2: a re-run skips what is there).
+            $this->assertMatchesRegularExpression("/ALTER TABLE vault_share_reservations ADD COLUMN share_expires_at \\w+ NOT NULL DEFAULT 0|add_column\\(\\\$pdo, 'vault_share_reservations', 'share_expires_at', '\\w+ NOT NULL DEFAULT 0'\\)/", $v4, $d);
+            $this->assertMatchesRegularExpression("/ALTER TABLE vault_shares ADD COLUMN crypto_v \\w+ NOT NULL DEFAULT 1|add_column\\(\\\$pdo, 'vault_shares', 'crypto_v', '\\w+ NOT NULL DEFAULT 1'\\)/", $v4, $d);
         }
         $mysql = explode('function version_4($pdo)', file_get_contents(__DIR__.'/../Schema/Mysql.php'))[1];
         $this->assertStringContainsString('ALTER TABLE vault_shares MODIFY ciphertext MEDIUMTEXT NOT NULL', $mysql);
@@ -368,5 +372,158 @@ class SchemaTest extends Base
             $pdo->prepare('INSERT INTO vault_rate (bucket, tokens, updated_at) VALUES (?, 1, 1)')->execute(["bad\xff"]);
             $this->assertStringContainsString($needle, vault_test_dump($pdo), 'a non-UTF-8 row does not drop the table');
         }
+    }
+
+    // FK constraint names from (table, column) to users, read from the catalogue the way an operator would check.
+    private static function userFks(\PDO $pdo, string $table, string $column): array
+    {
+        $sql = match ($pdo->getAttribute(\PDO::ATTR_DRIVER_NAME)) {
+            'mysql' => "SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = DATABASE()
+                AND LOWER(TABLE_NAME) = LOWER(?) AND COLUMN_NAME = ? AND LOWER(REFERENCED_TABLE_NAME) = 'users'",
+            'pgsql' => "SELECT c.conname FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
+                JOIN pg_namespace n ON n.oid = t.relnamespace JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
+                WHERE c.contype = 'f' AND n.nspname = current_schema() AND t.relname = ? AND a.attname = ? AND c.confrelid = to_regclass('users')::oid",
+        };
+        $st = $pdo->prepare($sql);
+        $st->execute([$table, $column]);
+        return $st->fetchAll(\PDO::FETCH_COLUMN);
+    }
+
+    private const USER_FK_COLUMNS = [['vault_principals', 'user_id'], ['vault_grants', 'grantee_id'], ['vault_keys', 'principal_id']];
+
+    private static function requireServerDb(): void
+    {
+        if (DB_DRIVER === 'sqlite') {
+            throw new \PHPUnit\Framework\SkippedTestError('MariaDB/Postgres catalogue; this run is sqlite');
+        }
+    }
+
+    private static function requireMysql(): void
+    {
+        if (DB_DRIVER !== 'mysql') {
+            throw new \PHPUnit\Framework\SkippedTestError('MySQL/MariaDB migration chain; this run is '.DB_DRIVER);
+        }
+    }
+
+    private function loadDialect(\PDO $pdo): void
+    {
+        require_once __DIR__.'/../Schema/'.($pdo->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'mysql' ? 'Mysql' : 'Postgres').'.php';
+    }
+
+    // Final review I1 (ledger T9): v2 drops the FKs from vault_principals.user_id, vault_grants.grantee_id and
+    // vault_keys.principal_id to users (R26: a deleted user must not cascade away grants and key rows unqueued). Postgres
+    // dropped them by an assumed default name with IF EXISTS, so an install whose constraints carry other names kept
+    // them and v2 still "succeeded". The v1 FKs here are renamed (Postgres) or re-created under other names (MariaDB)
+    // before v2 runs. Kills: a drop by assumed name; a lookup that misses the FK.
+    public function testVersion2DropsUserForeignKeysWhateverTheirNames(): void
+    {
+        self::requireServerDb();
+        $pdo = $this->container['db']->getConnection();
+        $this->loadDialect($pdo);
+        \Kanboard\Plugin\Vault\Schema\version_1($pdo);
+        foreach (self::USER_FK_COLUMNS as $i => [$table, $column]) {
+            [$name] = self::userFks($pdo, $table, $column);
+            if (DB_DRIVER === 'mysql') {
+                $pdo->exec("ALTER TABLE $table DROP FOREIGN KEY `$name`");
+                $pdo->exec("ALTER TABLE $table ADD CONSTRAINT legacy_user_fk_$i FOREIGN KEY($column) REFERENCES users(id) ON DELETE CASCADE");
+            } else {
+                $pdo->exec("ALTER TABLE $table RENAME CONSTRAINT \"$name\" TO legacy_user_fk_$i");
+            }
+            $this->assertSame(["legacy_user_fk_$i"], self::userFks($pdo, $table, $column));
+        }
+        \Kanboard\Plugin\Vault\Schema\version_2($pdo);
+        foreach (self::USER_FK_COLUMNS as [$table, $column]) {
+            $this->assertSame([], self::userFks($pdo, $table, $column), "$table.$column still references users");
+        }
+    }
+
+    // Final review I1: after its drops, v2 checks the catalogue and fails the migration with a PDOException (the one
+    // type Kanboard's SchemaHandler catches, rolls back on and re-enables FK checks after) if any FK to users is left.
+    // Kills: the post-condition check missing, or throwing another type.
+    public function testUserForeignKeyCheckThrowsPdoException(): void
+    {
+        self::requireServerDb();
+        $pdo = $this->container['db']->getConnection();
+        $this->loadDialect($pdo);
+        \Kanboard\Plugin\Vault\Schema\version_1($pdo);
+        foreach (self::USER_FK_COLUMNS as [$table, $column]) {
+            try {
+                \Kanboard\Plugin\Vault\Schema\assert_no_user_fk($pdo, $table, $column);
+                $this->fail("$table.$column: a remaining FK to users is not accepted");
+            } catch (\PDOException $e) {
+                $this->assertStringContainsString($table, $e->getMessage());
+            }
+        }
+    }
+
+    // Final review I2 (ledger T24 M5). MySQL DDL commits implicitly, and Kanboard's SchemaHandler records the version
+    // only after the last one ran, so a failure in v3 leaves v1 and v2 applied with the version still 0, and the next
+    // request runs v1 to v4 again. Here v3 fails midway (after its CHECK swap, at the sweep columns: vault_rotations is
+    // moved away first), then SchemaHandler migrates from 0. Kills: any MySQL version that isn't idempotent (v2's
+    // duplicate ADD COLUMN was the first); a v3 failure thrown as anything but PDOException.
+    public function testMysqlChainResumesAfterAFailureMidway(): void
+    {
+        self::requireMysql();
+        $pdo = $this->container['db']->getConnection();
+        $this->loadDialect($pdo);
+        $p = $pdo->prepare('INSERT INTO users (username, password) VALUES (?, ?)');
+        $p->execute(['vault.resume', 'x']);
+        $user = (int) $pdo->lastInsertId();
+        \Kanboard\Plugin\Vault\Schema\version_1($pdo);
+        $pdo->prepare("INSERT INTO vault_principals (user_id, kind, public_key, created_at) VALUES (?, 'human', 'cGs=', 1)")->execute([$user]);
+        \Kanboard\Plugin\Vault\Schema\version_2($pdo);
+        $pdo->exec('RENAME TABLE vault_rotations TO vault_rotations_moved');
+        try {
+            \Kanboard\Plugin\Vault\Schema\version_3($pdo);
+            $this->fail('v3 fails while vault_rotations is away');
+        } catch (\PDOException) {
+        }
+        $pdo->exec('RENAME TABLE vault_rotations_moved TO vault_rotations');
+
+        $handler = new \Kanboard\Core\Plugin\SchemaHandler($this->container);
+        $this->assertSame(0, $handler->getSchemaVersion('Vault'));
+        $handler->migrateSchema('Vault');
+        $this->assertSame(4, $handler->getSchemaVersion('Vault'));
+
+        $this->assertSame($user, (int) $pdo->query('SELECT live_user_id FROM vault_principals')->fetchColumn());
+        foreach (['org_pk', 'last_purge_at'] as $c) {
+            $this->assertContains($c, vault_test_columns($pdo, 'vault_meta'));
+        }
+        foreach (['sweep_type', 'sweep_id'] as $c) {
+            $this->assertContains($c, vault_test_columns($pdo, 'vault_rotations'));
+        }
+        $this->assertContains('share_expires_at', vault_test_columns($pdo, 'vault_share_reservations'));
+        foreach (self::USER_FK_COLUMNS as [$table, $column]) {
+            $this->assertSame([], self::userFks($pdo, $table, $column));
+        }
+        $pdo->exec("INSERT INTO vault_audit (created_at, actor_kind, action, via) VALUES (1, 'system', 'share_expire', 'ui')");
+        $refused = false;
+        try {
+            $pdo->exec("INSERT INTO vault_audit (created_at, actor_kind, action, via) VALUES (1, 'robot', 'share_expire', 'ui')");
+        } catch (\PDOException) {
+            $refused = true;
+        }
+        $this->assertTrue($refused, 'the actor_kind CHECK survives the resume');
+
+        // Every version runs again over a finished schema without error (each step checks before it alters).
+        vault_test_migrate($pdo);
+    }
+
+    // Final review I2: v3 on MySQL throws PDOException, never RuntimeException, when the actor_kind CHECK is gone (here
+    // removed by hand before v3), so SchemaHandler rolls back and re-enables FK checks. Kills: RuntimeException back.
+    public function testMysqlVersion3WithoutActorKindCheckThrowsPdoException(): void
+    {
+        self::requireMysql();
+        $pdo = $this->container['db']->getConnection();
+        $this->loadDialect($pdo);
+        \Kanboard\Plugin\Vault\Schema\version_1($pdo);
+        \Kanboard\Plugin\Vault\Schema\version_2($pdo);
+        $pdo->exec('ALTER TABLE vault_audit MODIFY actor_kind VARCHAR(16) NOT NULL');
+        $st = $pdo->query("SELECT CONSTRAINT_NAME FROM information_schema.CHECK_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = DATABASE() AND CHECK_CLAUSE LIKE '%actor_kind%'");
+        foreach ($st->fetchAll(\PDO::FETCH_COLUMN) as $name) {
+            $pdo->exec('ALTER TABLE vault_audit DROP CONSTRAINT `'.$name.'`');
+        }
+        $this->expectException(\PDOException::class);
+        \Kanboard\Plugin\Vault\Schema\version_3($pdo);
     }
 }

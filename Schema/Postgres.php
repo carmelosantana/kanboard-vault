@@ -211,21 +211,23 @@ function version_1($pdo)
 
 // R26: a principal outlives its Kanboard user row (see Sqlite.php version_2). vault_principals.user_id loses its
 // FK to users; live_user_id references users ON DELETE SET NULL so the purge can find a deleted user's principal;
-// grants and key rows cascade off vault_principals. The v1 FKs carry Postgres's default names.
+// grants and key rows cascade off vault_principals. The v1 FKs to users are found in the catalogue (pg_constraint),
+// whatever their names, dropped by the names found, and the migration fails with a PDOException if one is left
+// (final review I1: dropping an assumed name with IF EXISTS left a renamed FK cascading off users).
 function version_2($pdo)
 {
     $pdo->exec('ALTER TABLE vault_meta ADD COLUMN org_pk TEXT, ADD COLUMN last_purge_at BIGINT');
 
-    $pdo->exec('ALTER TABLE vault_principals DROP CONSTRAINT IF EXISTS vault_principals_user_id_fkey');
+    drop_user_fk($pdo, 'vault_principals', 'user_id');
     $pdo->exec('ALTER TABLE vault_principals ADD COLUMN live_user_id INTEGER, ADD COLUMN rotate_requested INTEGER NOT NULL DEFAULT 0, ADD COLUMN notices INTEGER NOT NULL DEFAULT 0');
     $pdo->exec('UPDATE vault_principals SET live_user_id = user_id');
     $pdo->exec('ALTER TABLE vault_principals ADD CONSTRAINT vault_principals_live_user_fk FOREIGN KEY(live_user_id) REFERENCES users(id) ON DELETE SET NULL');
 
-    $pdo->exec('ALTER TABLE vault_grants DROP CONSTRAINT IF EXISTS vault_grants_grantee_id_fkey');
+    drop_user_fk($pdo, 'vault_grants', 'grantee_id');
     $pdo->exec('DELETE FROM vault_grants WHERE grantee_id NOT IN (SELECT user_id FROM vault_principals)');
     $pdo->exec('ALTER TABLE vault_grants ADD CONSTRAINT vault_grants_grantee_fk FOREIGN KEY(grantee_id) REFERENCES vault_principals(user_id) ON DELETE CASCADE');
 
-    $pdo->exec('ALTER TABLE vault_keys DROP CONSTRAINT IF EXISTS vault_keys_principal_id_fkey');
+    drop_user_fk($pdo, 'vault_keys', 'principal_id');
     $pdo->exec('DELETE FROM vault_keys WHERE principal_id NOT IN (SELECT user_id FROM vault_principals)');
     $pdo->exec('ALTER TABLE vault_keys ADD CONSTRAINT vault_keys_principal_fk FOREIGN KEY(principal_id) REFERENCES vault_principals(user_id) ON DELETE CASCADE');
 }
@@ -246,4 +248,33 @@ function version_4($pdo)
 {
     $pdo->exec('ALTER TABLE vault_share_reservations ADD COLUMN share_expires_at BIGINT NOT NULL DEFAULT 0');
     $pdo->exec('ALTER TABLE vault_shares ADD COLUMN crypto_v INTEGER NOT NULL DEFAULT 1');
+}
+
+// The names of the FKs from $table.$column to users, in the current schema.
+function user_fks($pdo, string $table, string $column): array
+{
+    $stmt = $pdo->prepare("SELECT c.conname FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
+        WHERE c.contype = 'f' AND n.nspname = current_schema() AND t.relname = ? AND a.attname = ?
+          AND c.confrelid = to_regclass('users')::oid");
+    $stmt->execute([$table, $column]);
+    return $stmt->fetchAll(\PDO::FETCH_COLUMN);
+}
+
+function drop_user_fk($pdo, string $table, string $column): void
+{
+    foreach (user_fks($pdo, $table, $column) as $name) {
+        $pdo->exec('ALTER TABLE '.$table.' DROP CONSTRAINT "'.str_replace('"', '""', (string) $name).'"');
+    }
+    assert_no_user_fk($pdo, $table, $column);
+}
+
+// PDOException is the one type Kanboard's SchemaHandler catches (it then rolls back and re-enables FK checks).
+function assert_no_user_fk($pdo, string $table, string $column): void
+{
+    if (user_fks($pdo, $table, $column) !== []) {
+        throw new \PDOException('Vault schema v2: '.$table.'.'.$column.' still has a foreign key to users');
+    }
 }
