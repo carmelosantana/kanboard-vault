@@ -7,7 +7,9 @@ use Kanboard\Core\Base;
 // The single source of effective permission and effective recipients (spec: Entries, groups and grants).
 // An object's effective recipients are its owner, plus the grantee of every unexpired direct grant, plus the
 // grantee of every unexpired grant on any ancestor group; each recipient's permission is the highest among
-// their live sources, an agent principal's capped at Read (R47). A grant is expired once expires_at <= now. Grant
+// their live sources, an agent principal's capped at Read (R47). An agent principal's ownership counts only inside its
+// own Agent-created group (that group and everything below it); anywhere else owner_id gives it nothing (Codex security
+// round 1: a converted human must not keep its former vault). A grant is expired once expires_at <= now. Grant
 // rows whose subject is missing never reach here (only existing objects and their existing ancestors are looked up),
 // so they are ignored (R8).
 //
@@ -30,12 +32,14 @@ class RecipientResolver extends Base
         if ($row === null) {
             return [];
         }
-        $out = [(int) $row['owner_id'] => ObjectStore::OWNER];
+        $db = $this->vdb();
+        $ancestors = $this->ancestors($type, $row);
+        $ownerId = (int) $row['owner_id'];
+        $out = $this->ownsHere($db, $type, $row, $ancestors) ? [$ownerId => ObjectStore::OWNER] : [];
         $subjects = [[$type, $id]];
-        foreach ($this->ancestors($type, $row) as $groupId) {
+        foreach ($ancestors as $groupId) {
             $subjects[] = ['group', $groupId];
         }
-        $db = $this->vdb();
         foreach ($subjects as [$subjectType, $subjectId]) {
             $grants = $db->fetchAll(
                 'SELECT g.id, g.grantee_id, g.permission, g.expires_at, p.kind FROM vault_grants g
@@ -62,6 +66,24 @@ class RecipientResolver extends Base
             }
         }
         return $out;
+    }
+
+    // Whether owner_id makes its principal the owner here: always for a human; for an agent only on its Agent-created
+    // group and below it.
+    /** @param list<int> $ancestors */
+    private function ownsHere(VaultDb $db, string $type, array $row, array $ancestors): bool
+    {
+        $ownerId = (int) $row['owner_id'];
+        $p = $db->fetchOne('SELECT kind FROM vault_principals WHERE user_id = ?', [$ownerId]);
+        if ($p === null || $p['kind'] !== 'agent') {
+            return true;
+        }
+        $group = $db->fetchOne('SELECT id FROM vault_groups WHERE owner_id = ? AND kind = ? ORDER BY id LIMIT 1', [$ownerId, AgentVault::KIND]);
+        if ($group === null) {
+            return false;
+        }
+        $groupId = (int) $group['id'];
+        return ($type === 'group' && (int) $row['id'] === $groupId) || in_array($groupId, $ancestors, true);
     }
 
     public function object(string $type, int $id): ?array

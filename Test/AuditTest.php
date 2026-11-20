@@ -80,14 +80,16 @@ class AuditTest extends Base
             'integrity_error' => $objectCols,
             // R72 (spec addendum at T24b): an unlock refused while a Steward switch-user session is active.
             'unlock_refused' => $sessionCols,
+            // Codex security round 1: an agent enrolment refused while the principal owns objects outside its group.
+            'enroll_refused' => ['actor_user_id', 'target_user_id', 'count'],
         ];
         $norm = static function (array $t): array {
             ksort($t);
             return array_map(static function (array $c): array { sort($c); return $c; }, $t);
         };
         $this->assertSame($norm($expected), $norm(AuditModel::ALLOW));
-        // The spec's Actions table lists these 27, plus integrity_error (R37) and unlock_refused (R72).
-        $this->assertCount(29, AuditModel::ALLOW);
+        // The spec's Actions table lists these 27, plus integrity_error (R37), unlock_refused (R72) and enroll_refused.
+        $this->assertCount(30, AuditModel::ALLOW);
     }
 
     public static function actions(): array

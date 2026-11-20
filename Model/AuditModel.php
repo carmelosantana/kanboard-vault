@@ -60,6 +60,9 @@ class AuditModel extends Base
         // R72 (spec addendum at T24b): an unlock or recovery-code use refused while a Steward switch-user session is
         // active (SwitchedSessionGuard). Not a failed guess: no streak, no back-off.
         'unlock_refused' => self::SESSION,
+        // Codex security round 1: an agent enrolment refused because the principal still owns objects outside its
+        // Agent-created group (actor the owner, target the agent, count the objects).
+        'enroll_refused' => ['actor_user_id', 'target_user_id', 'count'],
     ];
     // The columns an action may fill; id, created_at, action, actor_kind and via are on every row.
     public const COLUMNS = ['actor_user_id', 'object_type', 'object_id', 'share_hash', 'target_user_id', 'ip_trunc', 'ua_family', 'count'];

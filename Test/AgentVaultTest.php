@@ -335,6 +335,88 @@ class AgentVaultTest extends Base
         $this->assertSame('owner', $resolver->effective('group', $this->agentGroup($this->dave), $this->now)[$this->dave] ?? null, 'its own group stays its own');
     }
 
+    // Codex security round 1, High: a human who owned vault objects and was then adopted and enrolled as an agent kept
+    // owner_id on them, so with its API token and vault key the agent listed and read its former human vault through
+    // getVaultEntries/getVaultSecret. The conversion is now refused while the principal owns anything outside its
+    // Agent-created group: error agent_owns_objects, audited as enroll_refused (actor the owner, target the agent,
+    // count the objects), and nothing else changes (still a human principal, no agent wrap or group, no key rows
+    // sealed to a new key, nothing queued). Once those objects are deleted, enrolment goes through and the agent sees
+    // only the owner's shares and its own group. Kills: the check missing from enrol or reenrol; the refusal audit
+    // rolled back with the transaction; a partial conversion; legacy objects counted inside the Agent-created group.
+    public function testConvertedHumanOwningObjectsIsRefusedUntilTheyAreGone(): void
+    {
+        $phrase = 'VaultFixtureSecret-davephrase-Mn7oP8';
+        $this->roster([]);
+        $this->principals()->enrolHuman($this->dave, $phrase);
+        $daveSk = $this->skFor($this->dave, $phrase);
+        [$dg, $de] = $this->sharedEntry($this->dave, $daveSk, 'Dave private', false);
+        // One Dave shared with Alice, so Alice could re-key it during a conversion (the finding's step 4).
+        [$sg, $se] = $this->sharedEntry($this->dave, $daveSk, 'Dave shared with Alice', false);
+        $this->grants()->grant($this->dave, 'group', $sg, $this->alice, 'read', null, $daveSk);
+        [, $ae] = $this->sharedEntry($this->alice, $this->aliceSk(), 'Alice shared');
+        $keysBefore = $this->countRows('SELECT COUNT(*) FROM vault_keys');
+        $queueBefore = $this->countRows('SELECT COUNT(*) FROM vault_rekey_queue');
+        $enrolsBefore = $this->countRows("SELECT COUNT(*) FROM vault_audit WHERE action IN ('enroll', 'rotate')");
+        $principalBefore = $this->row('SELECT kind, public_key, key_gen FROM vault_principals WHERE user_id = ?', [$this->dave]);
+
+        $this->roster([$this->dave => $this->alice]);
+        $this->assertVaultError('agent_owns_objects', fn () => $this->enrolDave());
+        $this->assertVaultError('agent_owns_objects', fn () => $this->agentVault()->reenrol($this->alice, $this->dave, $this->aliceSk()));
+        $this->assertSame($principalBefore, $this->row('SELECT kind, public_key, key_gen FROM vault_principals WHERE user_id = ?', [$this->dave]), 'still the human principal');
+        $this->assertSame(0, $this->countRows("SELECT COUNT(*) FROM vault_wraps WHERE user_id = ? AND method = 'agent'", [$this->dave]));
+        $this->assertNull($this->agentGroup($this->dave));
+        $this->assertSame($keysBefore, $this->countRows('SELECT COUNT(*) FROM vault_keys'), 'nothing sealed');
+        $this->assertSame($queueBefore, $this->countRows('SELECT COUNT(*) FROM vault_rekey_queue'), 'nothing queued');
+        $this->assertSame($enrolsBefore, $this->countRows("SELECT COUNT(*) FROM vault_audit WHERE action IN ('enroll', 'rotate')"));
+        $this->assertSame(
+            [[$this->alice, $this->dave, 4], [$this->alice, $this->dave, 4]],
+            array_map(fn ($r) => [(int) $r['actor_user_id'], (int) $r['target_user_id'], (int) $r['count']], $this->auditRows('enroll_refused'))
+        );
+        $this->assertSame(['ok' => false, 'reason' => 'not_agent'], $this->asDave(AgentVault::encodeKey(random_bytes(32)))->getVaultEntries());
+
+        // The remedy: off the roster, Dave deletes what he owns; adopted again, the conversion goes through.
+        $this->roster([]);
+        $this->store()->deleteObject($this->dave, 'group', $dg, $daveSk);
+        $this->store()->deleteObject($this->dave, 'group', $sg, $daveSk);
+        $this->roster([$this->dave => $this->alice]);
+        $key = $this->enrolDave();
+        $dave = $this->asDave($key);
+        $this->assertSame(['Alice shared'], array_column($dave->getVaultEntries()['entries'], 'title'));
+        $this->assertSame(['ok' => true, 'value' => Fixtures::ENTRY_PASSWORD], $dave->getVaultSecret($ae));
+        foreach ([$de, $se] as $gone) {
+            $this->assertSame(['ok' => false, 'reason' => 'not_found'], $dave->getVaultSecret($gone));
+        }
+    }
+
+    // Codex security round 1, High (defence in depth): ownership gives an agent principal nothing outside its own
+    // Agent-created group, whatever owner_id says. Planted behind the conversion's back: an entry the agent owns moved
+    // out of its group into one of Alice's, and the agent's group no longer marked agent_created. The agent reads
+    // neither through the API, the resolver lists it as no recipient (so nothing is sealed to it), and inside its group
+    // it still owns what it created. Kills: RecipientResolver::effective assigning OWNER from owner_id to an agent
+    // outside its Agent-created group.
+    public function testResolverGivesAnAgentNoOwnershipOutsideItsAgentGroup(): void
+    {
+        $key = $this->enrolDave();
+        $group = $this->agentGroup($this->dave);
+        $kept = $this->asDave($key)->createVaultEntry(['title' => 'Stays in the agent group', 'password' => 'kept-pw'])['entry_id'];
+        $moved = $this->asDave($key)->createVaultEntry(['title' => 'Moved out', 'password' => 'moved-pw'])['entry_id'];
+        [$ag] = $this->sharedEntry($this->alice, $this->aliceSk(), 'Alice private', false);
+        $resolver = new \Kanboard\Plugin\Vault\Model\RecipientResolver($this->container);
+        $this->assertSame('owner', $resolver->effective('entry', $kept, $this->now)[$this->dave] ?? null);
+        $this->assertSame('owner', $resolver->effective('group', $group, $this->now)[$this->dave] ?? null);
+
+        $this->pdo()->prepare('UPDATE vault_entries SET group_id = ? WHERE id = ?')->execute([$ag, $moved]);
+        $this->assertArrayNotHasKey($this->dave, $resolver->effective('entry', $moved, $this->now), 'no ownership outside its group');
+        $this->assertSame(['ok' => false, 'reason' => 'not_found'], $this->asDave($key)->getVaultSecret($moved));
+        $this->assertSame(['ok' => true, 'value' => 'kept-pw'], $this->asDave($key)->getVaultSecret($kept));
+
+        $this->pdo()->prepare("UPDATE vault_groups SET kind = 'normal' WHERE id = ?")->execute([$group]);
+        $this->assertArrayNotHasKey($this->dave, $resolver->effective('group', $group, $this->now));
+        $this->assertArrayNotHasKey($this->dave, $resolver->effective('entry', $kept, $this->now));
+        $this->assertSame([], $this->asDave($key)->getVaultEntries()['entries']);
+        $this->assertSame(['ok' => false, 'reason' => 'not_found'], $this->asDave($key)->getVaultSecret($kept));
+    }
+
     // T7 carry / spec "Removals while nobody is unlocked": disabling an agent removes every grant source to it through
     // removeSource (its key rows go, the objects are queued and later re-keyed, each removal audited as revoke), on the
     // purge and before any write. Its "Agent-created" group stays readable by the owner. Kills: a bare DELETE of the

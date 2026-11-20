@@ -153,6 +153,10 @@ nothing. Grants to agents are Read only. Agents write only in their own "Agent-c
 audited, and reads are capped per hour (60 by default, burst 10; the owner can lower it, and the admin sets the
 maximum).
 
+An agent owns nothing outside its "Agent-created" group. If the agent's user set up a vault of its own before it
+became an agent, vault access can't be turned on while that vault still holds items: they must be deleted first (the
+refusal is logged in the owner's activity).
+
 Refusals come back as `{ok: false, reason}`: `not_agent`, `bad_vault_key`, `rate_limited`, `not_found`, `conflict`,
 `agents_unavailable`, `payload_invalid`, `payload_too_large`, or `error` for an unexpected failure (logged by class
 only).

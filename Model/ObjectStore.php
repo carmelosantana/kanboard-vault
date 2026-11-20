@@ -56,11 +56,16 @@ class ObjectStore extends Base
         return Encoding::enc($type, self::CRYPTO_V, $id, $ownerId, $keyEpoch);
     }
 
-    public function createGroup(int $actorId, ?int $parentId, #[\SensitiveParameter] array $payload): int
+    // $kind is 'normal', or AgentVault::KIND for an agent's Agent-created group, which AgentVault creates: set on insert,
+    // so the group is sealed to the agent that owns it (RecipientResolver counts an agent's ownership only there).
+    public function createGroup(int $actorId, ?int $parentId, #[\SensitiveParameter] array $payload, string $kind = 'normal'): int
     {
+        if (! in_array($kind, ['normal', AgentVault::KIND], true)) {
+            throw new InvalidArgumentException('Vault: unknown group kind');
+        }
         $json = EntryPayload::encode(EntryPayload::validateGroup($payload));
         try {
-            return $this->lock()->exclusive(function () use ($actorId, $parentId, $json): int {
+            return $this->lock()->exclusive(function () use ($actorId, $parentId, $json, $kind): int {
                 $db = $this->vdb();
                 $this->requirePrincipal($db, $actorId);
                 // M1: a just-disabled agent's grants go first, so the new object is never sealed to it.
@@ -73,7 +78,7 @@ class ObjectStore extends Base
                 $id = $db->insert('vault_groups', [
                     'owner_id' => $actorId,
                     'parent_id' => $parentId,
-                    'kind' => 'normal',
+                    'kind' => $kind,
                     'key_epoch' => 1,
                     'nonce' => '',
                     'ciphertext' => '',

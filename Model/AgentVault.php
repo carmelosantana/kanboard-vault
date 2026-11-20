@@ -30,7 +30,9 @@ use ValueError;
 //   5. the old wraps, and the agent's rate state, are deleted.
 // After it commits, each owner whose share was removed gets a notice asking them to re-share.
 // A roster agent that still holds a human principal (T14) is converted by enrolment through the same procedure, which
-// also deletes its passphrase, recovery and org wraps, hardware keys and sessions.
+// also deletes its passphrase, recovery and org wraps, hardware keys and sessions. Enrolment and re-enrolment are
+// refused (agent_owns_objects, audited as enroll_refused) while the principal owns anything outside its Agent-created
+// group, so a converted human never keeps its former vault (Codex security round 1).
 //
 // The JSON-RPC API (Api\VaultAgentProcedure → call()): authenticate() requires the user's API token as the Basic-auth
 // password (hash_equals; Kanboard alone also accepts a login password), refuses the application user, requires roster
@@ -102,13 +104,16 @@ class AgentVault extends Base
         $this->requireOwnedAgent($ownerId, $agentId);
         $vaultKey = random_bytes(self::KEY_BYTES);
         try {
-            $notify = $this->lock()->exclusive(function () use ($ownerId, $agentId, $ownerSk, $vaultKey): array {
+            $notify = $this->lock()->exclusive(function () use ($ownerId, $agentId, $ownerSk, $vaultKey): ?array {
                 $db = $this->vdb();
                 (new Purger($this->container))->sweepOrphans($this->now());
                 $this->requireUnlockedOwner($db, $ownerId, $ownerSk);
                 $existing = $db->fetchOne('SELECT kind FROM vault_principals WHERE user_id = ?', [$agentId]);
                 if ($existing !== null && $existing['kind'] === 'agent') {
                     throw new VaultException('already_enrolled');
+                }
+                if ($this->refusedForLegacyObjects($db, $ownerId, $agentId)) {
+                    return null;
                 }
                 if ($existing !== null) {
                     // T14: a roster agent holding a human principal becomes an agent through re-enrolment.
@@ -120,6 +125,9 @@ class AgentVault extends Base
                 $this->audit()->record('enroll', ['actor_user_id' => $agentId]);
                 return $notify;
             });
+            if ($notify === null) {
+                throw new VaultException('agent_owns_objects');
+            }
             $this->askToReshare($notify, $agentId);
             return self::encodeKey($vaultKey);
         } finally {
@@ -132,15 +140,21 @@ class AgentVault extends Base
         $this->requireOwnedAgent($ownerId, $agentId);
         $vaultKey = random_bytes(self::KEY_BYTES);
         try {
-            $notify = $this->lock()->exclusive(function () use ($ownerId, $agentId, $ownerSk, $vaultKey): array {
+            $notify = $this->lock()->exclusive(function () use ($ownerId, $agentId, $ownerSk, $vaultKey): ?array {
                 $db = $this->vdb();
                 (new Purger($this->container))->sweepOrphans($this->now());
                 $this->requireUnlockedOwner($db, $ownerId, $ownerSk);
                 if ($db->fetchOne('SELECT 1 AS x FROM vault_principals WHERE user_id = ? AND live_user_id IS NOT NULL', [$agentId]) === null) {
                     throw new VaultException('not_found');
                 }
+                if ($this->refusedForLegacyObjects($db, $ownerId, $agentId)) {
+                    return null;
+                }
                 return $this->replaceKeys($db, $ownerId, $agentId, $ownerSk, $vaultKey);
             });
+            if ($notify === null) {
+                throw new VaultException('agent_owns_objects');
+            }
             $this->askToReshare($notify, $agentId);
             return self::encodeKey($vaultKey);
         } finally {
@@ -565,6 +579,29 @@ class AgentVault extends Base
         }
     }
 
+    // Codex security round 1: an agent may own only its Agent-created group and what is inside it. A principal that owns
+    // anything else (a human's vault from before it was adopted) is not converted or re-keyed: the refusal is audited
+    // as enroll_refused (actor the owner, target the agent, count the objects) in the caller's transaction, which then
+    // commits with nothing else written, and the caller answers agent_owns_objects. The objects must be deleted first:
+    // nobody but their owner holds every DEK, and the owner's own key is the one the conversion destroys.
+    private function refusedForLegacyObjects(VaultDb $db, int $ownerId, int $agentId): bool
+    {
+        $groupId = $this->agentGroupId($db, $agentId);
+        $inside = $groupId === null ? [] : array_flip(array_merge(...(new RecipientResolver($this->container))->subtreeLevels($groupId)));
+        $count = 0;
+        foreach ($db->fetchAll('SELECT id FROM vault_groups WHERE owner_id = ?', [$agentId]) as $g) {
+            $count += isset($inside[(int) $g['id']]) ? 0 : 1;
+        }
+        foreach ($db->fetchAll('SELECT group_id FROM vault_entries WHERE owner_id = ?', [$agentId]) as $e) {
+            $count += isset($inside[(int) $e['group_id']]) ? 0 : 1;
+        }
+        if ($count === 0) {
+            return false;
+        }
+        $this->audit()->record('enroll_refused', ['actor_user_id' => $ownerId, 'target_user_id' => $agentId, 'count' => $count]);
+        return true;
+    }
+
     // R10: the row first (a placeholder), then the wrap sealed with its id in the AD, in the caller's transaction.
     private function insertWrap(VaultDb $db, int $agentId, int $keyGen, #[\SensitiveParameter] string $sk, #[\SensitiveParameter] string $vaultKey): int
     {
@@ -599,8 +636,7 @@ class AgentVault extends Base
             return;
         }
         $u = $db->fetchOne('SELECT username FROM users WHERE id = ?', [$agentId]);
-        $groupId = $this->store()->createGroup($agentId, null, ['name' => t('Agent-created').': '.(string) ($u['username'] ?? $agentId)]);
-        $db->execute('UPDATE vault_groups SET kind = ? WHERE id = ?', [self::KIND, $groupId]);
+        $groupId = $this->store()->createGroup($agentId, null, ['name' => t('Agent-created').': '.(string) ($u['username'] ?? $agentId)], self::KIND);
         (new GrantModel($this->container, $this->clock))->grant($agentId, 'group', $groupId, $ownerId, ObjectStore::EDIT, null, $agentSk);
     }
 

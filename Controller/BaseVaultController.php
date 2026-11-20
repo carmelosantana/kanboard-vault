@@ -285,6 +285,7 @@ abstract class BaseVaultController extends BaseController
             'code_group_mismatch' => t('That isn\'t group 3 of the code. Check what you wrote down.'),
             'code_saved' => t('Recovery code saved. Keep it somewhere safe and offline.'),
             'owner_not_enrolled' => t('Set up your own vault first.'),
+            'agent_owns_objects' => t('This account still owns vault items from before it became an agent. They must be deleted before it can have vault access.'),
             'agents_unavailable' => t('The Agents plugin is not installed.'),
             'confirm_reenrol' => t('Re-enrol this agent? Its current vault key stops working, and what other people shared with it is unshared.'),
             'key_shown' => t('Copy this key into the agent\'s settings now. It won\'t be shown again.'),

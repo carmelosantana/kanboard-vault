@@ -42,6 +42,7 @@ final class VaultFailure
         'policy_forbids' => [403, 'policy_forbids'],
         'agent_read_only' => [422, 'agent_read_only'],
         'owner_not_enrolled' => [409, 'owner_not_enrolled'],
+        'agent_owns_objects' => [409, 'agent_owns_objects'],
         'agents_unavailable' => [409, 'agents_unavailable'],
         // Hardware keys (T20). rp_id_mismatch is said plainly (spec: "unlock reports a mismatch plainly").
         'application_url_required' => [409, 'application_url_required'],
