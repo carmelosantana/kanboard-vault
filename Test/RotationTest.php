@@ -311,7 +311,7 @@ class RotationTest extends Base
         $mid = $this->epochs();
         $bumped = count(array_filter(array_keys($mid), static fn (string $o): bool => $mid[$o] === $before[$o] + 1));
         $this->assertSame(2 * ($k + 1), $bumped, 'each committed batch re-keyed its 2 objects');
-        $this->assertSame(11 - 2 * ($k + 1), $this->countRows('SELECT COUNT(*) FROM (SELECT DISTINCT object_type, object_id FROM vault_keys WHERE principal_id = ? AND principal_key_gen = 1)', [$this->alice]));
+        $this->assertSame(11 - 2 * ($k + 1), $this->countRows('SELECT COUNT(*) FROM (SELECT DISTINCT object_type, object_id FROM vault_keys WHERE principal_id = ? AND principal_key_gen = 1) AS t', [$this->alice]));
         $this->assertSame('sweep', $this->row('SELECT phase FROM vault_rotations WHERE user_id = ?', [$this->alice])['phase']);
 
         $this->pdo()->exec('DELETE FROM vault_sessions');
@@ -623,7 +623,7 @@ class RotationTest extends Base
             $this->assertSame(32, strlen(Sealer::openDek(base64_decode($rows[0]['sealed_dek']), $this->keypair($sk1), 'entry', $id, 1, $this->alice)));
             $this->assertFalse($this->queued('entry', $id));
         }
-        $this->assertSame(2, $this->countRows('SELECT COUNT(*) FROM (SELECT DISTINCT object_type, object_id FROM vault_keys WHERE principal_id = ? AND principal_key_gen = 1)', [$this->alice]), 'only the two faulty objects are left');
+        $this->assertSame(2, $this->countRows('SELECT COUNT(*) FROM (SELECT DISTINCT object_type, object_id FROM vault_keys WHERE principal_id = ? AND principal_key_gen = 1) AS t', [$this->alice]), 'only the two faulty objects are left');
         $this->assertSame([['entry', $e1], ['entry', $e2]], $r->integrityErrors());
         $this->assertVaultError('rotation_incomplete', fn () => $this->rotation()->finish($this->alice));
         $this->assertNotNull($this->row('SELECT * FROM vault_rotations WHERE user_id = ?', [$this->alice]));

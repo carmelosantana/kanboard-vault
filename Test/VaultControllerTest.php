@@ -428,7 +428,7 @@ class VaultControllerTest extends Base
         $pending = $this->row("SELECT * FROM vault_wraps WHERE user_id = ? AND status = 'pending'", [$this->alice]);
         $kek = \Kanboard\Plugin\Vault\Crypto\Kdf::kek(($this->argon())(Fixtures::PASSPHRASE, base64_decode($pending['kdf_salt']), (int) $pending['kdf_ops'], (int) $pending['kdf_mem']), 'passphrase');
         $sk2 = \Kanboard\Plugin\Vault\Crypto\Wraps::unwrap($pending, $kek, base64_decode($rot['new_pk']));
-        $old = fn () => $this->countRows('SELECT COUNT(*) FROM (SELECT DISTINCT object_type, object_id FROM vault_keys WHERE principal_id = ? AND principal_key_gen = 1)', [$this->alice]);
+        $old = fn () => $this->countRows('SELECT COUNT(*) FROM (SELECT DISTINCT object_type, object_id FROM vault_keys WHERE principal_id = ? AND principal_key_gen = 1) AS t', [$this->alice]);
         $this->assertSame(Housekeeping::ROTATION_BATCHES + 3, $old());
 
         $batch1 = new RotationService($this->container, $this->slots(), $this->argon(), $this->clock(), $this->session(), null, 1);

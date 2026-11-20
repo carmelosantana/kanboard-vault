@@ -47,6 +47,7 @@ class VaultSessionTest extends Base
     // Kills: a vault_sessions.user_id without ON DELETE CASCADE (the delete would fail or leave the row).
     public function testUserDeleteCascadesVaultSessions(): void
     {
+        vault_test_sqlite_only(); // T24: SQLite-specific (PRAGMA, sqlite_master or Schema/Sqlite.php)
         $this->unlocked();
         $this->sid = 'php-session-B';
         $this->loginAs($this->bob);

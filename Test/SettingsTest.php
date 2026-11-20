@@ -247,7 +247,7 @@ class SettingsTest extends Base
         foreach ([['entry', 5], ['entry', 5], ['group', 2]] as [$type, $id]) {
             $audit->record('integrity_error', ['actor_user_id' => $this->alice, 'object_type' => $type, 'object_id' => $id]);
         }
-        $this->pdo()->exec("INSERT INTO settings (\"option\", value) VALUES ('vault_trusted_proxy_cidrs', '::ffff:10.0.0.0/104')");
+        $this->container['db']->table('settings')->insert(['option' => 'vault_trusted_proxy_cidrs', 'value' => '::ffff:10.0.0.0/104']);
         $body = $this->call('index')->body;
         $x = $this->dom($body);
         $this->assertSame('2', trim((string) $x->query('//*[@data-vault-integrity-count]')->item(0)?->textContent));

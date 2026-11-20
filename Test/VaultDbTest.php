@@ -54,7 +54,7 @@ class VaultDbTest extends Base
         $this->assertEquals(30, $row['updated_at']);
         $this->assertNull($db->fetchOne('SELECT bucket FROM vault_rate WHERE bucket = ?', ['zz']));
         $this->assertSame([['bucket' => 'a'], ['bucket' => 'b']], $db->fetchAll('SELECT bucket FROM vault_rate ORDER BY bucket'));
-        $this->assertSame([], $db->fetchAll('SELECT bucket FROM vault_rate WHERE 0'));
+        $this->assertSame([], $db->fetchAll('SELECT bucket FROM vault_rate WHERE 1 = 0'));
     }
 
     public function testInsertReturnsLastId(): void

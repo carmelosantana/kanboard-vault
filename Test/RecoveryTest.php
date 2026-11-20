@@ -430,6 +430,7 @@ class RecoveryTest extends Base
     // overwriting an existing org key without --replace.
     public function testOrgKeygenPrintsOnceStoresPublicOnly(): void
     {
+        vault_test_sqlite_only(); // T24: SQLite-specific (PRAGMA, sqlite_master or Schema/Sqlite.php)
         $tester = new CommandTester(new OrgKeygenCommand($this->container, fn () => $this->recovery()));
         $this->assertSame(0, $tester->execute([]));
         $out = $tester->getDisplay();

@@ -85,6 +85,7 @@ class AgentVaultTest extends Base
     // grant; the key or its KEK stored; a wrap whose AD has another id.
     public function testEnrolCreatesTheAgentPrincipalAndGroup(): void
     {
+        vault_test_sqlite_only(); // T24: SQLite-specific (PRAGMA, sqlite_master or Schema/Sqlite.php)
         $key = $this->enrolDave();
         $this->assertMatchesRegularExpression('/^[A-Za-z0-9_-]{43}$/D', $key);
         $this->assertSame(32, strlen(AgentVault::decodeKey($key)));
@@ -171,7 +172,7 @@ class AgentVaultTest extends Base
         $revokes = array_map(fn ($r) => [(int) $r['actor_user_id'], (int) $r['target_user_id'], $r['object_type']], $this->auditRows('revoke'));
         sort($revokes);
         $this->assertSame([[$this->alice, $this->dave, 'entry'], [$this->alice, $this->dave, 'group']], $revokes);
-        $queued = $this->pdo()->query("SELECT object_type || ':' || object_id FROM vault_rekey_queue ORDER BY 1")->fetchAll(PDO::FETCH_COLUMN);
+        $queued = $this->queuedRefs();
         $this->assertEqualsCanonicalizing(['entry:'.$ce, 'entry:'.$ce2, 'group:'.$cg], $queued);
         $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_keys WHERE principal_id = ? AND ((object_type = ? AND object_id IN (?, ?)) OR (object_type = ? AND object_id IN (?, ?)))', [$this->dave, 'entry', $ce, $ce2, 'group', $cg, $cg2]));
 
@@ -326,7 +327,7 @@ class AgentVaultTest extends Base
         (new Purger($this->container))->run($this->now, true);
         $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_grants WHERE grantee_id = ?', [$this->dave]));
         $this->assertSame(0, $this->countRows("SELECT COUNT(*) FROM vault_keys WHERE principal_id = ? AND ((object_type = 'group' AND object_id = ?) OR (object_type = 'entry' AND object_id = ?))", [$this->dave, $ag, $ae]));
-        $this->assertEqualsCanonicalizing(['entry:'.$ae, 'group:'.$ag], $this->pdo()->query("SELECT object_type || ':' || object_id FROM vault_rekey_queue")->fetchAll(PDO::FETCH_COLUMN));
+        $this->assertEqualsCanonicalizing(['entry:'.$ae, 'group:'.$ag], $this->queuedRefs());
         $this->assertSame([[null, $this->dave]], array_map(fn ($r) => [$r['actor_user_id'], (int) $r['target_user_id']], $this->auditRows('revoke')));
         $this->assertSame('Made by dave', $this->store()->readEntry($this->alice, $own, $this->aliceSk())['payload']['title'], 'the owner keeps the agent group');
         $this->assertSame(1, $this->countRows('SELECT COUNT(*) FROM vault_grants WHERE grantee_id = ? AND subject_id = ?', [$this->alice, $this->agentGroup($this->dave)]));
@@ -463,5 +464,13 @@ class AgentVaultTest extends Base
             }
         };
         return $c;
+    }
+
+    // The re-key queue as "type:id", sorted (built in PHP: || is OR on MySQL).
+    private function queuedRefs(): array
+    {
+        $refs = array_map(fn (array $r): string => $r['object_type'].':'.$r['object_id'], $this->pdo()->query('SELECT object_type, object_id FROM vault_rekey_queue')->fetchAll(PDO::FETCH_ASSOC));
+        sort($refs);
+        return $refs;
     }
 }

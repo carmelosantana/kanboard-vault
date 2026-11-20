@@ -109,12 +109,18 @@ trait ServiceFixture
     // The Agents roster table as Agents' schema version 1 creates it (Vault's own CI has no Agents checkout).
     protected function agentsTable(): void
     {
+        // The id column in each dialect's own auto-increment form (T24: the suite runs on MariaDB and Postgres too).
+        $id = match ($this->pdo()->getAttribute(\PDO::ATTR_DRIVER_NAME)) {
+            'mysql' => 'INT NOT NULL AUTO_INCREMENT PRIMARY KEY',
+            'pgsql' => 'SERIAL PRIMARY KEY',
+            default => 'INTEGER PRIMARY KEY',
+        };
         $this->pdo()->exec('CREATE TABLE IF NOT EXISTS agents (
-            "id" INTEGER PRIMARY KEY,
-            "owner_user_id" INTEGER NOT NULL,
-            "agent_user_id" INTEGER NOT NULL,
-            "kind" TEXT NOT NULL,
-            "created_at" INTEGER NOT NULL DEFAULT 0
+            id '.$id.',
+            owner_user_id INTEGER NOT NULL,
+            agent_user_id INTEGER NOT NULL,
+            kind VARCHAR(32) NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT 0
         )');
     }
 

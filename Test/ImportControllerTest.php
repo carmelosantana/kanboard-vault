@@ -265,6 +265,7 @@ class ImportControllerTest extends Base
     // Kills: the group named after the file; a name parameter echoed into storage, the audit or the session.
     public function testNoFilenameStored(): void
     {
+        vault_test_sqlite_only(); // T24: SQLite-specific (PRAGMA, sqlite_master or Schema/Sqlite.php)
         $this->unlock($this->alice, Fixtures::PASSPHRASE);
         $sk = $this->sk($this->alice, Fixtures::PASSPHRASE);
         $extra = ['name' => self::FILE_NAME, 'file_name' => self::FILE_NAME, 'filename' => self::FILE_NAME, 'title' => self::FILE_NAME];

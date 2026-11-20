@@ -7,6 +7,7 @@ class VaultTestFileDb
     public static function create(): string
     {
         require_once __DIR__.'/Migrate.php';
+        vault_test_sqlite_only(); // a second connection to the same file: SQLite only
         $path = tempnam(sys_get_temp_dir(), 'vault-test-').'.sqlite';
         $pdo = self::connect($path);
         $pdo->exec('PRAGMA journal_mode=wal'); // Kanboard's default (DB_WAL_MODE).

@@ -131,7 +131,7 @@ class UnlockCarriesTest extends Base
         $unlock = new UnlockService($this->container, $this->slots(), $this->argon(), $this->session(), $this->limiter(), $this->clock(), $rotation, $this->recovery(), 2);
         $unlock->unlock($this->alice, Fixtures::PASSPHRASE, self::IP);
         $this->assertSame([true, true], $free, 'two batches, both with the slot free');
-        $this->assertSame(5, $this->countRows('SELECT COUNT(*) FROM (SELECT DISTINCT object_type, object_id FROM vault_keys WHERE principal_id = ? AND principal_key_gen = 1)', [$this->alice]));
+        $this->assertSame(5, $this->countRows('SELECT COUNT(*) FROM (SELECT DISTINCT object_type, object_id FROM vault_keys WHERE principal_id = ? AND principal_key_gen = 1) AS t', [$this->alice]));
         $this->assertNotNull($this->row('SELECT * FROM vault_rotations WHERE user_id = ?', [$this->alice]), 'the rotation stays pending');
     }
 }

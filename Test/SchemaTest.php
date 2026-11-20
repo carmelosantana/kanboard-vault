@@ -1,5 +1,6 @@
 <?php
 require_once 'tests/units/Base.php';
+require_once __DIR__.'/Support/Migrate.php';
 use KanboardTests\units\Base;
 
 class SchemaTest extends Base
@@ -53,7 +54,14 @@ class SchemaTest extends Base
         $this->assertSame(1, (int) $rows[0]['id']);
         $this->assertArrayHasKey('schema_note', $rows[0]);
         // The CHECK keeps it a singleton.
-        $this->assertFalse(@$this->container['db']->table('vault_meta')->insert(['id' => 2, 'schema_note' => 'x']));
+        // PicoDb answers false on SQLite and MySQL and throws on Postgres (T24 real-DB run); either way, refused.
+        try {
+            $inserted = @$this->container['db']->table('vault_meta')->insert(['id' => 2, 'schema_note' => 'x']);
+        } catch (\PicoDb\SQLException) {
+            $inserted = false;
+        }
+        $this->assertFalse($inserted);
+        $this->assertSame(1, (int) $this->container['db']->getConnection()->query('SELECT COUNT(*) FROM vault_meta')->fetchColumn());
     }
 
     public function testVaultMetaSeedIsIdempotent(): void
@@ -72,6 +80,7 @@ class SchemaTest extends Base
     // A freed id must never be handed out again: grants and key rows name objects by (type, id) with no FK.
     public function testDeletedObjectIdsAreNeverReused(): void
     {
+        vault_test_sqlite_only(); // T24: SQLite-specific (PRAGMA, sqlite_master or Schema/Sqlite.php)
         $this->migrate();
         $db = $this->container['db'];
         foreach (['vault_groups', 'vault_entries'] as $table) {
@@ -122,6 +131,7 @@ class SchemaTest extends Base
     // A v1 install migrates to v2 with its rows, ids and AUTOINCREMENT counters intact; live_user_id is filled in.
     public function testVersion2MigratesAVersion1Install(): void
     {
+        vault_test_sqlite_only(); // T24: SQLite-specific (PRAGMA, sqlite_master or Schema/Sqlite.php)
         require_once __DIR__.'/../Schema/Sqlite.php';
         $pdo = $this->container['db']->getConnection();
         \Kanboard\Plugin\Vault\Schema\version_1($pdo);
@@ -226,6 +236,7 @@ class SchemaTest extends Base
     // without 'system' (the insert throws), the cursor columns missing, the rebuild dropping rows or the counter.
     public function testVersion3AllowsSystemActorAndKeepsTheSweepCursor(): void
     {
+        vault_test_sqlite_only(); // T24: SQLite-specific (PRAGMA, sqlite_master or Schema/Sqlite.php)
         require_once __DIR__.'/../Schema/Sqlite.php';
         $pdo = $this->container['db']->getConnection();
         \Kanboard\Plugin\Vault\Schema\version_1($pdo);
@@ -262,6 +273,44 @@ class SchemaTest extends Base
         $this->assertCount(2, array_filter($fks, static fn ($f) => $f['table'] === 'users' && $f['on_delete'] === 'SET NULL'));
     }
 
+    // T24: every version of the connection's own dialect, v1 to the latest, in one go, as a fresh install runs them;
+    // the suite runs this on SQLite, and run-realdb-tests.sh on MariaDB and Postgres. MariaDB refused v3's DROP
+    // CONSTRAINT of its column-level CHECK. Kills: a dialect's migration that fails on its own database, or a v3
+    // that leaves the old actor_kind list (system refused) or no list (robot accepted).
+    public function testOwnDialectMigratesFromScratchAndChecksActorKind(): void
+    {
+        $this->migrate();
+        $pdo = $this->container['db']->getConnection();
+        $pdo->exec("INSERT INTO vault_audit (created_at, actor_kind, action, via) VALUES (1, 'system', 'share_expire', 'ui')");
+        $this->assertSame(1, (int) $pdo->query("SELECT COUNT(*) FROM vault_audit WHERE actor_kind = 'system'")->fetchColumn());
+        $refused = false;
+        try {
+            $pdo->exec("INSERT INTO vault_audit (created_at, actor_kind, action, via) VALUES (1, 'robot', 'share_expire', 'ui')");
+        } catch (\PDOException) {
+            $refused = true;
+        }
+        $this->assertTrue($refused, 'the CHECK still refuses unknown kinds ('.$pdo->getAttribute(\PDO::ATTR_DRIVER_NAME).')');
+    }
+
+    // T24 (found on a real Postgres): Kanboard's users.is_active is a BOOLEAN there, and "is_active = 1" is an error
+    // (operator does not exist: boolean = integer), which broke unlock, sharing, the notifier and the purge. Vault's
+    // SQL binds the value instead (a bound 1 is a valid boolean on Postgres and an integer elsewhere). Kills: any
+    // Kanboard flag compared with a literal 0 or 1 again.
+    public function testNoKanboardFlagIsComparedWithAnIntegerLiteral(): void
+    {
+        $hits = [];
+        foreach (['Model', 'Controller', 'Api', 'Console', 'Subscriber'] as $dir) {
+            foreach (glob(__DIR__."/../$dir/*.php") as $file) {
+                foreach (file($file) as $n => $line) {
+                    if (preg_match('/\bis_[a-z_]+\s*(=|<>|!=)\s*[01]\b/', $line)) {
+                        $hits[] = basename($file).':'.($n + 1);
+                    }
+                }
+            }
+        }
+        $this->assertSame([], $hits);
+    }
+
     // The three dialects declare the same v3 change. MySQL and Postgres drop the old CHECK by name and fail loudly
     // (no IF EXISTS) if it isn't there. Real-DB runs belong to T24/T25 (R35).
     public function testAllThreeDialectsDeclareVersion3(): void
@@ -284,6 +333,7 @@ class SchemaTest extends Base
     // the MySQL column left TEXT (a 64 KB share would fail or be truncated there).
     public function testVersion4ShareColumns(): void
     {
+        vault_test_sqlite_only(); // T24: SQLite-specific (PRAGMA, sqlite_master or Schema/Sqlite.php)
         require_once __DIR__.'/Support/Migrate.php';
         $pdo = $this->container['db']->getConnection();
         vault_test_migrate($pdo);
