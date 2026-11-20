@@ -233,22 +233,29 @@ function version_2($pdo)
 }
 
 // R39: actor_kind gains 'system'; R32: vault_rotations keeps the sweep cursor (see Sqlite.php version_3).
-// MySQL names a column CHECK itself (vault_audit_chk_N) and MariaDB names it after the column, so the CHECK on
-// actor_kind is found by its clause and dropped by name. It throws if there is none, rather than leaving the old
-// list or no list in place. MODIFY drops MariaDB's column-level CHECK too.
+// MySQL turns a column CHECK into a table constraint it names itself (vault_audit_chk_N), which only DROP CONSTRAINT
+// removes. MariaDB keeps it a column-level constraint named after the column, which DROP CONSTRAINT can't remove
+// ("Can't DROP CONSTRAINT `actor_kind`", found on a real MariaDB in T24) and which MODIFY drops. So: the CHECK on
+// actor_kind is found by its clause (it throws if there is none, rather than leaving the old list or no list in
+// place), MODIFY drops MariaDB's, every one still there afterwards (MySQL's) is dropped by name, and none may remain.
 function version_3($pdo)
 {
-    $stmt = $pdo->prepare("SELECT CONSTRAINT_NAME FROM information_schema.CHECK_CONSTRAINTS
-        WHERE CONSTRAINT_SCHEMA = DATABASE() AND CHECK_CLAUSE LIKE '%actor_kind%' AND CHECK_CLAUSE LIKE '%human%'");
-    $stmt->execute();
-    $names = $stmt->fetchAll(\PDO::FETCH_COLUMN);
-    if ($names === []) {
+    $find = function () use ($pdo): array {
+        $stmt = $pdo->prepare("SELECT CONSTRAINT_NAME FROM information_schema.CHECK_CONSTRAINTS
+            WHERE CONSTRAINT_SCHEMA = DATABASE() AND CHECK_CLAUSE LIKE '%actor_kind%' AND CHECK_CLAUSE LIKE '%human%'");
+        $stmt->execute();
+        return $stmt->fetchAll(\PDO::FETCH_COLUMN);
+    };
+    if ($find() === []) {
         throw new \RuntimeException('Vault schema v3: the actor_kind CHECK on vault_audit was not found');
     }
-    foreach ($names as $name) {
+    $pdo->exec('ALTER TABLE vault_audit MODIFY actor_kind VARCHAR(16) NOT NULL');
+    foreach ($find() as $name) {
         $pdo->exec('ALTER TABLE vault_audit DROP CONSTRAINT `'.str_replace('`', '', (string) $name).'`');
     }
-    $pdo->exec('ALTER TABLE vault_audit MODIFY actor_kind VARCHAR(16) NOT NULL');
+    if ($find() !== []) {
+        throw new \RuntimeException('Vault schema v3: the old actor_kind CHECK on vault_audit could not be dropped');
+    }
     $pdo->exec("ALTER TABLE vault_audit ADD CONSTRAINT vault_audit_actor_kind_chk CHECK (actor_kind IN ('human', 'agent', 'public', 'cli', 'system'))");
 
     $pdo->exec('ALTER TABLE vault_rotations ADD COLUMN sweep_type VARCHAR(16) NULL, ADD COLUMN sweep_id INT NULL');
