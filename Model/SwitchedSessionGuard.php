@@ -12,7 +12,8 @@ use Kanboard\Core\Base;
 //
 //   isSwitched()     the request guard's check (VaultSession::secretKey locks the session; requireUnlocked says why).
 //   refuseUnlock()   every unlock path, before any Argon2, throttle or secret: unlock (passphrase and hardware key)
-//                    and a recovery code's use. Audited as unlock_refused (actor, ip_trunc, ua_family; never a secret),
+//                    a recovery code's use, and enrolment (PrincipalModel::enrolHuman: a new keypair and passphrase
+//                    wrap). Audited as unlock_refused (actor, ip_trunc, ua_family; never a secret),
 //                    and never a failed guess: no back-off, no IP token, no streak.
 class SwitchedSessionGuard extends Base
 {

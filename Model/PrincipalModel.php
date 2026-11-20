@@ -68,6 +68,10 @@ class PrincipalModel extends Base
 
     public function enrolHuman(int $userId, #[\SensitiveParameter] string $passphrase): void
     {
+        // R72: never while a Steward switch-user session is active (an admin would choose the target's passphrase);
+        // before the passphrase checks, the login-hash compare and any Argon2.
+        $ip = (new ClientIp($this->container))->resolve($this->request, (new VaultSettings($this->container))->trustedProxies());
+        (new SwitchedSessionGuard($this->container, $this->clock))->refuseUnlock($userId, $ip);
         $user = (new VaultDb($this->container))->fetchOne('SELECT username, password, is_active FROM users WHERE id = ?', [$userId]);
         if ($user === null || (int) $user['is_active'] !== 1) {
             throw new RuntimeException('Vault: enrolment needs an active user');

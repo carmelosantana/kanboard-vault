@@ -238,6 +238,31 @@ class SwitchedSessionTest extends Base
         $this->assertSame([$argon, 0, 0], [$this->argonCalls, $this->sessions(), $this->countRows("SELECT COUNT(*) FROM vault_wraps WHERE method = 'recovery'")]);
     }
 
+    // I1: enrolment creates a keypair and a passphrase wrap; while switched an admin must not set the target's
+    // passphrase. Refused in PrincipalModel::enrolHuman before the passphrase checks and any Argon2.
+    public function testEnrolmentRefusedWhileSwitched(): void
+    {
+        $this->loginAs($this->bob);
+        $this->jar->sets = [];
+        $this->steward->switched = true;
+        $argon = $this->argonCalls;
+        $form = ['passphrase' => Fixtures::BOB_PASSPHRASE, 'confirm' => Fixtures::BOB_PASSPHRASE];
+        $r = $this->post(VaultController::class, 'enrol', $form);
+        $this->assertSame([403, ['ok' => false, 'reason' => 'switched']], [$r->status, $r->json_()]);
+        $rows = fn (): array => [
+            $this->countRows('SELECT COUNT(*) FROM vault_principals WHERE user_id = ?', [$this->bob]),
+            $this->countRows('SELECT COUNT(*) FROM vault_wraps WHERE user_id = ?', [$this->bob]),
+        ];
+        $this->assertSame([[0, 0], $argon], [$rows(), $this->argonCalls], 'no principal, no wrap, no Argon2');
+        $this->assertVaultError('switched', fn () => $this->principals()->enrolHuman($this->bob, 'x'));
+        $this->assertSame($argon, $this->argonCalls, 'refused before the passphrase checks too');
+
+        $this->steward->switched = false;
+        $ok = $this->post(VaultController::class, 'enrol', $form);
+        $this->assertSame([200, true], [$ok->status, $ok->json_()['ok'] ?? null], 'not switched: unchanged');
+        $this->assertSame([1, 1], $rows());
+    }
+
     public function testUnlockedSessionLocksOnTheNextRequestWhileSwitched(): void
     {
         $this->assertSame(1, $this->sessions());
