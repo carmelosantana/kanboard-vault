@@ -18,4 +18,17 @@ class PluginVersionTest extends Base
         $this->assertSame([], $json['requires']);
         $this->assertSame('Agents', $json['recommends'][0]['name']);
     }
+
+    // Final review I4: the spec chose server-side decryption in memory (approach B), not end-to-end encryption
+    // (approach C, rejected). The listing text and the plugin page are the most widely read security claim Vault makes,
+    // so neither may say end-to-end or zero-knowledge. Kills: the old "End-to-end encrypted" wording coming back.
+    public function testDescriptionsMakeNoEndToEndClaim(): void
+    {
+        $json = json_decode(file_get_contents(__DIR__.'/../plugin.json'), true);
+        $descriptions = [$json['description'], (new Plugin($this->container))->getPluginDescription()];
+        foreach ($descriptions as $d) {
+            $this->assertDoesNotMatchRegularExpression('/end[- ]to[- ]end|zero[- ]knowledge/i', $d);
+            $this->assertStringContainsString('ncrypted password store', $d);
+        }
+    }
 }

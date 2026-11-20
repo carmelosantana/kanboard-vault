@@ -1,6 +1,6 @@
 {
     "name": "Vault",
-    "description": "End-to-end encrypted password store for Kanboard: per-user keys, shared groups, agent access, one-time share links and KeePassXC import/export.",
+    "description": "Encrypted password store for Kanboard: per-user keys behind a separate vault passphrase, shared groups, agent access, one-time share links and KeePassXC import/export.",
     "version": "1.0.0",
     "author": "Carmelo Santana",
     "homepage": "https://github.com/carmelosantana/kanboard-vault",

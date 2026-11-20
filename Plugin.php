@@ -121,7 +121,7 @@ class Plugin extends Base
     }
 
     public function getPluginName(): string        { return 'Vault'; }
-    public function getPluginDescription(): string { return t('End-to-end encrypted password store with shared groups, agent access and one-time share links.'); }
+    public function getPluginDescription(): string { return t('Encrypted password store with per-user keys behind a separate vault passphrase, shared groups, agent access and one-time share links.'); }
     public function getPluginAuthor(): string      { return 'Carmelo Santana'; }
     public function getPluginVersion(): string     { return '1.0.0'; }
     public function getPluginHomepage(): string    { return 'https://github.com/carmelosantana/kanboard-vault'; }

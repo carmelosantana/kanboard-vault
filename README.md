@@ -5,7 +5,8 @@ and a password generator. Each user has their own keys behind a vault passphrase
 Kanboard login. Entries can be shared with teammates (Read or Edit) and with API agents, sent to anyone as a
 one-time link, and imported from or exported to KeePassXC.
 
-The server stores only ciphertext. A stolen database backup, `config.php` included, opens nothing without a user's
+The server stores secrets only as ciphertext; metadata such as the group structure, grants and audit columns is
+plaintext by design. A stolen database backup, `config.php` included, opens nothing without a user's
 passphrase (and hardware key, if they enrolled one). The server decrypts in memory while it serves an unlocked user,
 so Vault does not defend against a compromised server. [docs/security.md](docs/security.md) has the threat model.
 
