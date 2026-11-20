@@ -430,7 +430,6 @@ class RecoveryTest extends Base
     // overwriting an existing org key without --replace.
     public function testOrgKeygenPrintsOnceStoresPublicOnly(): void
     {
-        vault_test_sqlite_only(); // T24: SQLite-specific (PRAGMA, sqlite_master or Schema/Sqlite.php)
         $tester = new CommandTester(new OrgKeygenCommand($this->container, fn () => $this->recovery()));
         $this->assertSame(0, $tester->execute([]));
         $out = $tester->getDisplay();
@@ -440,11 +439,7 @@ class RecoveryTest extends Base
         $pk = $this->pk($sk);
         $this->assertSame(base64_encode($pk), $this->row('SELECT org_pk FROM vault_meta WHERE id = 1')['org_pk']);
 
-        $dump = '';
-        $tables = $this->pdo()->query("SELECT name FROM sqlite_master WHERE type = 'table'")->fetchAll(\PDO::FETCH_COLUMN);
-        foreach ($tables as $t) {
-            $dump .= json_encode($this->pdo()->query('SELECT * FROM "'.$t.'"')->fetchAll(\PDO::FETCH_ASSOC));
-        }
+        $dump = vault_test_dump($this->pdo());
         foreach ([base64_encode($sk), bin2hex($sk), $display, str_replace('-', '', $display), base64_encode(sodium_crypto_box_keypair_from_secretkey_and_publickey($sk, $pk))] as $needle) {
             $this->assertStringNotContainsString($needle, $dump);
         }

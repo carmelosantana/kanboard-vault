@@ -257,8 +257,7 @@ class ShareModelTest extends Base
     // the label stored in plaintext, the raw id or b stored.
     public function testNoEntryLinkStored(): void
     {
-        vault_test_sqlite_only(); // T24: SQLite-specific (PRAGMA, sqlite_master or Schema/Sqlite.php)
-        $cols = array_column($this->pdo()->query('PRAGMA table_info(vault_shares)')->fetchAll(\PDO::FETCH_ASSOC), 'name');
+        $cols = vault_test_columns($this->pdo(), 'vault_shares');
         sort($cols);
         $this->assertSame(['burn_hash', 'ciphertext', 'created_at', 'creator_id', 'crypto_v', 'expires_at', 'has_passphrase', 'id_hash', 'iv', 'salt', 'sealed_label'], $cols);
         $entry = $this->store()->createEntry($this->alice, $this->store()->createGroup($this->alice, null, ['name' => 'g']), Fixtures::entry('linked'));

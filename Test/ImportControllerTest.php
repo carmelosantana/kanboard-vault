@@ -265,7 +265,6 @@ class ImportControllerTest extends Base
     // Kills: the group named after the file; a name parameter echoed into storage, the audit or the session.
     public function testNoFilenameStored(): void
     {
-        vault_test_sqlite_only(); // T24: SQLite-specific (PRAGMA, sqlite_master or Schema/Sqlite.php)
         $this->unlock($this->alice, Fixtures::PASSPHRASE);
         $sk = $this->sk($this->alice, Fixtures::PASSPHRASE);
         $extra = ['name' => self::FILE_NAME, 'file_name' => self::FILE_NAME, 'filename' => self::FILE_NAME, 'title' => self::FILE_NAME];
@@ -274,10 +273,7 @@ class ImportControllerTest extends Base
 
         $names = array_column($this->store()->tree($this->alice, $sk)['groups'], 'name');
         $this->assertSame(['Imported '.date('Y-m-d', $this->now)], $names);
-        $dump = '';
-        foreach ($this->pdo()->query("SELECT name FROM sqlite_master WHERE type = 'table'")->fetchAll(\PDO::FETCH_COLUMN) as $table) {
-            $dump .= json_encode($this->pdo()->query('SELECT * FROM "'.$table.'"')->fetchAll(\PDO::FETCH_ASSOC));
-        }
+        $dump = vault_test_dump($this->pdo());
         $this->assertStringNotContainsString('Rk2wQ8', $dump, 'no table holds the file name');
         $this->assertStringNotContainsString('Rk2wQ8', json_encode($_SESSION), 'nor the session');
         $this->assertStringNotContainsString('Rk2wQ8', json_encode($this->store()->readEntry($this->alice, $this->countRows('SELECT MAX(id) FROM vault_entries'), $sk)), 'nor the entry');

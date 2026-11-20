@@ -85,7 +85,6 @@ class AgentVaultTest extends Base
     // grant; the key or its KEK stored; a wrap whose AD has another id.
     public function testEnrolCreatesTheAgentPrincipalAndGroup(): void
     {
-        vault_test_sqlite_only(); // T24: SQLite-specific (PRAGMA, sqlite_master or Schema/Sqlite.php)
         $key = $this->enrolDave();
         $this->assertMatchesRegularExpression('/^[A-Za-z0-9_-]{43}$/D', $key);
         $this->assertSame(32, strlen(AgentVault::decodeKey($key)));
@@ -114,10 +113,7 @@ class AgentVaultTest extends Base
         $this->assertSame([$this->alice, 'edit', null], [(int) $grant['grantee_id'], $grant['permission'], $grant['expires_at']]);
         $this->assertSame('Agent-created: dave.bot', $this->store()->readGroup($this->alice, (int) $g['id'], $this->aliceSk())['payload']['name']);
 
-        $dump = '';
-        foreach ($this->pdo()->query("SELECT name FROM sqlite_master WHERE type = 'table'")->fetchAll(PDO::FETCH_COLUMN) as $t) {
-            $dump .= json_encode($this->pdo()->query('SELECT * FROM "'.$t.'"')->fetchAll(PDO::FETCH_ASSOC));
-        }
+        $dump = vault_test_dump($this->pdo());
         $raw = AgentVault::decodeKey($key);
         foreach ([$key, base64_encode($raw), bin2hex($raw), Kdf::kek($raw, 'agent', $this->dave), base64_encode(Kdf::kek($raw, 'agent', $this->dave))] as $form) {
             $this->assertStringNotContainsString($form, $dump);

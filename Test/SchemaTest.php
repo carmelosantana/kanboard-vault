@@ -80,7 +80,6 @@ class SchemaTest extends Base
     // A freed id must never be handed out again: grants and key rows name objects by (type, id) with no FK.
     public function testDeletedObjectIdsAreNeverReused(): void
     {
-        vault_test_sqlite_only(); // T24: SQLite-specific (PRAGMA, sqlite_master or Schema/Sqlite.php)
         $this->migrate();
         $db = $this->container['db'];
         foreach (['vault_groups', 'vault_entries'] as $table) {
@@ -333,14 +332,16 @@ class SchemaTest extends Base
     // the MySQL column left TEXT (a 64 KB share would fail or be truncated there).
     public function testVersion4ShareColumns(): void
     {
-        vault_test_sqlite_only(); // T24: SQLite-specific (PRAGMA, sqlite_master or Schema/Sqlite.php)
         require_once __DIR__.'/Support/Migrate.php';
         $pdo = $this->container['db']->getConnection();
         vault_test_migrate($pdo);
-        $res = array_column($pdo->query('PRAGMA table_info(vault_share_reservations)')->fetchAll(\PDO::FETCH_ASSOC), null, 'name');
-        $this->assertSame(['0', 1], [(string) $res['share_expires_at']['dflt_value'], (int) $res['share_expires_at']['notnull']]);
-        $shares = array_column($pdo->query('PRAGMA table_info(vault_shares)')->fetchAll(\PDO::FETCH_ASSOC), null, 'name');
-        $this->assertSame(['1', 1], [(string) $shares['crypto_v']['dflt_value'], (int) $shares['crypto_v']['notnull']]);
+        $res = vault_test_column_info($pdo, 'vault_share_reservations');
+        $this->assertSame(['0', true], array_slice($res['share_expires_at'], 0, 2));
+        $shares = vault_test_column_info($pdo, 'vault_shares');
+        $this->assertSame(['1', true], array_slice($shares['crypto_v'], 0, 2));
+        if (DB_DRIVER === 'mysql') {
+            $this->assertSame('mediumtext', $shares['ciphertext'][2], 'the live MariaDB column holds a 64 KB share');
+        }
         foreach (['Sqlite', 'Mysql', 'Postgres'] as $d) {
             $src = preg_replace('#^\s*//.*$#m', '', file_get_contents(__DIR__."/../Schema/$d.php"));
             $v4 = explode('function version_4($pdo)', $src)[1] ?? '';

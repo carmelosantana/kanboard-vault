@@ -47,13 +47,12 @@ class VaultSessionTest extends Base
     // Kills: a vault_sessions.user_id without ON DELETE CASCADE (the delete would fail or leave the row).
     public function testUserDeleteCascadesVaultSessions(): void
     {
-        vault_test_sqlite_only(); // T24: SQLite-specific (PRAGMA, sqlite_master or Schema/Sqlite.php)
         $this->unlocked();
         $this->sid = 'php-session-B';
         $this->loginAs($this->bob);
         $this->unlocked($this->bob);
         $this->assertSame(1, $this->countRows('SELECT COUNT(*) FROM vault_sessions WHERE user_id = ?', [$this->alice]));
-        $this->assertSame(1, $this->countRows('PRAGMA foreign_keys'));
+        $this->assertTrue(vault_test_foreign_keys_enforced($this->pdo()), 'the connection enforces foreign keys');
         $this->assertTrue($this->container['userModel']->remove($this->alice));
         $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_sessions WHERE user_id = ?', [$this->alice]));
         $this->assertSame(1, $this->countRows('SELECT COUNT(*) FROM vault_sessions WHERE user_id = ?', [$this->bob]));
