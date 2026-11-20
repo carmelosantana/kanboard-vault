@@ -663,8 +663,8 @@ class HardwareKeys extends Base
     private function principal(VaultDb $db, int $userId, #[\SensitiveParameter] string $sk): array
     {
         $row = $db->fetchOne(
-            'SELECT p.kind, p.public_key, p.key_gen, p.state FROM vault_principals p JOIN users u ON u.id = p.user_id WHERE p.user_id = ? AND u.is_active = 1 AND p.live_user_id IS NOT NULL',
-            [$userId]
+            'SELECT p.kind, p.public_key, p.key_gen, p.state FROM vault_principals p JOIN users u ON u.id = p.user_id WHERE p.user_id = ? AND u.is_active = ? AND p.live_user_id IS NOT NULL',
+            [$userId, 1]
         );
         $pk = $row === null ? false : base64_decode((string) $row['public_key'], true);
         if ($pk === false || $row['kind'] !== 'human' || AgentRoster::of($this->container)->isAgent($userId) || ! self::keyMatches($sk, $pk)) {

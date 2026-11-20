@@ -29,8 +29,8 @@ class GranteeDirectory extends Base
         foreach (array_chunk($ids, 500) as $chunk) {
             $rows = (new VaultDb($this->container))->fetchAll(
                 'SELECT u.id, u.username, u.name, p.kind FROM users u JOIN vault_principals p ON p.user_id = u.id
-                 WHERE u.is_active = 1 AND p.live_user_id IS NOT NULL AND u.id IN ('.RecipientResolver::marks($chunk).')',
-                $chunk
+                 WHERE u.is_active = ? AND p.live_user_id IS NOT NULL AND u.id IN ('.RecipientResolver::marks($chunk).')',
+                array_merge([1], $chunk)
             );
             foreach ($rows as $r) {
                 $out[] = [

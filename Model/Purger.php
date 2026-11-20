@@ -18,7 +18,7 @@ use Kanboard\Core\Base;
 //   expired grants     the removal procedure (GrantModel::removeSource), never a bare DELETE.
 //   orphaned rows      R8(b): grants (through removeSource), key rows and re-key queue rows whose object is gone.
 //   sessions, challenges, share reservations and shares past their expiry (each share expiry is audited for its
-//                      creator), and audit rows past the retention setting.
+//                      creator), and audit rows past the retention setting. Also every session of a disabled user.
 //   rate-limit windows R39: the rate_limited row of every closed window (RateLimitAudit::flush).
 //   policy wraps       T9 minor: recovery and org wraps the stored policy doesn't allow (a policy written through
 //                      Kanboard's generic settings form, around setPolicy) are deleted and their rotation queued.
@@ -109,7 +109,8 @@ class Purger extends Base
         return $this->lock()->exclusive(function () use ($now): int {
             $ids = array_map('intval', array_column($this->vdb()->fetchAll(
                 "SELECT g.id FROM vault_grants g JOIN vault_principals p ON p.user_id = g.grantee_id JOIN users u ON u.id = p.live_user_id
-                 WHERE p.kind = 'agent' AND u.is_active <> 1 ORDER BY g.id"
+                 WHERE p.kind = 'agent' AND u.is_active <> ? ORDER BY g.id",
+                [1]
             ), 'id'));
             $grants = new GrantModel($this->container, static fn (): int => $now);
             foreach ($ids as $id) {
@@ -168,7 +169,12 @@ class Purger extends Base
         return $this->lock()->exclusive(function () use ($now): array {
             $db = $this->vdb();
             return [
-                'sessions' => $db->execute('DELETE FROM vault_sessions WHERE idle_expires_at <= ? OR abs_expires_at <= ?', [$now, $now]),
+                // A disabled user's sessions too: Kanboard flushes their PHP session on their next request without a
+                // logout event, so VaultSession's own disabled check never sees it (T24, Review Focus 4).
+                'sessions' => $db->execute(
+                    'DELETE FROM vault_sessions WHERE idle_expires_at <= ? OR abs_expires_at <= ? OR user_id IN (SELECT id FROM users WHERE is_active <> ?)',
+                    [$now, $now, 1]
+                ),
                 'challenges' => $db->execute('DELETE FROM vault_challenges WHERE expires_at <= ?', [$now]),
                 'reservations' => $db->execute('DELETE FROM vault_share_reservations WHERE expires_at <= ?', [$now]),
             ];

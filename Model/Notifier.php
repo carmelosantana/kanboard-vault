@@ -133,7 +133,7 @@ class Notifier extends Base
         if (! $this->emailConfigured()) {
             return false;
         }
-        $user = (new VaultDb($this->container))->fetchOne('SELECT username, name, email FROM users WHERE id = ? AND is_active = 1', [$userId]);
+        $user = (new VaultDb($this->container))->fetchOne('SELECT username, name, email FROM users WHERE id = ? AND is_active = ?', [$userId, 1]);
         if ($user === null || trim((string) $user['email']) === '') {
             return false;
         }

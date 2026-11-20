@@ -307,4 +307,23 @@ class PurgeTest extends Base
         $this->assertSame([2, 1, 1, 1, 1], [$counts['sessions'], $counts['challenges'], $counts['reservations'], $counts['shares'], $counts['audit']]);
         $this->assertSame([['share_expire', ['target_user_id' => $this->bob, 'share_hash' => 'sh-old']]], $this->audits);
     }
+    // T24 (Review Focus 4, found in the browser): Kanboard itself invalidates a disabled user's session on their next
+    // request (AuthenticationManager::checkCurrentSession flushes it, with no logout event), so Vault's own
+    // disabled-user check (VaultSession, testDisabledUserLocks) never runs and the unlocked row stayed until its idle
+    // expiry. The purge removes every vault session of a user who is no longer active. Kills: purging the live
+    // sessions of active users, or leaving a disabled user's row.
+    public function testPurgeLocksDisabledUsersSessions(): void
+    {
+        $pdo = $this->pdo();
+        $now = $this->now;
+        foreach ([['s-alice', $this->alice], ['s-bob', $this->bob]] as [$sid, $user]) {
+            $pdo->prepare("INSERT INTO vault_sessions (sid_hash, user_id, nonce, enc_sk, created_at, last_used_at, idle_expires_at, abs_expires_at) VALUES (?, ?, 'bg==', 'ZQ==', ?, ?, ?, ?)")
+                ->execute([$sid, $user, $now - 10, $now - 10, $now + 600, $now + 3600]);
+        }
+        $pdo->prepare('UPDATE users SET is_active = ? WHERE id = ?')->execute([0, $this->bob]); // bound: a BOOLEAN on Postgres
+
+        $counts = $this->purger()->run($now, true);
+        $this->assertSame(['s-alice'], $pdo->query('SELECT sid_hash FROM vault_sessions')->fetchAll(\PDO::FETCH_COLUMN));
+        $this->assertSame(1, $counts['sessions']);
+    }
 }
