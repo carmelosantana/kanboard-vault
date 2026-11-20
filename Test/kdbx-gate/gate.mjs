@@ -189,7 +189,7 @@ try {
   // ── Import: Unicode and tabs, field for field ────────────────────────────────────────────────────────────────
   let before = await rootIds();
   let st = await importFile(FILES.unicode);
-  check(!st.bad && JSON.stringify(await report()) === JSON.stringify({ created: '5', groups: '4', skipped_attachments: '1' }), `${FILES.unicode}: imported ("${st.text}")`);
+  check(!st.bad && JSON.stringify(await report()) === JSON.stringify({ created: '5', groups: '4', skipped_attachments: '1', skipped_recycled: '0' }), `${FILES.unicode}: imported ("${st.text}")`);
   const unicodeRoot = (await rootIds()).find((id) => !before.includes(id));
   const tree1 = (await api('tree', {})).groups;
   const byId1 = Object.fromEntries(tree1.map((g) => [g.id, g]));
