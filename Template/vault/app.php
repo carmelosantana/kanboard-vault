@@ -6,8 +6,8 @@
 <?= $this->asset->js('plugins/Vault/Assets/js/vault.js') ?>
 <div id="vault-app" class="vault" data-vault-state="<?= $this->text->e($state) ?>"
      data-csrf="<?= $this->text->e($client['csrf']) ?>"
-     data-endpoints="<?= $this->text->e(json_encode($client['endpoints'])) ?>"
-     data-messages="<?= $this->text->e(json_encode($client['messages'])) ?>"
+     data-endpoints="<?= $this->text->e(json_encode($client['endpoints'], JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE)) ?>"
+     data-messages="<?= $this->text->e(json_encode($client['messages'], JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE)) ?>"
      data-idle-ms="<?= (int) $client['idle_ms'] ?>"></div>
 <?php if (! $https_ok): ?>
 <p class="alert alert-error vault-https"><?= t('Vault needs HTTPS. Open Kanboard over https:// to set up or unlock your vault.') ?></p>
