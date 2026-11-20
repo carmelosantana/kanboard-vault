@@ -7,8 +7,9 @@ use Kanboard\Core\Base;
 // The single source of effective permission and effective recipients (spec: Entries, groups and grants).
 // An object's effective recipients are its owner, plus the grantee of every unexpired direct grant, plus the
 // grantee of every unexpired grant on any ancestor group; each recipient's permission is the highest among
-// their live sources. A grant is expired once expires_at <= now. Grant rows whose subject is missing never
-// reach here (only existing objects and their existing ancestors are looked up), so they are ignored (R8).
+// their live sources, an agent principal's capped at Read (R47). A grant is expired once expires_at <= now. Grant
+// rows whose subject is missing never reach here (only existing objects and their existing ancestors are looked up),
+// so they are ignored (R8).
 //
 // Read-only. Callers run it inside the vault lock, against the rows of that transaction; all SQL goes
 // through VaultDb (R13).
@@ -37,13 +38,19 @@ class RecipientResolver extends Base
         $db = $this->vdb();
         foreach ($subjects as [$subjectType, $subjectId]) {
             $grants = $db->fetchAll(
-                'SELECT id, grantee_id, permission, expires_at FROM vault_grants WHERE subject_type = ? AND subject_id = ?',
+                'SELECT g.id, g.grantee_id, g.permission, g.expires_at, p.kind FROM vault_grants g
+                 LEFT JOIN vault_principals p ON p.user_id = g.grantee_id
+                 WHERE g.subject_type = ? AND g.subject_id = ?',
                 [$subjectType, $subjectId]
             );
             foreach ($grants as $g) {
                 $perm = (string) $g['permission'];
                 if ((int) $g['id'] === $excludeGrantId || ! in_array($perm, [ObjectStore::READ, ObjectStore::EDIT], true)) {
                     continue;
+                }
+                // R47/A8, held here as well as at grant time: an agent principal never holds more than Read.
+                if ($g['kind'] === 'agent') {
+                    $perm = ObjectStore::READ;
                 }
                 if ($g['expires_at'] !== null && (int) $g['expires_at'] <= $now) {
                     continue;

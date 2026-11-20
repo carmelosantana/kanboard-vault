@@ -307,6 +307,34 @@ class AgentVaultTest extends Base
         $this->assertVaultError('already_enrolled', fn () => $this->enrolDave());
     }
 
+    // Final review I3 (R47, A8: grants to agents are Read only). A human holding Edit grants who is then adopted onto the
+    // Agents roster and enrolled keeps the owner's grants through the conversion, but each Edit is downgraded to Read and
+    // audited as grant (actor: the owner, target: the agent). Defence in depth: RecipientResolver caps an agent principal
+    // at read even if an Edit row is written behind its back. Kills: the conversion keeping Edit; the downgrade not
+    // audited; the resolver reporting edit for an agent.
+    public function testConvertedHumanLosesEditAndResolverCapsAgentsAtRead(): void
+    {
+        $this->roster([]);
+        $this->principals()->enrolHuman($this->dave, 'VaultFixtureSecret-davephrase-Mn7oP8');
+        [$g, $e] = $this->sharedEntry($this->alice, $this->aliceSk(), 'Alice edit share', false);
+        $this->grants()->grant($this->alice, 'group', $g, $this->dave, 'edit', null, $this->aliceSk());
+        $grantsBefore = count($this->auditRows('grant'));
+
+        $this->roster([$this->dave => $this->alice]);
+        $this->enrolDave();
+        $this->assertSame('read', $this->row('SELECT permission FROM vault_grants WHERE grantee_id = ? AND subject_id = ?', [$this->dave, $g])['permission']);
+        $added = array_slice($this->auditRows('grant'), $grantsBefore);
+        $this->assertSame(
+            [[$this->alice, 'group', $g, $this->dave]],
+            array_map(fn ($r) => [(int) $r['actor_user_id'], $r['object_type'], (int) $r['object_id'], (int) $r['target_user_id']], array_values(array_filter($added, fn ($r) => (int) $r['target_user_id'] === $this->dave)))
+        );
+
+        $this->pdo()->prepare("UPDATE vault_grants SET permission = 'edit' WHERE grantee_id = ?")->execute([$this->dave]);
+        $resolver = new \Kanboard\Plugin\Vault\Model\RecipientResolver($this->container);
+        $this->assertSame('read', $resolver->effective('entry', $e, $this->now)[$this->dave] ?? null, 'an agent is capped at read');
+        $this->assertSame('owner', $resolver->effective('group', $this->agentGroup($this->dave), $this->now)[$this->dave] ?? null, 'its own group stays its own');
+    }
+
     // T7 carry / spec "Removals while nobody is unlocked": disabling an agent removes every grant source to it through
     // removeSource (its key rows go, the objects are queued and later re-keyed, each removal audited as revoke), on the
     // purge and before any write. Its "Agent-created" group stays readable by the owner. Kills: a bare DELETE of the

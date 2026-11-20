@@ -498,11 +498,16 @@ class AgentVault extends Base
             $grants = new GrantModel($this->container, $this->clock);
             $resolver = new RecipientResolver($this->container);
             $notify = [];
-            foreach ($db->fetchAll('SELECT id, subject_type, subject_id FROM vault_grants WHERE grantee_id = ? ORDER BY id', [$agentId]) as $g) {
+            foreach ($db->fetchAll('SELECT id, subject_type, subject_id, permission FROM vault_grants WHERE grantee_id = ? ORDER BY id', [$agentId]) as $g) {
                 $type = (string) $g['subject_type'];
                 $subject = isset(RecipientResolver::TABLES[$type]) ? $resolver->object($type, (int) $g['subject_id']) : null;
                 $subjectOwner = $subject === null ? null : (int) $subject['owner_id'];
                 if ($subjectOwner === $ownerId) {
+                    // R47/A8: grants to an agent are Read only. A converted human keeps the owner's grants, Edit cut to Read.
+                    if ($g['permission'] === ObjectStore::EDIT) {
+                        $db->execute('UPDATE vault_grants SET permission = ? WHERE id = ?', [ObjectStore::READ, (int) $g['id']]);
+                        $this->audit()->record('grant', ['actor_user_id' => $ownerId, 'object_type' => $type, 'object_id' => (int) $g['subject_id'], 'target_user_id' => $agentId]);
+                    }
                     continue;
                 }
                 $grants->removeSource((int) $g['id'], $ownerId);
