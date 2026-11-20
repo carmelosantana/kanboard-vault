@@ -80,10 +80,24 @@
     });
   }
 
-  // kdbxweb database → {entries: [{path, payload}], groups: [path] (every group, entries or not), skippedAttachments}.
+  // Every entry in a group and the groups below it.
+  function countEntries(group) {
+    return group.groups.reduce(function (n, child) {
+      return n + countEntries(child);
+    }, group.entries.length);
+  }
+
+  // kdbxweb database → {entries: [{path, payload}], groups: [path] (every group, entries or not), skippedAttachments,
+  // skippedRecycled}. The Recycle Bin (db.meta.recycleBinUuid) holds deleted entries: it and everything below it is
+  // skipped, its entries counted, so nothing the user deleted comes back.
   function map(db) {
-    var out = { entries: [], groups: [], skippedAttachments: 0 };
+    var out = { entries: [], groups: [], skippedAttachments: 0, skippedRecycled: 0 };
+    var bin = db.meta && db.meta.recycleBinUuid;
     (function walk(group, path) {
+      if (bin && group.uuid && group.uuid.equals(bin)) {
+        out.skippedRecycled += countEntries(group);
+        return;
+      }
       out.groups.push(path);
       group.entries.forEach(function (entry) {
         out.skippedAttachments += entry.binaries && entry.binaries.size ? entry.binaries.size : 0;
@@ -156,12 +170,12 @@
     return out;
   }
 
-  // An opened database → {batches, total, groups, skippedAttachments}, or import_limit. groups: the groups made
+  // An opened database → {batches, total, groups, skippedAttachments, skippedRecycled}, or import_limit. groups: the groups made
   // below "Imported <date>" (the database's root is that group itself).
   function prepare(db) {
     var mapped = map(db);
     limit(mapped);
-    return { batches: batches(mapped), total: mapped.entries.length, groups: mapped.groups.length - 1, skippedAttachments: mapped.skippedAttachments };
+    return { batches: batches(mapped), total: mapped.entries.length, groups: mapped.groups.length - 1, skippedAttachments: mapped.skippedAttachments, skippedRecycled: mapped.skippedRecycled };
   }
 
   // The file (and key file) bytes → the batches to send. Rejects with .code: a pre-check reason, a KBVaultKdbx code,
@@ -366,6 +380,7 @@
           setField('created', r.created);
           setField('groups', prepared.groups);
           setField('skipped_attachments', prepared.skippedAttachments);
+          setField('skipped_recycled', prepared.skippedRecycled);
           prepared.batches.length = 0;
           report.hidden = false;
           say([msg('import_done')], true);

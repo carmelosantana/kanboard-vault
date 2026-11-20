@@ -41,5 +41,6 @@
         <dt><?= t('Entries imported') ?></dt><dd data-field="created"></dd>
         <dt><?= t('Groups') ?></dt><dd data-field="groups"></dd>
         <dt><?= t('Attachments skipped') ?></dt><dd data-field="skipped_attachments"></dd>
+        <dt><?= t('Deleted entries skipped (Recycle Bin)') ?></dt><dd data-field="skipped_recycled"></dd>
     </dl>
 </section>

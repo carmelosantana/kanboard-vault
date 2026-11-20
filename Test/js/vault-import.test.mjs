@@ -39,6 +39,32 @@ test('mapping field for field: the four KeePassXC fixtures map to the same Vault
   assert.deepEqual(await mapAll(), JSON.parse(readFileSync(path('Test/fixtures/kdbx/' + MAPPED), 'utf8')));
 });
 
+// Final review M2: KeePassXC keeps deleted entries in its Recycle Bin group (db.meta.recycleBinUuid). Importing it
+// brought deleted credentials back into a store the user shares from. The bin and everything below it is skipped and
+// counted (its entries), as export already leaves the bin out. Kills: the bin imported; a group merely named
+// "Recycle Bin" skipped; the count missing from the report.
+test('the KeePass Recycle Bin is skipped and its entries counted', async () => {
+  const { importer, kdbxweb } = loadKdbxPage({ importer: true });
+  const db = kdbxweb.Kdbx.create(new kdbxweb.Credentials(kdbxweb.ProtectedValue.fromString('x')), 'Bin test');
+  const root = db.getDefaultGroup();
+  const keep = db.createEntry(root);
+  keep.fields.set('Title', 'Kept');
+  const decoy = db.createGroup(root, 'Recycle Bin');
+  db.createEntry(decoy).fields.set('Title', 'In a group only named like the bin');
+  db.meta.recycleBinEnabled = true;
+  db.createRecycleBin();
+  const bin = db.getGroup(db.meta.recycleBinUuid);
+  assert.ok(bin, 'the database has a recycle bin');
+  db.createEntry(bin).fields.set('Title', 'Deleted one');
+  db.createEntry(db.createGroup(bin, 'Deleted group')).fields.set('Title', 'Deleted two');
+  const p = importer.prepare(db);
+  const titles = flat(p.batches).map((e) => e.payload.title).sort();
+  assert.deepEqual(plain(titles), ['In a group only named like the bin', 'Kept']);
+  assert.equal(p.total, 2);
+  assert.equal(p.groups, 1, 'the decoy only; the bin and its child are not made');
+  assert.equal(p.skippedRecycled, 2);
+});
+
 test('the pre-check refuses before kdbxweb or the worker runs', async () => {
   const { importer, log } = loadKdbxPage({ importer: true });
   await rejectsWith(importer.open(fixture(CRAFTED.twofish), PASSWORD), 'twofish');
@@ -192,6 +218,7 @@ test('the page imports, reports, and clears the password and files; nothing goes
   assert.equal(q('[data-vault-import-report]').querySelector('[data-field="created"]').textContent, '5');
   assert.equal(q('[data-vault-import-report]').querySelector('[data-field="groups"]').textContent, '4');
   assert.equal(q('[data-vault-import-report]').querySelector('[data-field="skipped_attachments"]').textContent, '1');
+  assert.equal(q('[data-vault-import-report]').querySelector('[data-field="skipped_recycled"]').textContent, '0');
   assert.equal(q('[data-vault-import-password]').value, '');
   assert.equal(q('[data-vault-import-file]').value, '');
   assert.equal(p.calls[0][0], 'import_start');
