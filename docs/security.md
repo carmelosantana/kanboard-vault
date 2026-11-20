@@ -79,7 +79,7 @@ neither reports a critical or high finding.
 
 | Round | Date | Reviews | Critical / high findings | Resolution |
 |---|---|---|---|---|
-| | | | | |
+| Security review 1 | 2026-11-20 | Codex (gpt-5.6-sol, daybreak_blue requested): static, read-only review of `e7dba0b..6044fb6`. 0 Critical, 1 High, 0 Medium, 0 Low. | High: a user who set up a vault before being adopted as an agent kept ownership of those items after vault access was turned on, so the agent's API credentials could list and read them. | Fixed in `60123ea`: turning on vault access is refused while the user still owns items outside the agent's "Agent-created" group, and an agent's ownership counts only inside that group. |
 
 ## Vendored dependencies
 
