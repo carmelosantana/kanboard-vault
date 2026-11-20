@@ -35,11 +35,11 @@
     <form class="vault-form" data-vault-form="passphrase" method="post" action="<?= $this->url->href('SecurityController', 'passphrase', ['plugin' => 'Vault']) ?>">
         <input type="hidden" name="csrf_token" value="<?= $this->text->e($client['csrf']) ?>">
         <label for="vault-current"><?= t('Current passphrase') ?></label>
-        <input type="password" id="vault-current" name="current" required autocomplete="current-password">
+        <input type="password" id="vault-current" name="current" required autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore>
         <label for="vault-new-passphrase"><?= t('New passphrase') ?></label>
-        <input type="password" id="vault-new-passphrase" name="passphrase" required minlength="<?= \Kanboard\Plugin\Vault\Model\PrincipalModel::MIN_PASSPHRASE_CHARS ?>" autocomplete="new-password">
+        <input type="password" id="vault-new-passphrase" name="passphrase" required minlength="<?= \Kanboard\Plugin\Vault\Model\PrincipalModel::MIN_PASSPHRASE_CHARS ?>" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore>
         <label for="vault-new-confirm"><?= t('Type it again') ?></label>
-        <input type="password" id="vault-new-confirm" name="confirm" required autocomplete="new-password">
+        <input type="password" id="vault-new-confirm" name="confirm" required autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore>
         <p class="form-help"><?= t('At least %d characters. A few unrelated words work well.', \Kanboard\Plugin\Vault\Model\PrincipalModel::MIN_PASSPHRASE_CHARS) ?></p>
         <?= $this->render('Vault:vault/passphrase_generator') ?>
         <p class="vault-status" data-vault-status role="status" hidden></p>
@@ -53,7 +53,7 @@
     <form class="vault-form" data-vault-form="rotate" method="post" action="<?= $this->url->href('SecurityController', 'rotate', ['plugin' => 'Vault']) ?>">
         <input type="hidden" name="csrf_token" value="<?= $this->text->e($client['csrf']) ?>">
         <label for="vault-rotate-passphrase"><?= t('Your passphrase') ?></label>
-        <input type="password" id="vault-rotate-passphrase" name="passphrase" required autocomplete="current-password">
+        <input type="password" id="vault-rotate-passphrase" name="passphrase" required autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore>
         <p class="vault-status" data-vault-status role="status" hidden></p>
         <div class="form-actions"><button type="submit" class="btn btn-blue"><?= t('Rotate my keys') ?></button></div>
     </form>
@@ -69,7 +69,7 @@
     <form class="vault-form" data-vault-form="recovery" method="post" action="<?= $this->url->href('SecurityController', 'recoveryCode', ['plugin' => 'Vault']) ?>" <?= empty($hw_keys) ? '' : 'data-vault-hw="1"' ?>>
         <input type="hidden" name="csrf_token" value="<?= $this->text->e($client['csrf']) ?>">
         <label for="vault-recovery-passphrase"><?= t('Your passphrase') ?></label>
-        <input type="password" id="vault-recovery-passphrase" name="passphrase" required autocomplete="current-password">
+        <input type="password" id="vault-recovery-passphrase" name="passphrase" required autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore>
         <div class="form-actions"><button type="submit" class="btn btn-blue" data-vault-action="recovery-create"><?= t('Create a recovery code') ?></button></div>
     </form>
     <div class="vault-recovery-show" data-vault-recovery-show<?php if ($code === ''): ?> hidden<?php endif ?>>

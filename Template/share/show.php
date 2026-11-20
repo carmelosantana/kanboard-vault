@@ -38,7 +38,7 @@
     <noscript><p class="vault-reveal-error"><?= t('Revealing the secret needs JavaScript.') ?></p></noscript>
     <div class="vault-reveal-form" data-vault-reveal-form>
         <label for="vault-reveal-passphrase"><?= t('Passphrase (only if the sender gave you one)') ?></label>
-        <input type="password" id="vault-reveal-passphrase" autocomplete="off" spellcheck="false" data-vault-reveal-passphrase>
+        <input type="password" id="vault-reveal-passphrase" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore spellcheck="false" data-vault-reveal-passphrase>
         <button type="button" class="btn btn-blue" data-vault-reveal-button><?= t('Reveal') ?></button>
     </div>
     <p class="vault-reveal-status" data-vault-reveal-status role="status" hidden></p>

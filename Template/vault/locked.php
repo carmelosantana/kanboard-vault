@@ -20,11 +20,11 @@
         <input type="hidden" name="csrf_token" value="<?= $this->text->e($client['csrf']) ?>">
         <p><?= t('Your recovery code resets your passphrase. It also removes your hardware keys, and the code can\'t be used again.') ?></p>
         <label for="vault-recovery-code"><?= t('Recovery code') ?></label>
-        <input type="text" id="vault-recovery-code" name="code" required autocomplete="off" spellcheck="false">
+        <input type="text" id="vault-recovery-code" name="code" required autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore spellcheck="false">
         <label for="vault-new-passphrase"><?= t('New passphrase') ?></label>
-        <input type="password" id="vault-new-passphrase" name="passphrase" required minlength="<?= \Kanboard\Plugin\Vault\Model\PrincipalModel::MIN_PASSPHRASE_CHARS ?>" autocomplete="new-password">
+        <input type="password" id="vault-new-passphrase" name="passphrase" required minlength="<?= \Kanboard\Plugin\Vault\Model\PrincipalModel::MIN_PASSPHRASE_CHARS ?>" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore>
         <label for="vault-new-confirm"><?= t('Type it again') ?></label>
-        <input type="password" id="vault-new-confirm" name="confirm" required autocomplete="new-password">
+        <input type="password" id="vault-new-confirm" name="confirm" required autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore>
         <?php if ($error !== ''): ?>
         <p class="vault-error" role="alert"><?= $this->text->e($error) ?></p>
         <?php else: ?>
@@ -40,7 +40,7 @@
     <form class="vault-form" data-vault-form="unlock" method="post" action="<?= $this->url->href('VaultController', 'unlock', ['plugin' => 'Vault']) ?>">
         <input type="hidden" name="csrf_token" value="<?= $this->text->e($client['csrf']) ?>">
         <label for="vault-passphrase"><?= t('Vault passphrase') ?></label>
-        <input type="password" id="vault-passphrase" name="passphrase" required autofocus autocomplete="current-password">
+        <input type="password" id="vault-passphrase" name="passphrase" required autofocus autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore>
         <?php if ($error !== ''): ?>
         <p class="vault-error" role="alert"><?= $this->text->e($error) ?></p>
         <?php else: ?>

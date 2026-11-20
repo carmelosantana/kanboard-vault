@@ -26,7 +26,7 @@
         <label for="vault-import-file"><?= t('Database file (.kdbx)') ?></label>
         <input type="file" id="vault-import-file" accept=".kdbx" required data-vault-import-file>
         <label for="vault-import-password"><?= t('Master password') ?></label>
-        <input type="password" id="vault-import-password" autocomplete="off" data-vault-import-password>
+        <input type="password" id="vault-import-password" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-vault-import-password>
         <label for="vault-import-keyfile"><?= t('Key file (optional)') ?></label>
         <input type="file" id="vault-import-keyfile" data-vault-import-keyfile>
         <p class="form-help"><?= t('Databases that use Argon2 take 10–20 seconds to open. Attachments are not imported; history, icons and auto-type are dropped.') ?></p>

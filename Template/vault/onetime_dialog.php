@@ -46,7 +46,7 @@ $expiry_names = ['1h' => t('1 hour'), '1d' => t('1 day'), '7d' => t('7 days')];
         <label><input type="checkbox" data-vault-ot-use-pass> <?= t('Also require a passphrase') ?></label>
         <div data-vault-ot-pass-row hidden>
             <label for="vault-ot-pass"><?= t('Passphrase') ?></label>
-            <input type="text" id="vault-ot-pass" autocomplete="off" spellcheck="false" data-vault-ot-pass>
+            <input type="text" id="vault-ot-pass" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore spellcheck="false" data-vault-ot-pass>
             <button type="button" class="btn btn-small" data-vault-action="onetime-generate"><i class="fa fa-random" aria-hidden="true"></i> <?= t('Generate again') ?></button>
             <p class="form-help"><?= t('A weak passphrase can be guessed offline. The suggested one has 5 random words.') ?></p>
         </div>

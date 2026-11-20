@@ -125,8 +125,8 @@ class SecurityControllerTest extends Base
         $this->assertSame(200, $page->status);
         $x = $this->dom($page->body);
         $forms = [
-            'passphrase' => ['current' => 'current-password', 'passphrase' => 'new-password', 'confirm' => 'new-password'],
-            'rotate' => ['passphrase' => 'current-password'],
+            'passphrase' => ['current' => 'off', 'passphrase' => 'off', 'confirm' => 'off'],
+            'rotate' => ['passphrase' => 'off'], // R70: no browser save prompt on a vault passphrase
         ];
         foreach ($forms as $form => $inputs) {
             $f = $x->query('//form[@data-vault-form="'.$form.'"]')->item(0);
@@ -136,7 +136,8 @@ class SecurityControllerTest extends Base
             $this->assertTrue($this->container['token']->validateReusableCSRFToken($x->query('.//input[@name="csrf_token"]/@value', $f)->item(0)?->nodeValue), "$form token");
             foreach ($inputs as $name => $autocomplete) {
                 $in = $x->query('.//input[@name="'.$name.'"]', $f)->item(0);
-                $this->assertSame(['password', $autocomplete], [$in?->getAttribute('type'), $in?->getAttribute('autocomplete')], "$form.$name");
+                $this->assertSame(['password', $autocomplete, 'true'], [$in?->getAttribute('type'), $in?->getAttribute('autocomplete'), $in?->getAttribute('data-lpignore')], "$form.$name");
+                $this->assertTrue($in->hasAttribute('data-1p-ignore') && $in->hasAttribute('data-bwignore'), "$form.$name: 1p/bw ignore hints");
             }
         }
         $panel = $x->query('//form[@data-vault-form="passphrase"]//*[@data-vault-generator]')->item(0);
@@ -382,6 +383,6 @@ class SecurityControllerTest extends Base
         $this->assertStringContainsString('action=recoveryCode', $f->getAttribute('action'));
         $this->assertTrue($this->container['token']->validateReusableCSRFToken($x->query('.//input[@name="csrf_token"]/@value', $f)->item(0)?->nodeValue));
         $in = $x->query('.//input[@name="passphrase"]', $f)->item(0);
-        $this->assertSame(['password', 'current-password'], [$in?->getAttribute('type'), $in?->getAttribute('autocomplete')]);
+        $this->assertSame(['password', 'off', 'true'], [$in?->getAttribute('type'), $in?->getAttribute('autocomplete'), $in?->getAttribute('data-lpignore')]); // R70
     }
 }

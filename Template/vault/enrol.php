@@ -15,9 +15,9 @@
     <form class="vault-form" data-vault-form="enrol" method="post" action="<?= $this->url->href('VaultController', 'enrol', ['plugin' => 'Vault']) ?>">
         <input type="hidden" name="csrf_token" value="<?= $this->text->e($client['csrf']) ?>">
         <label for="vault-new-passphrase"><?= t('Vault passphrase') ?></label>
-        <input type="password" id="vault-new-passphrase" name="passphrase" required minlength="<?= \Kanboard\Plugin\Vault\Model\PrincipalModel::MIN_PASSPHRASE_CHARS ?>" autocomplete="new-password">
+        <input type="password" id="vault-new-passphrase" name="passphrase" required minlength="<?= \Kanboard\Plugin\Vault\Model\PrincipalModel::MIN_PASSPHRASE_CHARS ?>" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore>
         <label for="vault-new-confirm"><?= t('Type it again') ?></label>
-        <input type="password" id="vault-new-confirm" name="confirm" required autocomplete="new-password">
+        <input type="password" id="vault-new-confirm" name="confirm" required autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore>
         <p class="form-help"><?= t('At least %d characters. A few unrelated words work well.', \Kanboard\Plugin\Vault\Model\PrincipalModel::MIN_PASSPHRASE_CHARS) ?></p>
         <?= $this->render('Vault:vault/passphrase_generator') ?>
         <?php if ($error !== ''): ?>

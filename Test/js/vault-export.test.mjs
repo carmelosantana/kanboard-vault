@@ -259,7 +259,7 @@ test('the page re-proves the passphrase, builds and downloads the file, then cle
   // No input has a name and the form no action, so a native submit carries nothing.
   assert.equal(q('[data-vault-export]').querySelectorAll('input[name]').length, 0);
   assert.equal(q('[data-vault-export-form]').getAttribute('action'), null);
-  assert.equal(q('[data-vault-export-passphrase]').getAttribute('autocomplete'), 'current-password');
+  assert.equal(q('[data-vault-export-passphrase]').getAttribute('autocomplete'), 'off'); // R70
   // The T13 generator is offered for the export password.
   assert.ok(q('[data-vault-generator]'), 'the generator');
   assert.equal(q('[data-vault-generator]').getAttribute('data-vault-gen-target'), q('[data-vault-export-password]').id);

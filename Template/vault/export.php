@@ -27,12 +27,12 @@
     <p><?= t('Your entries are decrypted for this page only, then written into a KeePass database (KDBX 4) protected by the export password you choose here. KeePassXC and other KeePass apps open it. The file is built in your browser and never goes through the server.') ?></p>
     <form class="vault-form" data-vault-export-form autocomplete="off" <?= empty($hw_keys) ? '' : 'data-vault-hw="1"' ?>>
         <label for="vault-export-passphrase"><?= t('Your vault passphrase') ?></label>
-        <input type="password" id="vault-export-passphrase" autocomplete="current-password" required data-vault-export-passphrase>
+        <input type="password" id="vault-export-passphrase" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore required data-vault-export-passphrase>
         <label><input type="checkbox" data-vault-export-shared> <?= t('Also export the entries other people shared with me') ?></label>
         <label for="vault-new-passphrase"><?= t('Export password') ?></label>
-        <input type="password" id="vault-new-passphrase" autocomplete="new-password" data-vault-export-password>
+        <input type="password" id="vault-new-passphrase" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-vault-export-password>
         <label for="vault-new-confirm"><?= t('Type it again') ?></label>
-        <input type="password" id="vault-new-confirm" autocomplete="new-password" data-vault-export-confirm>
+        <input type="password" id="vault-new-confirm" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-vault-export-confirm>
         <?= $this->render('Vault:vault/passphrase_generator') ?>
         <p class="form-help"><?= t('Anyone with the file and this password can read every exported entry. Keep the file somewhere safe, and delete it when you no longer need it.') ?></p>
         <progress data-vault-export-progress hidden></progress>

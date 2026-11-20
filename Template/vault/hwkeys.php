@@ -43,7 +43,7 @@
     </ul>
     <form class="vault-form" data-vault-form="hwremove" hidden>
         <label for="vault-hw-remove-passphrase"><?= t('Your passphrase (needed when one key or none would be left)') ?></label>
-        <input type="password" id="vault-hw-remove-passphrase" data-vault-hw-field="passphrase" autocomplete="current-password">
+        <input type="password" id="vault-hw-remove-passphrase" data-vault-hw-field="passphrase" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore>
     </form>
     <p class="vault-status" data-vault-hw-status="remove" role="status" hidden></p>
 </section>
@@ -56,7 +56,7 @@
         <label for="vault-hw-label"><?= t('Name for this key') ?></label>
         <input type="text" id="vault-hw-label" data-vault-hw-field="label" maxlength="64" autocomplete="off" required>
         <label for="vault-hw-passphrase"><?= t('Your passphrase') ?></label>
-        <input type="password" id="vault-hw-passphrase" data-vault-hw-field="passphrase" autocomplete="current-password" required>
+        <input type="password" id="vault-hw-passphrase" data-vault-hw-field="passphrase" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore required>
         <p class="vault-status" data-vault-hw-status="register" role="status" hidden></p>
         <div class="form-actions"><button type="button" class="btn btn-blue" data-vault-action="hw-register"><?= t('Add key') ?></button></div>
     </form>
@@ -67,11 +67,11 @@
     <p><?= t('Gives your vault a new key, optionally with a new passphrase. Every key is asked for in turn.') ?></p>
     <form class="vault-form" data-vault-form="hwrotate">
         <label for="vault-hw-rotate-passphrase"><?= t('Current passphrase') ?></label>
-        <input type="password" id="vault-hw-rotate-passphrase" data-vault-hw-field="passphrase" autocomplete="current-password" required>
+        <input type="password" id="vault-hw-rotate-passphrase" data-vault-hw-field="passphrase" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore required>
         <label for="vault-hw-rotate-new"><?= t('New passphrase (leave empty to keep it)') ?></label>
-        <input type="password" id="vault-hw-rotate-new" data-vault-hw-field="new_passphrase" autocomplete="new-password">
+        <input type="password" id="vault-hw-rotate-new" data-vault-hw-field="new_passphrase" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore>
         <label for="vault-hw-rotate-confirm"><?= t('Type it again') ?></label>
-        <input type="password" id="vault-hw-rotate-confirm" data-vault-hw-field="confirm" autocomplete="new-password">
+        <input type="password" id="vault-hw-rotate-confirm" data-vault-hw-field="confirm" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore>
         <p class="vault-status" data-vault-hw-status="rotate" role="status" hidden></p>
         <div class="form-actions"><button type="button" class="btn btn-blue" data-vault-action="hw-rotate"><?= t('Rotate my keys') ?></button></div>
     </form>

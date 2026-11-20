@@ -471,7 +471,7 @@ class VaultControllerTest extends Base
                     $token = $input->getAttribute('value');
                 }
                 if ($input->getAttribute('type') === 'password') {
-                    $this->assertContains($input->getAttribute('autocomplete'), ['current-password', 'new-password'], "$endpoint: autocomplete");
+                    $this->assertSame('off', $input->getAttribute('autocomplete'), "$endpoint: autocomplete (R70)");
                 }
             }
             $this->assertTrue($this->container['token']->validateReusableCSRFToken($token), "$endpoint: a valid hidden csrf_token");
