@@ -271,6 +271,37 @@ test('the editor fetches the secrets one at a time, then fills', async () => {
   assert.equal(form.elements.notes.value, 'notes-10');
 });
 
+// Final review M4 (A9/R70): a custom field's value input is built here, not in a template, so PassphraseInputsTest
+// can't see it. Like every passphrase or password input it carries autocomplete="off" and the password-manager ignore
+// hints, protected or not (the lock toggles it to a password input in place). Kills: a hint dropped.
+test('custom field value inputs refuse password-manager saving', async () => {
+  const { doc, take, entry } = heldPage();
+  await flush();
+  doc.querySelector('[data-group-id="1"]').click();
+  await flush();
+  doc.querySelectorAll('.vault-row')[0].click();
+  const e = entry(10);
+  e.entry.secrets = { password: false, notes: false, otp: false };
+  e.entry.fields = [{ name: 'api key', protected: true }, { name: 'region', protected: false, value: 'eu' }];
+  take('entry', 10).resolve(e);
+  await flush();
+  doc.querySelector('[data-vault-action="edit"]').click();
+  await flush();
+  take('field', 10).resolve({ ok: true, value: 'key-10' });
+  await flush();
+  take('field', 10).resolve({ ok: true, value: 'eu' });
+  await flush();
+  const inputs = doc.querySelectorAll('.vault-field-value');
+  assert.equal(inputs.length, 2);
+  assert.equal(inputs[0].type, 'password');
+  for (const i of inputs) {
+    assert.equal(i.getAttribute('autocomplete'), 'off');
+    assert.equal(i.hasAttribute('data-1p-ignore'), true);
+    assert.equal(i.getAttribute('data-lpignore'), 'true');
+    assert.equal(i.hasAttribute('data-bwignore'), true);
+  }
+});
+
 // T24: after a save the list and the saved entry were reloaded at once (the same SQLite session-write race). Kills:
 // loading both in parallel again, or dropping the entry reload.
 test('after a save, the list reloads first, then the entry', async () => {

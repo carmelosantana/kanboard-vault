@@ -546,7 +546,11 @@
     value.type = f && f.protected ? 'password' : 'text';
     value.className = 'vault-field-value';
     value.value = text(f && f.value);
+    // A9/R70: no browser or password-manager save prompt for a field that may hold a secret.
     value.setAttribute('autocomplete', 'off');
+    value.setAttribute('data-1p-ignore', '');
+    value.setAttribute('data-lpignore', 'true');
+    value.setAttribute('data-bwignore', '');
     value.setAttribute('aria-label', 'value');
     var label = el('label', 'vault-field-protected');
     var prot = el('input');
