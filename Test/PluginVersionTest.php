@@ -16,7 +16,12 @@ class PluginVersionTest extends Base
         $this->assertSame('>=1.2.47', $json['kanboard_version']);
         $this->assertSame('>=8.4', $json['php_version']);
         $this->assertSame([], $json['requires']);
-        $this->assertSame('Agents', $json['recommends'][0]['name']);
+        // ModMenu reads an array of {plugin, min_version, reason} with a bare version and silently drops any other shape.
+        // Kills: the old {"name", "version": ">=..."} form coming back.
+        $this->assertCount(1, $json['recommends']);
+        $this->assertSame('Agents', $json['recommends'][0]['plugin']);
+        $this->assertSame('0.3.2', $json['recommends'][0]['min_version']);
+        $this->assertNotEmpty($json['recommends'][0]['reason']);
     }
 
     // Final review I4: the spec chose server-side decryption in memory (approach B), not end-to-end encryption

@@ -8,5 +8,7 @@
     "kanboard_version": ">=1.2.47",
     "php_version": ">=8.4",
     "requires": [],
-    "recommends": [{"name": "Agents", "version": ">=0.3.2"}]
+    "recommends": [
+        { "plugin": "Agents", "min_version": "0.3.2", "reason": "creates the agent users that Vault lets read granted entries through the API" }
+    ]
 }
