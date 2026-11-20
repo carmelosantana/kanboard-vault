@@ -5,7 +5,8 @@
  * anyone looking over the screen. The fragment is never sent, put in a query, logged or stored.
  *
  * Opening the page reveals nothing. Reveal (the button, or Enter in the passphrase field; both preventDefault, since
- * the page has no form to submit) POSTs {id, b, csrf_token} to #vault-reveal's data-reveal-url. That burns the link,
+ * the page has no form to submit) first checks that this browser can run the module worker the decryption needs
+ * (KBVaultOnetime.probe); if it can't, it says so and posts nothing, so the link is not burned. Then it POSTs {id, b, csrf_token} to #vault-reveal's data-reveal-url. That burns the link,
  * and the answer {ciphertext, iv, salt, has_passphrase, expires_at} is kept in this closure only. The secret is then
  * decrypted here with the AD enc("share", 1, id, expires_at, has_passphrase). A missing or wrong passphrase leaves the
  * kept answer in memory: the next Reveal decrypts it again without another POST. Once the secret is shown, the answer
@@ -152,31 +153,39 @@
       }
       busy = true;
       button.disabled = true;
-      var step = answer !== null ? open() : post().then(function (r) {
-        var d = r.data;
-        if (r.status === 200 && d.ok === true && typeof d.ciphertext === 'string') {
-          answer = {
-            ciphertext: d.ciphertext,
-            iv: d.iv,
-            salt: d.salt,
-            has_passphrase: d.has_passphrase === true || d.has_passphrase === 1 || d.has_passphrase === '1',
-            expires_at: d.expires_at
-          };
-          return open();
-        }
-        if (d.reason === 'not_available') {
-          done = true;
-          say(msg('not-available'));
-        } else {
-          say(msg(d.reason === 'rate_limited' ? 'rate-limited' : d.reason === 'https_required' ? 'https' : 'failed'));
-        }
+      var step = answer !== null ? open() : ot.probe().then(function () {
+        return post().then(burned, function () {
+          say(msg('failed'));
+        });
       }, function () {
-        say(msg('failed'));
+        done = true;
+        say(msg('unsupported'));
       });
       step.then(function () {
         busy = false;
         button.disabled = done;
       });
+    }
+
+    // The reveal answer: the kept ciphertext, opened here, or the link's failure.
+    function burned(r) {
+      var d = r.data;
+      if (r.status === 200 && d.ok === true && typeof d.ciphertext === 'string') {
+        answer = {
+          ciphertext: d.ciphertext,
+          iv: d.iv,
+          salt: d.salt,
+          has_passphrase: d.has_passphrase === true || d.has_passphrase === 1 || d.has_passphrase === '1',
+          expires_at: d.expires_at
+        };
+        return open();
+      }
+      if (d.reason === 'not_available') {
+        done = true;
+        say(msg('not-available'));
+      } else {
+        say(msg(d.reason === 'rate_limited' ? 'rate-limited' : d.reason === 'https_required' ? 'https' : 'failed'));
+      }
     }
 
     button.addEventListener('click', reveal);

@@ -39,7 +39,7 @@ async function makeShare(plaintext, passphrase = '') {
 }
 
 // The page at ?…&id=<id>#<hash>. reveal(body) answers each POST (default: the given answer once, then not_available).
-function sharePage({ id = ID, hash = '', https = '1', reveal } = {}) {
+function sharePage({ id = ID, hash = '', https = '1', reveal, worker } = {}) {
   const doc = new Doc();
   parseInto(doc, doc.body, stripPhp(TEMPLATE));
   const root = doc.getElementById('vault-reveal');
@@ -51,7 +51,8 @@ function sharePage({ id = ID, hash = '', https = '1', reveal } = {}) {
   const copied = [];
   const search = '?controller=VaultShareController&action=show&plugin=Vault' + (id === null ? '' : '&id=' + id);
   const location = { pathname: '/', search, hash: hash ? '#' + hash : '', href: 'https://kb.test/' + search + (hash ? '#' + hash : '') };
-  const { Worker } = workerClass();
+  const { Worker: RealWorker } = workerClass();
+  const Worker = worker === undefined ? RealWorker : worker;
   const window = {
     document: doc,
     location,
@@ -189,6 +190,31 @@ test('a passphrase share revealed without one asks for it, without a second reve
   await until(() => !p.result.hidden);
   assert.equal(p.posts.length, 1);
   assert.equal(p.secret.value, 'needs it');
+});
+
+// Final review M3: Reveal burns the link, so a browser that can't run the module worker (Argon2 for a passphrase
+// share) must find out before the POST, not after. A missing Worker, one whose constructor throws, and one that fails
+// to load (a browser without module workers loads the script classic and errors) all leave the link unburned: no POST,
+// "unsupported", Reveal off. Kills: the probe dropped or moved after the POST.
+test('a browser without a working module worker is told so before anything is posted', async () => {
+  const s = await makeShare('hello', 'pass phrase');
+  class Throws { constructor() { throw new Error('module workers unsupported'); } }
+  class Fails {
+    constructor() { setTimeout(() => this.onerror && this.onerror({}), 0); }
+    postMessage() {}
+    terminate() {}
+  }
+  for (const worker of [null, Throws, Fails]) {
+    const p = sharePage({ hash: s.fragment, reveal: once(s.answer), worker });
+    await flush();
+    p.pass.value = 'pass phrase';
+    p.button.dispatch('click');
+    await until(() => !p.status.hidden && p.button.disabled && p.status.textContent !== '');
+    await flush();
+    assert.equal(p.posts.length, 0, 'nothing posted: the link is not burned (' + (worker && worker.name) + ')');
+    assert.match(p.status.textContent, /could not run the decryption/);
+    assert.equal(p.button.disabled, true);
+  }
 });
 
 test('a burned, revoked or unknown link shows not available, and Reveal stays off', async () => {

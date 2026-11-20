@@ -19,6 +19,8 @@
  *   decrypt({ciphertext, iv, salt, has_passphrase, fragment, shareId, expiresAt, passphrase?}) → the plaintext.
  *                        Changes none of its arguments, so a failed attempt can be retried on the same ciphertext.
  *   burnHash(bHex), parseFragment(fragment) → {k, b} (Uint8Arrays) or null.
+ *   probe()              resolves once a module worker has run one BLAKE2b job here; rejects worker_failed when
+ *                        this browser can't start one. The share page runs it before Reveal burns the link.
  * Failures reject with an Error whose .code is one of bad_input, bad_link, payload_too_large, passphrase_required,
  * decrypt_failed, worker_failed. No message carries a secret.
  *
@@ -199,6 +201,12 @@
     });
   }
 
+  function probe() {
+    return work({ id: 1, type: 'blake2b', data: new Uint8Array(1), dkLen: 32 }).then(function () {
+      return true;
+    });
+  }
+
   function burnHash(bHex) {
     if (typeof bHex !== 'string' || !HEX32.test(bHex)) {
       return Promise.reject(fail('bad_input'));
@@ -320,7 +328,8 @@
     encrypt: encrypt,
     decrypt: decrypt,
     burnHash: burnHash,
-    parseFragment: parseFragment
+    parseFragment: parseFragment,
+    probe: probe
   };
 
   // ---- The creator's dialog ----------------------------------------------------------------------------------
