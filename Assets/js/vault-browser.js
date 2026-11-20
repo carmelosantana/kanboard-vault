@@ -589,16 +589,28 @@
     f.url.value = text(entry.url);
     f.tags.value = (entry.tags || []).join(', ');
     f.expires.value = day(entry.expires_at);
-    // The secrets come one field at a time from vault/field, like a reveal (and audited the same way).
+    // The secrets come one field at a time from vault/field, like a reveal (and audited the same way), and one request
+    // at a time: on SQLite, Kanboard core's session write fails ("database is locked") when two requests of one
+    // session overlap, which broke parallel fetches (T24).
     var wanted = SECRETS.filter(function (n) {
       return entry.secrets && entry.secrets[n];
     });
-    var fetches = wanted.map(function (n) {
-      return kb().api('field', { id: entry.id, field: n });
-    }).concat((entry.fields || []).map(function (fd) {
-      return kb().api('field', { id: entry.id, field: 'field:' + fd.name });
+    var refs = wanted.concat((entry.fields || []).map(function (fd) {
+      return 'field:' + fd.name;
     }));
-    return Promise.all(fetches).then(function (results) {
+    var results = [];
+    var fetches = refs.reduce(function (chain, ref) {
+      return chain.then(function (stop) {
+        if (stop || ui.editing !== editing) {
+          return true;
+        }
+        return kb().api('field', { id: entry.id, field: ref }).then(function (res) {
+          results.push(res);
+          return !res || !res.ok;
+        });
+      });
+    }, Promise.resolve(false));
+    return fetches.then(function () {
       if (ui.editing !== editing) {
         return;
       }
@@ -680,8 +692,10 @@
       }
       closeEditor();
       toast(msg('saved'));
-      loadList(0);
-      loadEntry(res.id);
+      // One request at a time (the SQLite session-write race, T24): the list, then the saved entry.
+      loadList(0).then(function () {
+        return loadEntry(res.id);
+      });
     }, function () {
       setSaving(false);
       toast(msg('failed'));

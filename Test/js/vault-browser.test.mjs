@@ -236,3 +236,70 @@ test('save sends one request at a time and re-enables after the answer', async (
   assert.equal(submit.disabled, false, 'enabled again after a success');
   assert.equal(form.hidden, true);
 });
+
+// T24 (found in the browser E2E): opening the editor fetched every secret at once, and on SQLite Kanboard core's
+// session write (SessionHandler::write reads, then updates, in one deferred transaction) fails with "database is
+// locked" when another request of the same session wrote in between, so one of the parallel answers came back broken
+// and the editor said "Something went wrong". The editor fetches one field at a time. Kills: Promise.all over the
+// fields again, or filling the editor before every field arrived.
+test('the editor fetches the secrets one at a time, then fills', async () => {
+  const { doc, take, entry, held } = heldPage();
+  await flush();
+  doc.querySelector('[data-group-id="1"]').click();
+  await flush();
+  doc.querySelectorAll('.vault-row')[0].click();
+  const e = entry(10);
+  e.entry.secrets = { password: true, notes: true, otp: false };
+  e.entry.fields = [{ name: 'api key', protected: true }];
+  take('entry', 10).resolve(e);
+  await flush();
+  doc.querySelector('[data-vault-action="edit"]').click();
+  await flush();
+  const form = doc.querySelector('[data-vault-form="edit"]');
+  const answers = [['password', 'pw-10'], ['notes', 'notes-10'], ['field:api key', 'key-10']];
+  for (const [field, value] of answers) {
+    const pending = held.filter((h) => h.action === 'field');
+    assert.equal(pending.length, 1, `one field request in flight (${pending.map((h) => h.body.field).join(', ')})`);
+    assert.equal(pending[0].body.field, field);
+    assert.equal(form.hidden, true, 'the editor waits for every field');
+    take('field', 10).resolve({ ok: true, value });
+    await flush();
+  }
+  assert.equal(held.filter((h) => h.action === 'field').length, 0);
+  assert.equal(form.hidden, false);
+  assert.equal(form.elements.password.value, 'pw-10');
+  assert.equal(form.elements.notes.value, 'notes-10');
+});
+
+// T24: after a save the list and the saved entry were reloaded at once (the same SQLite session-write race). Kills:
+// loading both in parallel again, or dropping the entry reload.
+test('after a save, the list reloads first, then the entry', async () => {
+  const held = [];
+  let lists = 0;
+  const { doc } = loadPage({
+    api: (action, body) => {
+      if (action === 'tree') {
+        return { ok: true, groups: [{ id: 1, parent_id: null, permission: 'owner', shared_by: null, name: 'G' }], shared_entries: false };
+      }
+      if (action === 'list' && lists++ === 0) {
+        return { ok: true, entries: [], next_offset: null };
+      }
+      return new Promise((resolve) => held.push({ action, body, resolve }));
+    },
+  });
+  const take = (action) => held.splice(held.findIndex((h) => h.action === action), 1)[0];
+  await flush();
+  doc.querySelector('[data-group-id="1"]').click();
+  await flush();
+  doc.querySelector('[data-vault-action="new-entry"]').click();
+  await flush();
+  const form = doc.querySelector('[data-vault-form="edit"]');
+  form.elements.title.value = 'New';
+  form.dispatch('submit');
+  take('save').resolve({ ok: true, id: 12, version: 1 });
+  await flush();
+  assert.deepEqual(held.map((h) => h.action), ['list'], 'only the list reload is in flight');
+  take('list').resolve({ ok: true, entries: [{ id: 12, title: 'New', username: '', url: '', updated_at: 0 }], next_offset: null });
+  await flush();
+  assert.deepEqual(held.map((h) => [h.action, h.body.id]), [['entry', 12]], 'then the saved entry');
+});
