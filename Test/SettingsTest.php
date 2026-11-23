@@ -534,4 +534,18 @@ class SettingsTest extends Base
         $this->call('index');
         $this->assertSame(0, $calls);
     }
+
+    // Minor 2: Claim is offered only to an admin who holds a grant on the orphan; another admin sees why not, and the
+    // delete form. Kills: the claim form for every admin.
+    public function testClaimIsOfferedOnlyToAGrantHolder(): void
+    {
+        [$e] = $this->orphanFixture();
+        $this->unlockAs(self::ADMIN, Fixtures::PASSPHRASE, 'sid-admin');
+        $this->pdo()->prepare("DELETE FROM vault_grants WHERE subject_type = 'entry' AND subject_id = ? AND grantee_id = ?")->execute([$e, self::ADMIN]);
+        $body = $this->call('index')->body;
+        $x = $this->dom($body);
+        $this->assertSame(0, $x->query('//form[@data-vault-form="orphan-claim"]')->length);
+        $this->assertSame(1, $x->query('//*[@data-vault-no-claim="'.$e.'"]')->length);
+        $this->assertSame(1, $x->query('//form[@data-vault-form="orphan-destroy"]')->length);
+    }
 }

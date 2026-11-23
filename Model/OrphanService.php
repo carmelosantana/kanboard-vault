@@ -37,8 +37,9 @@ final class OrphanService extends Base
     }
 
     // Every entry whose owner is gone and that is quarantined (its owner a tombstone) or still shared with Server (the
-    // purge will quarantine it), with the Server grant's consumers. [] for anyone but an active app admin.
-    /** @return list<array{entry_id:int, old_owner_id:int, consumers:list<string>}> */
+    // purge will quarantine it), with the Server grant's consumers and can_claim: whether this admin holds a live grant
+    // on it (the claim's own test). [] for anyone but an active app admin.
+    /** @return list<array{entry_id:int, old_owner_id:int, consumers:list<string>, can_claim:bool}> */
     public function orphans(int $adminId): array
     {
         return $this->lock()->shared(function () use ($adminId): array {
@@ -63,6 +64,7 @@ final class OrphanService extends Base
                     'entry_id' => (int) $r['id'],
                     'old_owner_id' => (int) $r['owner_id'],
                     'consumers' => $r['server_consumers'] === null ? [] : ServerGrant::decodeList((string) $r['server_consumers']),
+                    'can_claim' => isset($this->resolver()->grantees('entry', (int) $r['id'], $this->now(), $r)[$adminId]),
                 ];
             }
             return $out;

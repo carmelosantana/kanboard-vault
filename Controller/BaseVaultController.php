@@ -262,6 +262,7 @@ abstract class BaseVaultController extends BaseController
             'failed' => t('Something went wrong. Try again.'),
             'locked' => t('Your vault is locked.'),
             'not_found' => t('Not found, or you no longer have access.'),
+            'not_allowed' => t('Only an administrator who was given access to this entry can claim it.'),
             'conflict' => t('This entry was changed elsewhere. Reload it, then edit again.'),
             'payload_invalid' => t('Some values are not valid.'),
             'payload_too_large' => t('This entry is too large.'),

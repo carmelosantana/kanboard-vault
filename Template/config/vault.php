@@ -108,6 +108,9 @@ $expiries = [3600 => t('1 hour'), 86400 => t('1 day'), 604800 => t('7 days')];
 <?php foreach ($orphans as $o): ?>
 <div class="vault-orphan" data-vault-orphan="<?= (int) $o['entry_id'] ?>">
     <h4><?= t('Entry #%d', (int) $o['entry_id']) ?></h4>
+    <?php if (empty($o['can_claim'])): ?>
+    <p class="form-help" data-vault-no-claim="<?= (int) $o['entry_id'] ?>"><?= t('You weren\'t given access to this entry, so you can\'t claim it. An administrator who was can, or you can delete it.') ?></p>
+    <?php else: ?>
     <form method="post" action="<?= $this->url->href('OrphanController', 'claim', ['plugin' => 'Vault']) ?>" autocomplete="off" data-vault-form="orphan-claim">
         <input type="hidden" name="csrf_token" value="<?= $this->text->e($csrf) ?>">
         <input type="hidden" name="entry_id" value="<?= (int) $o['entry_id'] ?>">
@@ -125,6 +128,7 @@ $expiries = [3600 => t('1 hour'), 86400 => t('1 day'), 604800 => t('7 days')];
         <div class="form-actions"><button type="submit" class="btn btn-blue"><?= t('Claim') ?></button></div>
         <?php endif ?>
     </form>
+    <?php endif ?>
     <form method="post" action="<?= $this->url->href('OrphanController', 'destroy', ['plugin' => 'Vault']) ?>" autocomplete="off" data-vault-form="orphan-destroy">
         <input type="hidden" name="csrf_token" value="<?= $this->text->e($csrf) ?>">
         <input type="hidden" name="entry_id" value="<?= (int) $o['entry_id'] ?>">

@@ -228,6 +228,12 @@ class OrphanControllerTest extends Base
         $this->assertSame(303, $r->status);
         $this->assertSame('/?controller=SettingsController&action=index&plugin=Vault&vault_error=not_found', $r->headers['Location'] ?? null);
 
+        // Minor 2: an admin without a grant gets the plain not_allowed answer, not the generic failure.
+        $this->pdo()->prepare("DELETE FROM vault_grants WHERE subject_type = 'entry' AND subject_id = ? AND grantee_id = ?")->execute([$e, self::ADMIN]);
+        $r = $this->post('claim', ['entry_id' => (string) $e, 'group_id' => (string) $adminGroup]);
+        $this->assertSame([403, ['ok' => false, 'reason' => 'not_allowed']], [$r->status, $r->json_()]);
+        $this->assertSame($epoch, $this->epoch($e));
+
         $r = $this->post('destroy', ['entry_id' => (string) $e, 'passphrase' => self::ADMIN_PASSPHRASE], true, false);
         $this->assertSame('/?controller=SettingsController&action=index&plugin=Vault&vault_notice=orphan_destroyed', $r->headers['Location'] ?? null);
         $this->assertFalse($this->entryExists($e));

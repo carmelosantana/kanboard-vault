@@ -490,9 +490,23 @@ class OrphanTest extends Base
         $this->assertSame([], $this->orphans()->orphans(self::ADMIN), 'a live owner has no orphans');
         $this->deleteAlice();
         $this->purge();
-        $this->assertSame([['entry_id' => $e1, 'old_owner_id' => $this->alice, 'consumers' => ['CveHunter']]], $this->orphans()->orphans(self::ADMIN));
+        $this->assertSame([['entry_id' => $e1, 'old_owner_id' => $this->alice, 'consumers' => ['CveHunter'], 'can_claim' => false]], $this->orphans()->orphans(self::ADMIN));
         $this->assertSame([], $this->orphans()->orphans($this->bob));
         $this->assertSame([], $this->orphans()->orphans($this->carol));
+    }
+
+    // Minor 2: can_claim says whether this admin holds a live grant on the orphan (the claim's own test), so the page
+    // offers Claim only to them. Kills: can_claim true for every admin; a key row alone counting as a grant.
+    public function testCanClaimIsALiveGrant(): void
+    {
+        [$g1, $e1] = $this->aliceTree();
+        $this->grants()->grant($this->alice, 'entry', $e1, self::ADMIN, 'read', null, $this->aliceSk());
+        $this->deleteAlice();
+        $this->purge();
+        $this->assertSame([true], array_column($this->orphans()->orphans(self::ADMIN), 'can_claim'));
+        $this->pdo()->prepare("UPDATE vault_grants SET expires_at = ? WHERE subject_type = 'entry' AND subject_id = ? AND grantee_id = ?")->execute([$this->now, $e1, self::ADMIN]);
+        $this->assertSame(1, $this->keyRows($e1, self::ADMIN));
+        $this->assertSame([false], array_column($this->orphans()->orphans(self::ADMIN), 'can_claim'));
     }
 
     /** @return array<string, array{0:callable}> arrange(test): runs a loser-reconciliation path against the quarantined e1 */

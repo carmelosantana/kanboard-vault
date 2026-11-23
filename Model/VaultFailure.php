@@ -31,6 +31,8 @@ final class VaultFailure
         'id_held_by_orphans' => [409, 'id_held_by_orphans'],
         'not_enrolled' => [409, 'not_enrolled'],
         'not_found' => [404, 'not_found'],
+        // An orphan claim by an admin who holds no grant on the entry (Minor 2).
+        'not_allowed' => [403, 'not_allowed'],
         'conflict' => [409, 'conflict'],
         'payload_invalid' => [400, 'payload_invalid'],
         'payload_too_large' => [413, 'payload_too_large'],
