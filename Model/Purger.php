@@ -7,13 +7,17 @@ use Kanboard\Core\Base;
 // The purge (spec: Data model → Purge), at most once a minute on vault requests and unconditionally from
 // `php cli vault:purge`. Each step is its own exclusive transaction, all SQL through VaultDb (R13):
 //
-//   orphan principals  R26. A Kanboard user deletion leaves the principal behind with live_user_id NULL (its
-//                      grants and key rows cascade off vault_principals, not users). For each such principal:
-//                      every grant it holds is removed with GrantModel::removeSource (which drops the losers' key
-//                      rows and queues every covered object, the whole subtree for a group), every object it still
-//                      holds a key row for is queued at its current epoch, and then the principal is deleted,
-//                      taking what's left with it. The write barrier covers the queued objects until a holder
-//                      re-keys them. ObjectStore::beforeWrite runs the same sweep, so a write can't beat the purge.
+//   orphan principals  R26 + v5. A Kanboard user deletion leaves the principal behind with live_user_id NULL (its
+//                      grants, key rows and, since v5, the objects it owns reference vault_principals, not users).
+//                      Only human and agent principals are swept: server and host have live_user_id NULL by design.
+//                      For each such principal: every grant it holds is removed with GrantModel::removeSource (which
+//                      drops the losers' key rows and queues every covered object, the whole subtree for a group),
+//                      every object it still holds a key row for is queued at its current epoch, every object it
+//                      owns is deleted with its subtree and its grant, key and queue rows
+//                      (ObjectStore::deleteOwnedBy, as the old users cascade did; nobody reads them in the meantime,
+//                      RecipientResolver::ownerGone), and then the principal is deleted. The write barrier covers the
+//                      queued objects until a holder re-keys them. ObjectStore::beforeWrite runs the same sweep, so a
+//                      write can't beat the purge.
 //   disabled agents    T7: every grant to a disabled agent, through GrantModel::removeSource (also before writes).
 //   expired grants     the removal procedure (GrantModel::removeSource), never a bare DELETE.
 //   orphaned rows      R8(b): grants (through removeSource), key rows and re-key queue rows whose object is gone.
@@ -68,19 +72,21 @@ class Purger extends Base
         return $counts;
     }
 
-    // R26: sweeps every principal whose Kanboard user was deleted into re-keys, then deletes it. Runs in the
-    // caller's exclusive transaction (ObjectStore::beforeWrite) or its own. Returns how many were swept.
+    // R26: sweeps every human or agent principal whose Kanboard user was deleted into re-keys, deletes what it owns
+    // (v5), then deletes it. Runs in the caller's exclusive transaction (ObjectStore::beforeWrite) or its own. Returns
+    // how many were swept.
     public function sweepOrphans(int $now): int
     {
         return $this->lock()->exclusive(function () use ($now): int {
             $db = $this->vdb();
-            $ids = array_map('intval', array_column($db->fetchAll('SELECT user_id FROM vault_principals WHERE live_user_id IS NULL ORDER BY user_id'), 'user_id'));
+            $ids = array_map('intval', array_column($db->fetchAll("SELECT user_id FROM vault_principals WHERE live_user_id IS NULL AND kind IN ('human', 'agent') ORDER BY user_id"), 'user_id'));
             if ($ids === []) {
                 return 0;
             }
             $grants = new GrantModel($this->container, static fn (): int => $now);
             $rekeyer = new Rekeyer($this->container, static fn (): int => $now);
             $resolver = new RecipientResolver($this->container);
+            $store = new ObjectStore($this->container);
             foreach ($ids as $principalId) {
                 foreach ($db->fetchAll('SELECT id FROM vault_grants WHERE grantee_id = ? ORDER BY id', [$principalId]) as $g) {
                     $grants->removeSource((int) $g['id']);
@@ -94,7 +100,8 @@ class Purger extends Base
                 }
                 // Explicit as well as cascaded: the key rows must not outlive the principal even without FK enforcement.
                 $db->execute('DELETE FROM vault_keys WHERE principal_id = ?', [$principalId]);
-                $db->execute('DELETE FROM vault_principals WHERE user_id = ? AND live_user_id IS NULL', [$principalId]);
+                $store->deleteOwnedBy($db, $principalId);
+                $db->execute("DELETE FROM vault_principals WHERE user_id = ? AND live_user_id IS NULL AND kind IN ('human', 'agent')", [$principalId]);
             }
             return count($ids);
         });

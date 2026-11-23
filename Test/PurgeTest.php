@@ -254,6 +254,40 @@ class PurgeTest extends Base
         $this->assertVaultError('not_enrolled', fn () => $this->grants()->grant($this->alice, 'entry', $this->e3, $this->bob, 'read', null, $this->sk[$this->alice]));
     }
 
+    // v5: objects reference the owner's principal, so deleting the owner's Kanboard user cascades nothing. Until the
+    // sweep runs, nobody reads them (the old cascade removed them at once); the sweep then deletes them and their grant,
+    // key and queue rows, then the principal. Kills: the resolver still serving a gone owner's objects; the sweep
+    // leaving owned objects or their rows behind (relying on orphanRows, which the bare sweep doesn't run).
+    public function testDeletedOwnersObjectsAreUnreadableThenSwept(): void
+    {
+        $this->grants()->grant($this->alice, 'group', $this->g1, $this->bob, 'read', null, $this->sk[$this->alice]);
+        $this->store()->readEntry($this->bob, $this->e1, $this->sk[$this->bob]); // control: bob can read
+        $this->assertTrue($this->container['userModel']->remove($this->alice));
+        $this->assertSame(1, $this->countRows('SELECT COUNT(*) FROM vault_entries WHERE id = ?', [$this->e1]));
+        $this->assertVaultError('not_found', fn () => $this->store()->readEntry($this->bob, $this->e1, $this->sk[$this->bob]));
+
+        $this->assertSame(1, $this->purger()->sweepOrphans($this->now));
+        $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_entries WHERE owner_id = ?', [$this->alice]));
+        $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_groups WHERE owner_id = ?', [$this->alice]));
+        foreach ([['entry', [$this->e1, $this->e3]], ['group', [$this->g1, $this->g2, $this->g3]]] as [$type, $ids]) {
+            foreach ($ids as $id) {
+                $this->assertSame(0, $this->countRows("SELECT COUNT(*) FROM vault_grants WHERE subject_type = ? AND subject_id = ?", [$type, $id]));
+                $this->assertSame(0, $this->countRows("SELECT COUNT(*) FROM vault_keys WHERE object_type = ? AND object_id = ?", [$type, $id]));
+                $this->assertSame(0, $this->countRows("SELECT COUNT(*) FROM vault_rekey_queue WHERE object_type = ? AND object_id = ?", [$type, $id]));
+            }
+        }
+        $this->assertNull($this->row('SELECT user_id FROM vault_principals WHERE user_id = ?', [$this->alice]));
+    }
+
+    // Server and host principals have live_user_id NULL by design. Kills: the sweep's kind filter missing.
+    public function testSweepNeverTakesServerOrHostPrincipals(): void
+    {
+        $this->pdo()->exec("INSERT INTO vault_principals (user_id, kind, public_key, key_gen, state, created_at, live_user_id)
+            VALUES (-1, 'server', 'cGs=', 1, 'active', 1, NULL), (-2, 'host', 'cGs=', 1, 'active', 1, NULL)");
+        $this->purger()->run($this->now, true);
+        $this->assertSame(2, $this->countRows('SELECT COUNT(*) FROM vault_principals WHERE user_id < 0'));
+    }
+
     // R8(b): grant, key and re-key queue rows whose object no longer exists are removed; rows for live objects stay.
     // Kills: leaving orphans, or deleting by type alone.
     public function testPurgeRemovesOrphanedPolymorphicRows(): void

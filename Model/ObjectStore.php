@@ -513,6 +513,54 @@ class ObjectStore extends Base
         });
     }
 
+    // v5 owner deletion: every object the principal owns goes, inside the caller's exclusive lock (the purge's orphan
+    // sweep). Owned entries, and every owned group with its whole subtree, entries included, as the old users and
+    // group_id cascades took them. Key, grant and re-key queue rows go with them; groups are deleted bottom-up, as in
+    // deleteObject. Not audited, the same as the cascade. Returns how many objects were deleted.
+    public function deleteOwnedBy(VaultDb $db, int $principalId): int
+    {
+        $resolver = $this->resolver();
+        $seen = [];
+        $levelSets = [];
+        foreach ($db->fetchAll('SELECT id FROM vault_groups WHERE owner_id = ? ORDER BY id', [$principalId]) as $g) {
+            if (isset($seen[(int) $g['id']])) {
+                continue;
+            }
+            $levels = [];
+            foreach ($resolver->subtreeLevels((int) $g['id']) as $level) {
+                $level = array_values(array_filter($level, static fn (int $id): bool => ! isset($seen[$id])));
+                foreach ($level as $id) {
+                    $seen[$id] = true;
+                }
+                if ($level !== []) {
+                    $levels[] = $level;
+                }
+            }
+            $levelSets[] = $levels;
+        }
+        $groupIds = array_map('intval', array_keys($seen));
+        $entryIds = $resolver->entriesIn($groupIds);
+        foreach ($db->fetchAll('SELECT id FROM vault_entries WHERE owner_id = ? ORDER BY id', [$principalId]) as $e) {
+            $entryIds[] = (int) $e['id'];
+        }
+        $entryIds = array_values(array_unique($entryIds));
+        $this->purgeRefs($db, 'entry', $entryIds);
+        $this->purgeRefs($db, 'group', $groupIds);
+        foreach (array_chunk($entryIds, self::CHUNK) as $chunk) {
+            $db->execute('DELETE FROM vault_entries WHERE id IN ('.RecipientResolver::marks($chunk).')', $chunk);
+        }
+        // Each subtree deepest level first, in the order found. A later subtree skips the groups an earlier one took,
+        // and an earlier one holds every descendant of its groups, so a child always goes before its parent.
+        foreach ($levelSets as $levels) {
+            foreach (array_reverse($levels) as $level) {
+                foreach (array_chunk($level, self::CHUNK) as $chunk) {
+                    $db->execute('DELETE FROM vault_groups WHERE id IN ('.RecipientResolver::marks($chunk).')', $chunk);
+                }
+            }
+        }
+        return count($entryIds) + count($groupIds);
+    }
+
     // Spec "Expiry reconciliation on write" and "Write barrier", for a payload write of an existing object.
     // Runs inside the caller's exclusive lock (or its own): principals of deleted users are swept (R26), expired
     // sources on the object and its ancestors

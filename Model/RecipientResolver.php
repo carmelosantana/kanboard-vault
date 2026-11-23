@@ -11,7 +11,7 @@ use Kanboard\Core\Base;
 // own Agent-created group (that group and everything below it); anywhere else owner_id gives it nothing (Codex security
 // round 1: a converted human must not keep its former vault). A grant is expired once expires_at <= now. Grant
 // rows whose subject is missing never reach here (only existing objects and their existing ancestors are looked up),
-// so they are ignored (R8).
+// so they are ignored (R8). An object whose owner is gone (ownerGone) has no recipients at all.
 //
 // Read-only. Callers run it inside the vault lock, against the rows of that transaction; all SQL goes
 // through VaultDb (R13).
@@ -33,6 +33,9 @@ class RecipientResolver extends Base
             return [];
         }
         $db = $this->vdb();
+        if ($this->ownerGone($db, $row)) {
+            return [];
+        }
         $ancestors = $this->ancestors($type, $row);
         $ownerId = (int) $row['owner_id'];
         $out = $this->ownsHere($db, $type, $row, $ancestors) ? [$ownerId => ObjectStore::OWNER] : [];
@@ -66,6 +69,15 @@ class RecipientResolver extends Base
             }
         }
         return $out;
+    }
+
+    // v5: an object follows its owner's principal, not the Kanboard user row, so a deleted owner's objects outlive the
+    // user until the purge sweeps them. Until then nobody reads them, as if the old users cascade had removed them:
+    // true when the owner's principal is missing or its Kanboard user is gone (live_user_id NULL).
+    public function ownerGone(VaultDb $db, array $row): bool
+    {
+        $p = $db->fetchOne('SELECT live_user_id FROM vault_principals WHERE user_id = ?', [(int) $row['owner_id']]);
+        return $p === null || $p['live_user_id'] === null;
     }
 
     // Whether owner_id makes its principal the owner here: always for a human; for an agent only on its Agent-created
