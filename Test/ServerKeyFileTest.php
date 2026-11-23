@@ -371,6 +371,17 @@ class ServerKeyFileTest extends TestCase
         $this->assertTrue((new ServerKeyFile($this->base.'/data/vault-server/server.key'))->isUnder($this->base.'/data-link'));
     }
 
+    // Minor 9: a DATA_DIR (or key path) that can't be normalised (relative, empty, a NUL) counts as under, so the
+    // deployment check shows red rather than failing open. Kills: null treated as "not under".
+    public function testIsUnderFailsClosed(): void
+    {
+        $key = new ServerKeyFile($this->base.'/elsewhere/server.key');
+        foreach (['data', '', "/data\0x", './data'] as $dir) {
+            $this->assertTrue($key->isUnder($dir), var_export($dir, true));
+        }
+        $this->assertTrue((new ServerKeyFile('relative/server.key'))->isUnder($this->base.'/data'));
+    }
+
     // Kills a umask(0077) left in place by create(), on success and on failure.
     public function testCreateRestoresTheUmask(): void
     {

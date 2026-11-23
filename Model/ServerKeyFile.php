@@ -123,13 +123,16 @@ final class ServerKeyFile
         return $walk;
     }
 
-    /** Whether the key's resolved directory is $dir or below it (component-wise, so `data2/` isn't under `data`). */
+    /**
+     * Whether the key's resolved directory is $dir or below it (component-wise, so `data2/` isn't under `data`). Either
+     * path un-normalisable (relative, empty, a NUL) counts as under: the deployment check fails closed (red).
+     */
     public function isUnder(string $dir): bool
     {
         $parent = self::resolve(dirname($this->path));
         $root = self::resolve($dir);
         if ($parent === null || $root === null) {
-            return false;
+            return true;
         }
         return $parent === $root || str_starts_with($parent, rtrim($root, '/').'/');
     }
