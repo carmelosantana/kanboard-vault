@@ -51,8 +51,13 @@ class DocsTest extends Base
     {
         $security = self::doc('docs/security.md');
         $this->assertStringContainsString('server_read_denied', $security);
-        $leakage = strtolower(self::section($security, '### Metadata leakage'));
-        foreach (['consumer names', 'field names', 'rates', 'read times', 'correlation ids'] as $item) {
+        // Markdown wraps lines, so whitespace runs compare as one space.
+        $leakage = strtolower((string) preg_replace('/\s+/', ' ', self::section($security, '### Metadata leakage')));
+        // Complete against AuditModel::ALLOW (every column an action may write) and the per-row columns. Kills: any
+        // item deleted from the list.
+        foreach (['consumer names', 'field names', 'rates', 'read times', 'correlation ids', 'refusal reasons and counts',
+            'key epochs of claimed orphans', 'old and new owner ids', 'entry versions', 'job refs', 'actor ids', 'target user ids',
+            'object types and ids', 'one-time-link id hashes', 'truncated ips', 'browser and os family', 'actor kind', 'channel'] as $item) {
             $this->assertStringContainsString($item, $leakage, $item);
         }
     }

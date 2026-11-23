@@ -74,11 +74,18 @@ The key file is stricter than Matinee's `KeyStore`, which follows path component
 These are stored in plaintext, by design:
 
 - row counts, sizes and timestamps;
-- who holds a grant on which object id;
-- the audit columns: actor ids, actions, object ids, truncated IPs, browser and OS family;
-- with Server sharing: consumer names, field names (top-level names in plaintext, custom field names (as MACs):
-  keyed hashes under a key sealed to Server), rates, read times (each `server_read` row's time), entry versions, job refs,
-  correlation ids, and old and new owner ids of claimed orphans.
+- who holds a grant on which object id, with its permission and expiry;
+- on every audit row: its time, the action, the actor kind (`human`, `agent`, `public`, `cli`, `system`, `server`) and
+  the channel (`ui`, `api`, `cli`);
+- per audit action: actor ids, target user ids, object types and ids, one-time-link id hashes, truncated IPs, browser
+  and OS family, and counts (objects rotated, imported or exported, objects behind a refused agent enrolment,
+  aggregated rate-limit refusals);
+- with Server sharing: consumer names (on each share and each read), field names (top-level names in plaintext,
+  custom field names (as MACs): keyed hashes under a key sealed to Server), rates, read times (each `server_read`
+  row's time), entry versions, job refs, correlation ids, refusal reasons and counts (on `server_read_denied` and the
+  other `*_denied` rows: a reason such as `orphaned`, `revoked` or `rate_limited` shows share state and consumer
+  behaviour), old and new owner ids (old on quarantine, claim and destroy rows; new on claims), and key epochs of
+  claimed orphans.
 
 ### Deployment preconditions
 
