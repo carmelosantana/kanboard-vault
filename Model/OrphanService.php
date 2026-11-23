@@ -99,11 +99,14 @@ final class OrphanService extends Base
                 $rekeyer = new Rekeyer($this->container, $this->clock);
                 $resolver = $this->resolver();
                 try {
-                    $row = $this->eligible($db, $adminId, $entryId);
+                    if (! $this->isAdmin($db, $adminId)) {
+                        throw new VaultException('not_allowed');
+                    }
                     $admin = $rekeyer->currentPrincipal($db, $adminId, $adminSk);
                     if ($admin === null || $admin['kind'] !== 'human') {
                         throw new VaultException('not_found');
                     }
+                    $row = $this->eligible($db, $adminId, $entryId);
                     if (! isset($resolver->grantees('entry', $entryId, $now, $row)[$adminId])) {
                         throw new VaultException('not_allowed');
                     }
