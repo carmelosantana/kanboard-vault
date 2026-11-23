@@ -12,6 +12,9 @@ interface KeyProvider
     /** The DEK sealed to Server under $ctx (raw sealed bytes in). ServerKeyUnavailable on any failure. */
     public function openSealedDek(string $sealed, DekContext $ctx): string;
 
+    /** Whether the key opens now (a FileKeyProvider reads the key file afresh). Never throws. */
+    public function healthy(): bool;
+
     /** R1: the 32-byte field-MAC key, sealed to Server in vault_meta. ServerKeyUnavailable on any failure. */
     public function openFieldMacKey(): string;
 }

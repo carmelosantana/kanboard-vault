@@ -5,6 +5,8 @@ use Kanboard\Plugin\Vault\Crypto\Wraps;
 use Kanboard\Plugin\Vault\Model\FileKeyProvider;
 use Kanboard\Plugin\Vault\Model\ServerKeyFile;
 use Kanboard\Plugin\Vault\Model\ServerPrincipal;
+use Kanboard\Plugin\Vault\Model\ServerSecrets;
+use Kanboard\Plugin\Vault\Test\Support\Fixtures;
 
 require_once __DIR__.'/AgentFixture.php';
 
@@ -24,6 +26,13 @@ trait ServerFixture
         $this->serverDir = realpath(sys_get_temp_dir()).'/vault-srv-'.bin2hex(random_bytes(8));
         mkdir($this->serverDir, 0700);
         $this->keyPath = $this->serverDir.'/vault-server/server.key';
+        $this->registerServerServices();
+    }
+
+    // The three Server services on the fixture's key file and clock, set from scratch (Pimple freezes a service once
+    // it is read).
+    protected function registerServerServices(): void
+    {
         foreach (['vaultServerKeyFile', 'vaultKeyProvider', 'vaultServerPrincipal'] as $service) {
             unset($this->container[$service]);
         }
@@ -45,6 +54,25 @@ trait ServerFixture
     protected function enableServer(): void
     {
         $this->server()->enable(self::ADMIN);
+    }
+
+    // A new entry of alice's (Fixtures::fullEntry unless $payload) in a new group, shared with Server for $consumers and
+    // $fields; Server is turned on first when it is off. Needs setUpAgents (alice enrolled).
+    protected function serverShare(array $consumers, array $fields, ?array $payload = null, ?int $rate = null, ?int $burst = null): int
+    {
+        if (! $this->server()->isOn()) {
+            $this->enableServer();
+        }
+        $g = $this->store()->createGroup($this->alice, null, ['name' => 'server share']);
+        $e = $this->store()->createEntry($this->alice, $g, $payload ?? Fixtures::fullEntry());
+        $this->grants()->grantServer($this->alice, $e, $consumers, $fields, $rate, $burst, $this->aliceSk());
+        return $e;
+    }
+
+    // The consumer API with a fresh provider (it reads the key file as it is now) and the test clock.
+    protected function serverSecrets(): ServerSecrets
+    {
+        return new ServerSecrets($this->container, $this->freshProvider(), $this->clock());
     }
 
     // A provider with nothing cached: it reads the key file as it is now.

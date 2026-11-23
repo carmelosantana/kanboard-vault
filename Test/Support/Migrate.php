@@ -92,3 +92,28 @@ function vault_test_foreign_keys_enforced(\PDO $pdo): bool
         default => (int) $pdo->query('PRAGMA foreign_keys')->fetchColumn() === 1,
     };
 }
+
+// Where $secret shows up in a dump (name => bytes): raw, hex (either case), base64 and base64url at each byte alignment
+// (so a value base64ed inside a bigger blob is found). Needles shorter than 16 characters are not searched.
+/** @return list<string> */
+function vault_test_hits(array $dump, string $secret): array
+{
+    $forms = ['raw' => $secret, 'hex' => bin2hex($secret), 'HEX' => strtoupper(bin2hex($secret))];
+    for ($shift = 0; $shift < 3; $shift++) {
+        $b64 = base64_encode(str_repeat("\0", $shift).$secret);
+        $start = [0, 2, 3][$shift];
+        $end = intdiv($shift + strlen($secret), 3) * 4;
+        $core = substr($b64, $start, $end - $start);
+        $forms["base64+$shift"] = $core;
+        $forms["base64url+$shift"] = strtr($core, '+/', '-_');
+    }
+    $hits = [];
+    foreach ($dump as $where => $bytes) {
+        foreach ($forms as $form => $needle) {
+            if (strlen($needle) >= 16 && str_contains($bytes, $needle)) {
+                $hits[] = "$where ($form)";
+            }
+        }
+    }
+    return $hits;
+}

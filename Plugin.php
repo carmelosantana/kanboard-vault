@@ -22,6 +22,7 @@ use Kanboard\Plugin\Vault\Model\RecoveryService;
 use Kanboard\Plugin\Vault\Model\RotationService;
 use Kanboard\Plugin\Vault\Model\ServerKeyFile;
 use Kanboard\Plugin\Vault\Model\ServerPrincipal;
+use Kanboard\Plugin\Vault\Model\ServerSecrets;
 use Kanboard\Plugin\Vault\Model\ShareModel;
 use Kanboard\Plugin\Vault\Model\UnlockService;
 use Kanboard\Plugin\Vault\Model\VaultSession;
@@ -57,6 +58,14 @@ class Plugin extends Base
         $this->container['vaultServerKeyFile'] = static fn (): ServerKeyFile => new ServerKeyFile(ServerKeyFile::configuredPath());
         $this->container['vaultKeyProvider'] = static fn ($c): FileKeyProvider => new FileKeyProvider($c, $c['vaultServerKeyFile']);
         $this->container['vaultServerPrincipal'] = static fn ($c): ServerPrincipal => new ServerPrincipal($c, $c['vaultServerKeyFile'], $c['vaultKeyProvider']);
+        // The consumer API, only while Server sharing is on. Before the first migration vault_principals may not exist
+        // yet, so a database error here means "off".
+        try {
+            if (ServerPrincipal::of($this->container)->isOn()) {
+                $this->container['vaultSecrets'] = static fn ($c): ServerSecrets => new ServerSecrets($c, $c['vaultKeyProvider']);
+            }
+        } catch (\PDOException) {
+        }
 
         // The page and its POST endpoints (spec: UI). No template:layout:js or :css: Vault's own templates load
         // vault.js and vault.css, so nothing of Vault's runs on other pages.

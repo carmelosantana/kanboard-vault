@@ -105,7 +105,7 @@ class AuditModel extends Base
     // burn capability (32 hex) or a share key can never be recorded; ip_trunc is exactly ClientIp::truncate's output;
     // ua_family exactly UaFamily's.
     private const SHARE_HASH = ShareModel::ID_HASH_PATTERN;
-    private const JOB_REF = '/^[A-Za-z0-9_.:-]{1,64}$/D';
+    public const JOB_REF = '/^[A-Za-z0-9_.:-]{1,64}$/D';
 
     private ?string $actorKind;
     private ?string $via;

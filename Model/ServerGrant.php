@@ -37,6 +37,14 @@ final class ServerGrant
         return is_string($f) && (in_array($f, self::TOP_LEVEL, true) || preg_match(self::MAC_PATTERN, $f) === 1);
     }
 
+    // A field name as an owner or a consumer gives it (a ref, a grant request): a top-level key, or a custom name that is
+    // valid UTF-8, 1..MAX_FIELD_BYTES bytes, with no control characters.
+    public static function validName(#[\SensitiveParameter] mixed $name): bool
+    {
+        return is_string($name) && (in_array($name, self::TOP_LEVEL, true)
+            || ($name !== '' && strlen($name) <= self::MAX_FIELD_BYTES && mb_check_encoding($name, 'UTF-8') && preg_match('/[\x00-\x1f\x7f]/', $name) !== 1));
+    }
+
     // A stored custom field name (R1): what a UI never shows. A top-level name is not one.
     public static function isMac(mixed $f): bool
     {
@@ -55,18 +63,18 @@ final class ServerGrant
         return self::canonical($list, self::validField(...), self::MAX_FIELDS);
     }
 
-    // The stored form of a field name: a top-level name as is, a custom name as its MAC. A custom name must be valid
-    // UTF-8, 1..MAX_FIELD_BYTES bytes, with no control characters. $key is the 32-byte field-MAC key.
+    // The stored form of a field name: a top-level name as is, a custom name as its MAC. The name must be validName.
+    // $key is the 32-byte field-MAC key.
     public static function macField(#[\SensitiveParameter] string $key, #[\SensitiveParameter] string $name): string
     {
         if (strlen($key) !== SODIUM_CRYPTO_GENERICHASH_KEYBYTES) {
             throw new LogicException('Vault: the field MAC key must be 32 bytes');
         }
+        if (! self::validName($name)) {
+            throw new VaultException('payload_invalid');
+        }
         if (in_array($name, self::TOP_LEVEL, true)) {
             return $name;
-        }
-        if ($name === '' || strlen($name) > self::MAX_FIELD_BYTES || ! mb_check_encoding($name, 'UTF-8') || preg_match('/[\x00-\x1f\x7f]/', $name) === 1) {
-            throw new VaultException('payload_invalid');
         }
         return 'c:'.self::base32(sodium_crypto_generichash($name, $key, 16));
     }

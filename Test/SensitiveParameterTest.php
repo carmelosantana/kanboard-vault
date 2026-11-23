@@ -1,6 +1,7 @@
 <?php
 require_once 'tests/units/Base.php';
 require_once __DIR__.'/Support/VaultFixture.php';
+require_once __DIR__.'/Support/VaultFailingAudit.php';
 
 use Kanboard\Plugin\Vault\Crypto\Aead;
 use Kanboard\Plugin\Vault\Crypto\Encoding;
@@ -18,6 +19,8 @@ use Kanboard\Plugin\Vault\Model\ServerPrincipal;
 use Kanboard\Plugin\Vault\Crypto\CryptoException;
 use Kanboard\Plugin\Vault\Model\VaultDb;
 use Kanboard\Plugin\Vault\Model\ServerGrant;
+use Kanboard\Plugin\Vault\Model\ServerSecrets;
+use Kanboard\Plugin\Vault\Model\ObjectStore;
 use Kanboard\Plugin\Vault\Model\UnlockService;
 use KanboardTests\units\Base;
 
@@ -234,6 +237,43 @@ class SensitiveParameterTest extends Base
             foreach ($frame['args'] ?? [] as $arg) {
                 $this->assertFalse(is_array($arg) && in_array($field, $arg, true), 'the plain field names in '.($frame['function'] ?? '?'));
             }
+        }
+    }
+
+    // Task 9: the Server read path holds the DEK and the decrypted entry when its audit write fails (the last step, so
+    // everything is open); neither the DEK, the plaintext, the read value nor the custom field's name (R1: secret, in the
+    // ref) may be in that exception's trace. Kills: an unannotated $dek, plaintext, value or ref parameter on the read
+    // path.
+    public function testServerReadSecretsAreAbsentWhenTheAuditFails(): void
+    {
+        $dir = realpath(sys_get_temp_dir()).'/vault-sp-'.bin2hex(random_bytes(6));
+        mkdir($dir, 0700);
+        $file = new ServerKeyFile($dir.'/vault-server/server.key');
+        try {
+            $sk = substr($this->principalWithWrap($this->alice, $this->alicePassphrase, 1, 8192), 0, 32);
+            (new ServerPrincipal($this->container, $file, null, fn () => $this->now))->enable(1);
+            $store = new ObjectStore($this->container, fn () => $this->now);
+            $g = $store->createGroup($this->alice, null, ['name' => 'g']);
+            $value = 'VALUE-SENTINEL-serverRead-0123456789';
+            $name = 'FIELD-SENTINEL-serverRead-0123';
+            $e = $store->createEntry($this->alice, $g, ['title' => 'TITLE-SENTINEL-serverRead-0123', 'fields' => [['name' => $name, 'value' => $value, 'protected' => true]]]);
+            $provider = new FileKeyProvider($this->container, $file);
+            $this->container['vaultKeyProvider'] = fn () => $provider;
+            (new GrantModel($this->container, fn () => $this->now))->grantServer($this->alice, $e, ['CveHunter'], [$name], null, null, $sk);
+            $key = $this->row('SELECT key_epoch, sealed_dek FROM vault_keys WHERE principal_id = -1 AND object_id = ?', [$e]);
+            $dek = $provider->openSealedDek(base64_decode($key['sealed_dek']), new DekContext('entry', $e, (int) $key['key_epoch'], -1));
+            $this->container['vaultAudit'] = fn ($c) => new VaultFailingAudit($c, 'server_read', fn () => $this->now);
+
+            $x = $this->thrown(fn () => (new ServerSecrets($this->container, $provider, fn () => $this->now))->read('CveHunter', 'vault://'.$e.'/'.rawurlencode($name)));
+            $this->assertSame('injected audit failure', $x->getMessage());
+            foreach (['the DEK' => $dek, 'the value' => $value, 'the title' => 'TITLE-SENTINEL-serverRead-0123', 'the field name' => $name] as $what => $secret) {
+                $this->assertRedacted($secret, $x);
+            }
+        } finally {
+            @unlink($dir.'/vault-server/server.key');
+            @unlink($dir.'/vault-server/.lock');
+            @rmdir($dir.'/vault-server');
+            @rmdir($dir);
         }
     }
 

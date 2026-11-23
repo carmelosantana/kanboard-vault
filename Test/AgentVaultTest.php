@@ -2,6 +2,7 @@
 require_once 'tests/units/Base.php';
 require_once __DIR__.'/Support/AgentFixture.php';
 require_once __DIR__.'/Support/FileDb.php';
+require_once __DIR__.'/Support/VaultFailingAudit.php';
 
 use Kanboard\Plugin\Vault\Crypto\CryptoException;
 use Kanboard\Plugin\Vault\Crypto\Kdf;
@@ -17,23 +18,6 @@ use Kanboard\Plugin\Vault\Model\VaultException;
 use Kanboard\Plugin\Vault\Model\VaultSettings;
 use Kanboard\Plugin\Vault\Test\Support\Fixtures;
 use KanboardTests\units\Base;
-
-// An audit log that fails one action, to prove a multi-step change commits or rolls back as one.
-class VaultFailingAudit extends AuditModel
-{
-    public function __construct($container, private string $failOn, ?callable $clock = null)
-    {
-        parent::__construct($container, null, null, $clock);
-    }
-
-    public function record(string $action, array $cols): void
-    {
-        if ($action === $this->failOn) {
-            throw new RuntimeException('injected audit failure');
-        }
-        parent::record($action, $cols);
-    }
-}
 
 // Spec: Agents → Enrolment and Re-enrolment; Throttling (agent secret reads); Entries, groups and grants (removing a
 // grant source, the re-key queue). Carries: R10, R12, R13, R26 (live_user_id), T7 (agent disable through

@@ -84,6 +84,13 @@ class RecipientResolver extends Base
         return $this->anyGone($db, [(int) $row['owner_id']]);
     }
 
+    // An object whose owner, or any ancestor group's owner, is gone: what effective() gives no recipients. The Server read
+    // path refuses it as orphaned (spec amendment: an orphan is quarantined until it is claimed).
+    public function chainGone(VaultDb $db, string $type, array $row): bool
+    {
+        return $this->anyGone($db, array_merge([(int) $row['owner_id']], array_values($this->ancestorOwners($type, $row))));
+    }
+
     // Whether any of these owner principals is missing or has live_user_id NULL. One query.
     /** @param list<int> $ownerIds */
     private function anyGone(VaultDb $db, array $ownerIds): bool
