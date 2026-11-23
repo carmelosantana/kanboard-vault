@@ -56,8 +56,19 @@ class SettingsController extends BaseVaultController
             $messages = self::messages();
             $userId = $this->userId();
             $orphans = new OrphanService($this->container);
-            // R18: the session's key before any vault lock; null (locked) means no group list.
+            // R18: the session's key before any vault lock; null (locked) means no group list. An admin who must still
+            // enrol hardware keys counts as locked, as requireUnlocked() has it, and the tree is decrypted only when
+            // there is an orphan to claim.
             $sk = $session->secretKey();
+            if ($sk !== null && $this->hardwareKeys()->enrolmentRequired($userId)) {
+                sodium_memzero($sk);
+                $sk = null;
+            }
+            $orphanList = $orphans->orphans($userId);
+            if ($sk !== null && $orphanList === []) {
+                sodium_memzero($sk);
+                $sk = null;
+            }
             $groups = null;
             if ($sk !== null) {
                 try {
@@ -93,7 +104,7 @@ class SettingsController extends BaseVaultController
                 'server_on' => ServerPrincipal::of($this->container)->isOn(),
                 // A path, not a secret (VAULT_SERVER_KEY_FILE): shown read-only, like the rp_id.
                 'server_key_path' => $this->container['vaultServerKeyFile']->path(),
-                'orphans' => $orphans->orphans($userId),
+                'orphans' => $orphanList,
                 'at_risk' => $orphans->atRisk(),
                 'blocked_ids' => $orphans->blockedUserIds($userId),
                 'claim_groups' => $groups,

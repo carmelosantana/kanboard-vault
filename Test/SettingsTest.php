@@ -493,4 +493,45 @@ class SettingsTest extends Base
         $x = $this->dom($this->call('index')->body);
         $this->assertSame([(string) $this->alice], array_map(static fn ($n): string => $n->getAttribute('data-vault-blocked-id'), iterator_to_array($x->query('//*[@data-vault-blocked-id]'))));
     }
+
+    // Important 2: an admin who must still enrol hardware keys is locked on every other page, so Settings → Vault
+    // doesn't decrypt their vault either (requireUnlocked's predicate). Kills: the tree decrypted from the bare session key.
+    public function testAnAdminWhoMustEnrolHardwareKeysIsTreatedAsLocked(): void
+    {
+        $this->orphanFixture();
+        $this->unlockAs(self::ADMIN, Fixtures::PASSPHRASE, 'sid-admin');
+        $this->assertSame(1, $this->dom($this->call('index')->body)->query('//select[@name="group_id"]')->length, 'unlocked: the select');
+        $this->settings()->set('vault_hw_required', '1', self::ADMIN);
+        $body = $this->call('index')->body;
+        $this->assertSame(0, $this->dom($body)->query('//select[@name="group_id"]')->length);
+        $this->assertStringContainsString('Unlock your vault to claim', $body);
+        $this->assertStringNotContainsString('AdminOwnClaimTarget', $body);
+    }
+
+    // Important 2: the admin's tree is decrypted only when there is an orphan to claim. Kills: tree() on every load.
+    public function testTheTreeIsDecryptedOnlyWhenThereAreOrphans(): void
+    {
+        $calls = 0;
+        unset($this->container['vaultStore']);
+        $this->container['vaultStore'] = function ($c) use (&$calls) {
+            return new class($c, $calls) extends \Kanboard\Plugin\Vault\Model\ObjectStore {
+            public function __construct($c, private int &$calls)
+            {
+                parent::__construct($c);
+            }
+
+            public function tree(int $actorId, #[\SensitiveParameter] string $sk): array
+            {
+                $this->calls++;
+                return parent::tree($actorId, $sk);
+            }
+        };
+        };
+        $this->principals()->enrolHuman(self::ADMIN, Fixtures::PASSPHRASE);
+        $this->unlockAs(self::ADMIN, Fixtures::PASSPHRASE, 'sid-admin');
+        $this->call('index');
+        $this->assertSame(0, $calls, 'no orphans, no decrypt');
+        $this->call('index');
+        $this->assertSame(0, $calls);
+    }
 }
