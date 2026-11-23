@@ -94,7 +94,7 @@ class HardwareKeyController extends BaseVaultController
 
     public function register(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             $this->requireTransport();
             $this->hardwareKeys()->registerKey($userId, $sk, [
                 'label' => (string) $this->request->getRawValue('label'),
@@ -108,7 +108,7 @@ class HardwareKeyController extends BaseVaultController
 
     public function remove(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             $this->requireTransport();
             $raw = (string) $this->request->getRawValue('assertion');
             $this->hardwareKeys()->removeKey(
@@ -125,7 +125,7 @@ class HardwareKeyController extends BaseVaultController
 
     public function rotate(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             $this->requireTransport();
             $new = (string) $this->request->getRawValue('new_passphrase');
             if (! hash_equals($new, (string) $this->request->getRawValue('confirm'))) {

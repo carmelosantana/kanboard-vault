@@ -81,7 +81,7 @@ class VaultShareController extends BaseVaultController
 
     public function mine(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             $this->answer(['links' => $this->shares()->listMine($userId, $sk)]);
         });
     }

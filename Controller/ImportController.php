@@ -51,7 +51,7 @@ class ImportController extends BaseVaultController
 
     public function batch(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             $state = session_get(self::SESSION);
             $root = $this->intParam('import_id');
             if (! is_array($state) || ($state['user'] ?? null) !== $userId || ($state['root'] ?? null) !== $root || $root === null) {

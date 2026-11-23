@@ -36,7 +36,7 @@ class ExportController extends BaseVaultController
 
     public function export(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             $this->requireTransport();
             if (! $this->request->isAjax()) {
                 throw new VaultException('forbidden');

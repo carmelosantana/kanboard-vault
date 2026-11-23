@@ -44,7 +44,7 @@ class ShareGrantController extends BaseVaultController
 
     public function sharing(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             $type = $this->type();
             $serverOn = ServerPrincipal::of($this->container)->isOn();
             // The sk maps a Server grant's MACs back to names; Server off means no Server grant, so no key file read.
@@ -78,7 +78,7 @@ class ShareGrantController extends BaseVaultController
     // GrantModel::grantServer validates all of it (payload_invalid), checks the owner (not_found) and Server (server_off).
     public function grantServer(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             $type = $this->request->getRawValue('type');
             if ($type !== null && $type !== 'entry') {
                 throw new VaultException('not_found');
@@ -106,7 +106,7 @@ class ShareGrantController extends BaseVaultController
 
     public function grant(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             $type = $this->type();
             $id = $this->intParam('id') ?? 0;
             $granteeId = $this->intParam('grantee_id') ?? 0;
@@ -132,7 +132,7 @@ class ShareGrantController extends BaseVaultController
     // Spec, Revocation: "Afterwards the UI suggests rotating the secrets themselves."
     public function revoke(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             // intParam reads only non-negative ids; -1 is the Server grant.
             $raw = $this->request->getRawValue('grantee_id');
             $granteeId = $raw === (string) ServerPrincipal::ID || $raw === ServerPrincipal::ID ? ServerPrincipal::ID : ($this->intParam('grantee_id') ?? 0);
@@ -144,7 +144,7 @@ class ShareGrantController extends BaseVaultController
 
     public function activity(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             $offset = $this->intParam('offset') ?? 0;
             $rows = AuditModel::of($this->container)->visibleTo($userId, $offset, self::ACTIVITY_PAGE + 1);
             $more = count($rows) > self::ACTIVITY_PAGE;

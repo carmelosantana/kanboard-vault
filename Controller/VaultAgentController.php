@@ -53,7 +53,7 @@ class VaultAgentController extends BaseVaultController
 
     private function keyAction(bool $reenrol): void
     {
-        $this->withKey(function (int $userId, string $sk) use ($reenrol): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk) use ($reenrol): void {
             $this->requireTransport();
             $agentId = (int) $this->intParam('agent_id');
             $vault = $this->agentVault();

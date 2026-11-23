@@ -20,7 +20,7 @@ class OrphanController extends BaseVaultController
 {
     public function claim(): void
     {
-        $this->adminWithKey('orphan_claim_denied', function (int $userId, string $sk): void {
+        $this->adminWithKey('orphan_claim_denied', function (int $userId, #[\SensitiveParameter] string $sk): void {
             $epoch = $this->orphans()->claim($userId, $this->intParam('entry_id') ?? 0, $this->intParam('group_id') ?? 0, $sk);
             $this->succeed(['key_epoch' => $epoch], 'orphan_claimed');
         });
@@ -28,7 +28,7 @@ class OrphanController extends BaseVaultController
 
     public function destroy(): void
     {
-        $this->adminWithKey('orphan_destroy_denied', function (int $userId, string $sk): void {
+        $this->adminWithKey('orphan_destroy_denied', function (int $userId, #[\SensitiveParameter] string $sk): void {
             $this->requireTransport();
             try {
                 // Final-wave step-up ruling: the vault passphrase again, as for turning Server on (no hardware-key

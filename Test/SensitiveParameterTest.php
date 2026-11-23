@@ -331,4 +331,20 @@ class SensitiveParameterTest extends Base
     {
         $this->assertRedacted($secret, $this->thrown($call));
     }
+
+    // Minor 7: every controller closure (and method) that takes the session key marks it, so a failure inside the
+    // action never records it in a trace frame. A source scan: closures are created per request and can't be reflected
+    // here. Kills: a `string $sk` parameter in any controller without #[\SensitiveParameter].
+    public function testControllerKeyParametersAreMarked(): void
+    {
+        $bare = [];
+        foreach (glob(__DIR__.'/../Controller/*.php') as $file) {
+            foreach (file($file) as $n => $line) {
+                if (preg_match('/(?<!\]) string \$sk\b/', $line) === 1) {
+                    $bare[] = basename($file).':'.($n + 1);
+                }
+            }
+        }
+        $this->assertSame([], $bare);
+    }
 }

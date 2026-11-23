@@ -61,7 +61,7 @@ class SecurityController extends BaseVaultController
 
     public function passphrase(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             $this->requireTransport();
             $new = (string) $this->request->getRawValue('passphrase');
             if (! hash_equals($new, (string) $this->request->getRawValue('confirm'))) {
@@ -74,7 +74,7 @@ class SecurityController extends BaseVaultController
 
     public function rotate(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             $this->requireTransport();
             $result = $this->rotationService()->requestManual($userId, $sk, (string) $this->request->getRawValue('passphrase'), $this->clientIp());
             $this->ceremonyDone($result, 'keys');
@@ -88,7 +88,7 @@ class SecurityController extends BaseVaultController
     // vault.js gets {ok, code}; a native form POST gets this page with the code shown once (no-store, never in a URL).
     public function recoveryCode(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             $this->requireTransport();
             if ((string) (new VaultSettings($this->container))->get(VaultSettings::POLICY) === VaultSettings::POLICY_NONE) {
                 throw new VaultException('policy_forbids');
