@@ -2,19 +2,22 @@
 require_once 'tests/units/Base.php';
 require_once __DIR__.'/Support/ServerFixture.php';
 require_once __DIR__.'/Support/VaultTestResponse.php';
+require_once __DIR__.'/Support/SoftAuthenticator.php';
 
 use Kanboard\Core\Http\Request;
 use Kanboard\Plugin\Vault\Controller\OrphanController;
+use Kanboard\Plugin\Vault\Model\HardwareKeys;
 use Kanboard\Plugin\Vault\Model\Housekeeping;
 use Kanboard\Plugin\Vault\Model\OrphanService;
 use Kanboard\Plugin\Vault\Model\Purger;
 use Kanboard\Plugin\Vault\Plugin;
 use Kanboard\Plugin\Vault\Test\Support\Fixtures;
+use Kanboard\Plugin\Vault\Test\Support\SoftAuthenticator;
 use KanboardTests\units\Base;
 
 // Spec amendment: security requirement 14 with Codex NEW-02. The admin endpoints around OrphanService: claim (an
 // unlocked admin with CSRF; the admin's key comes from the unlocked session, never the request) and destroy (an
-// unlocked admin with CSRF and step-up: the vault passphrase re-entered through requireFreshReauth).
+// unlocked admin with CSRF and step-up: the vault passphrase re-entered through confirmPassphrase).
 class OrphanControllerTest extends Base
 {
     use ServerFixture;
@@ -109,7 +112,7 @@ class OrphanControllerTest extends Base
     }
 
     // Destroy is step-up: without the passphrase, or with a wrong one, it is the reauth failure (a throttled failed
-    // guess) and the entry stays; with the right one the orphan goes. Kills: destroy without requireFreshReauth; the
+    // guess) and the entry stays; with the right one the orphan goes. Kills: destroy without the step-up; the
     // reauth result ignored.
     public function testDestroyNeedsTheVaultPassphrase(): void
     {
@@ -129,6 +132,34 @@ class OrphanControllerTest extends Base
         $this->assertFalse($this->entryExists($e));
         $this->assertCount(1, $this->auditRows('orphan_destroy'));
         $this->assertStringNotContainsString(self::ADMIN_PASSPHRASE, $r->body.implode('', $r->headers));
+    }
+
+    // Minor 3 (final-wave step-up ruling): destroy's step-up is the vault passphrase alone, as for turning Server on,
+    // so an admin with a hardware key destroys with the passphrase (the form has no assertion field) and not without.
+    // Kills: requireFreshReauth's hardware-key assertion demanded (hw_assertion_required); no step-up for key users.
+    public function testAHardwareKeyAdminDestroysWithThePassphrase(): void
+    {
+        [$e] = $this->orphan();
+        $this->unlockAdmin();
+        $this->container['configModel']->save(['application_url' => 'https://kb.example/']);
+        $this->container['memoryCache']->flush();
+        $hw = new HardwareKeys($this->container, $this->slots(), $this->argon(), $this->clock(), $this->rotation());
+        $key = new SoftAuthenticator(-7);
+        $c = $hw->challenge(self::ADMIN, 'register');
+        $create = $key->create($c, 'https://kb.example', 'kb.example');
+        $assert = $key->get($hw->challenge(self::ADMIN, 'ceremony'), 'https://kb.example', 'kb.example', HardwareKeys::prfSaltFor($c));
+        $sk = (string) $this->session()->secretKey();
+        $hw->registerKey(self::ADMIN, $sk, ['label' => 'Admin key', 'create' => $create, 'assert' => $assert, 'others' => []], self::ADMIN_PASSPHRASE, self::IP);
+        sodium_memzero($sk);
+        $this->assertSame(1, $hw->count(self::ADMIN));
+
+        $r = $this->post('destroy', ['entry_id' => (string) $e]);
+        $this->assertSame([401, ['ok' => false, 'reason' => 'unlock_failed']], [$r->status, $r->json_()], 'no passphrase');
+        $this->assertTrue($this->entryExists($e));
+
+        $r = $this->post('destroy', ['entry_id' => (string) $e, 'passphrase' => self::ADMIN_PASSPHRASE]);
+        $this->assertSame([200, ['ok' => true]], [$r->status, $r->json_()]);
+        $this->assertFalse($this->entryExists($e));
     }
 
     // Kills: no admin check on claim or destroy; an admin check that admits a grant-holding user.

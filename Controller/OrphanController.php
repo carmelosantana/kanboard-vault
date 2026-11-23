@@ -9,9 +9,9 @@ use Kanboard\Plugin\Vault\Model\VaultException;
 //
 //   POST vault/orphans/claim    {entry_id, group_id}              → {ok, key_epoch}: OrphanService::claim with the
 //                               admin's key from the unlocked session (withKey), never from the request.
-//   POST vault/orphans/destroy  {entry_id, passphrase[, assertion]} → {ok}: step-up first (requireFreshReauth: the
-//                               vault passphrase through the throttled check, plus a fresh assertion for a user with
-//                               hardware keys), then OrphanService::destroy.
+//   POST vault/orphans/destroy  {entry_id, passphrase}            → {ok}: step-up first (the vault passphrase through
+//                               the passphrase change's throttled check, RotationService::confirmPassphrase, as for
+//                               turning Server on, also for a user with hardware keys), then OrphanService::destroy.
 //
 // OrphanService's refusals (not_found, not_allowed) come back through handle()'s generic mapping. Every refusal is
 // audited (requirement 18): OrphanService's own, and here a non-admin, a locked vault or a failed step-up. A native form POST
@@ -31,7 +31,9 @@ class OrphanController extends BaseVaultController
         $this->adminWithKey('orphan_destroy_denied', function (int $userId, string $sk): void {
             $this->requireTransport();
             try {
-                $this->requireFreshReauth($userId, $sk);
+                // Final-wave step-up ruling: the vault passphrase again, as for turning Server on (no hardware-key
+                // assertion in P1; WebAuthn step-up for both is P2).
+                $this->rotationService()->confirmPassphrase($userId, $sk, (string) $this->request->getRawValue('passphrase'), $this->clientIp());
             } catch (VaultException $e) {
                 $this->orphans()->recordDenied('orphan_destroy_denied', $userId, $this->intParam('entry_id') ?? 0, $e);
                 throw $e;
