@@ -394,14 +394,14 @@ class SchemaTest extends Base
     private static function requireServerDb(): void
     {
         if (DB_DRIVER === 'sqlite') {
-            throw new \PHPUnit\Framework\SkippedTestError('MariaDB/Postgres catalogue; this run is sqlite');
+            self::markTestSkipped('MariaDB/Postgres catalogue; this run is sqlite');
         }
     }
 
     private static function requireMysql(): void
     {
         if (DB_DRIVER !== 'mysql') {
-            throw new \PHPUnit\Framework\SkippedTestError('MySQL/MariaDB migration chain; this run is '.DB_DRIVER);
+            self::markTestSkipped('MySQL/MariaDB migration chain; this run is '.DB_DRIVER);
         }
     }
 

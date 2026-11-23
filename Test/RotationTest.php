@@ -15,6 +15,7 @@ use Kanboard\Plugin\Vault\Model\PrincipalModel;
 use Kanboard\Plugin\Vault\Model\RotationService;
 use Kanboard\Plugin\Vault\Model\UnlockService;
 use KanboardTests\units\Base;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 // Spec: Key rotation (ceremony, state machine, bridge, crash recovery), with "Adding a recipient" (seal to both
 // keys while rotating), the write barrier and "Unlocked sessions" (rotation locks the other sessions).
@@ -296,6 +297,7 @@ class RotationTest extends Base
     // object exactly once. Kills: a batch that isn't its own transaction (a crash would lose or half-apply it);
     // a sweep that re-selects swept objects (double epoch bump); a resume that skips unswept ones.
     /** @dataProvider crashBatches */
+    #[DataProvider('crashBatches')]
     public function testCrashAfterEachSweepBatchThenResume(int $k): void
     {
         $this->populate();

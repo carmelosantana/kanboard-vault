@@ -29,10 +29,10 @@ class RevokeReadLockTest extends Base
 
     protected function setUp(): void
     {
+        parent::setUp(); // first: PHPUnit 10+ runs tearDown() after a skip in setUp(), and Kanboard's needs the container
         if (DB_DRIVER === 'sqlite') {
             $this->markTestSkipped('needs a second connection to the same database; SQLite: GrantConcurrencyTest');
         }
-        parent::setUp();
         $this->setUpVault();
         $this->aliceSk = $this->enrol($this->alice);
         $this->bobSk = $this->enrol($this->bob);

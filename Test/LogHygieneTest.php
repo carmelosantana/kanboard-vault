@@ -70,6 +70,7 @@ class LogHygieneTest extends Base
     // silently stopped working (an empty log would otherwise pass).
     public function testNoFixtureSecretInLogs(): void
     {
+        ini_set('error_log', $this->phpLog); // again: PHPUnit 10+ points error_log at its own capture for the test body
         $canary = 'vault-log-canary-'.bin2hex(random_bytes(4));
         $this->container['logger']->debug($canary.'-kanboard');
         error_log($canary.'-php');

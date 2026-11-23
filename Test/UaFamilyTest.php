@@ -3,6 +3,7 @@ require_once 'tests/units/Base.php';
 
 use Kanboard\Plugin\Vault\Model\UaFamily;
 use KanboardTests\units\Base;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 // Spec: Audit, ua_family "(browser and OS major only)". The value is built only from a fixed vocabulary and a
 // major version of at most four digits, so nothing else from the header (build numbers, device names, tokens a
@@ -29,6 +30,7 @@ class UaFamilyTest extends Base
     // Kills: Chrome tested before Edge/Opera, macOS before iOS, Linux before Android, the version not truncated to
     // its major, the digits uncapped, raw header text copied through.
     /** @dataProvider agents */
+    #[DataProvider('agents')]
     public function testFamilies(string $ua, string $expected): void
     {
         $this->assertSame($expected, UaFamily::fromUserAgent($ua));

@@ -44,6 +44,13 @@ trait VaultFixture
     protected function setUpVault(): void
     {
         putenv('VAULT_DEV_INSECURE_LOCALHOST'); // the localhost dev exception is off unless a test opts in
+        // Kanboard 1.2.47's test mail client on every version: the real one with only send() mocked. 1.2.5x's test
+        // Base stubs every method, so setTransport() would register nothing and getAvailableTransports() would lie.
+        unset($this->container['emailClient']);
+        $this->container['emailClient'] = $this->getMockBuilder(\Kanboard\Core\Mail\Client::class)
+            ->setConstructorArgs([$this->container])
+            ->onlyMethods(['send'])
+            ->getMock();
         require_once __DIR__.'/Migrate.php';
         vault_test_migrate($this->container['db']->getConnection());
         $this->jar = new VaultRecordingCookieJar();

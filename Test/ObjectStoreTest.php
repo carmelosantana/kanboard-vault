@@ -8,6 +8,7 @@ use Kanboard\Plugin\Vault\Crypto\Sealer;
 use Kanboard\Plugin\Vault\Model\EntryPayload;
 use Kanboard\Plugin\Vault\Model\ObjectStore;
 use KanboardTests\units\Base;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 // Stands in for Task 7: one grantee holds $perm on every object and is a recipient (DEKs are sealed to them,
 // so the read path works) when $perm is set or $recipient forces it. Only the permission gate can then refuse.
@@ -251,6 +252,7 @@ class ObjectStoreTest extends Base
     }
 
     /** @dataProvider invalidPayloads */
+    #[DataProvider('invalidPayloads')]
     public function testPayloadInvalid(array $payload): void
     {
         $this->assertVaultError('payload_invalid', fn () => EntryPayload::validate($payload));
