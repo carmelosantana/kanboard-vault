@@ -108,7 +108,11 @@ class AgentVault extends Base
                 $db = $this->vdb();
                 (new Purger($this->container))->sweepOrphans($this->now());
                 $this->requireUnlockedOwner($db, $ownerId, $ownerSk);
-                $existing = $db->fetchOne('SELECT kind FROM vault_principals WHERE user_id = ?', [$agentId]);
+                $existing = $db->fetchOne('SELECT kind, state FROM vault_principals WHERE user_id = ?', [$agentId]);
+                // Important 4: a deleted user's tombstone holds this id (SQLite reuses ids); never take its keys over.
+                if ($existing !== null && $existing['state'] === 'orphaned') {
+                    throw new VaultException('id_held_by_orphans');
+                }
                 if ($existing !== null && $existing['kind'] === 'agent') {
                     throw new VaultException('already_enrolled');
                 }

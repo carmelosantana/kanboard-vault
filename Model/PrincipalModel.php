@@ -92,6 +92,16 @@ class PrincipalModel extends Base
             throw new VaultException('enrol_refused');
         }
         $this->checkPassphrase($passphrase, (string) $user['username'], (string) ($user['password'] ?? ''));
+        // Important 4: a deleted user's principal can still hold this id (SQLite reuses the newest deleted user id). The
+        // sweep releases one the purge hasn't reached yet; a tombstone (its orphans not yet claimed or destroyed) stays
+        // and the answer says so, rather than already_enrolled.
+        $existing = (new VaultDb($this->container))->fetchOne('SELECT live_user_id FROM vault_principals WHERE user_id = ?', [$userId]);
+        if ($existing !== null && $existing['live_user_id'] === null) {
+            (new Purger($this->container))->sweepOrphans($this->now());
+            if ($this->get($userId) !== null) {
+                throw new VaultException('id_held_by_orphans');
+            }
+        }
         if ($this->get($userId) !== null) {
             throw new VaultException('already_enrolled');
         }

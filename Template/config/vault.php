@@ -136,6 +136,15 @@ $expiries = [3600 => t('1 hour'), 86400 => t('1 day'), 604800 => t('7 days')];
 </div>
 <?php endforeach ?>
 
+<?php if (! empty($blocked_ids)): ?>
+<p class="alert alert-error"><?= t('These user numbers still belong to a deleted user whose orphaned entries are listed above. Kanboard has given the number to a new user, who can\'t set up a vault until those entries are claimed or deleted:') ?></p>
+<ul class="vault-blocked-ids">
+    <?php foreach ($blocked_ids as $id): ?>
+    <li data-vault-blocked-id="<?= (int) $id ?>"><?= t('User #%d', (int) $id) ?></li>
+    <?php endforeach ?>
+</ul>
+<?php endif ?>
+
 <h3><?= t('Entries at risk') ?></h3>
 <p><?= t('Entries shared with Server whose owner is disabled, or that no other administrator has access to: if the owner were deleted, nobody could claim them. Only the entry number is shown.') ?></p>
 <?php if ($at_risk === []): ?>

@@ -69,6 +69,24 @@ final class OrphanService extends Base
         });
     }
 
+    // Important 4: the Kanboard user ids a tombstone still holds although a live user has that id again (SQLite reuses
+    // the newest deleted id). That user can't enrol (id_held_by_orphans) until the dead owner's orphans are claimed
+    // or destroyed and the purge releases the tombstone. [] for anyone but an active app admin.
+    /** @return list<int> */
+    public function blockedUserIds(int $adminId): array
+    {
+        return $this->lock()->shared(function () use ($adminId): array {
+            $db = $this->vdb();
+            if (! $this->isAdmin($db, $adminId)) {
+                return [];
+            }
+            return array_map('intval', array_column($db->fetchAll(
+                "SELECT p.user_id FROM vault_principals p JOIN users u ON u.id = p.user_id
+                 WHERE p.state = 'orphaned' AND p.live_user_id IS NULL ORDER BY p.user_id"
+            ), 'user_id'));
+        });
+    }
+
     // Returns the entry's new key_epoch. See the class comment.
     public function claim(int $adminId, int $entryId, int $groupId, #[\SensitiveParameter] string $adminSk): int
     {

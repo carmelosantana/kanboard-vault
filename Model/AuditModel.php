@@ -144,7 +144,8 @@ class AuditModel extends Base
         $this->vdb()->insert('vault_audit', $this->row($action, $cols));
     }
 
-    // Who sees what (spec): rows where the viewer is the actor; rows on an object the viewer owns; share and
+    // Who sees what (spec): rows where the viewer is the actor; rows on an object the viewer owns (through their live
+    // principal, never a tombstone holding the same id); share and
     // rate-limit rows whose target is the viewer; the rows of the viewer's agents (Agents' roster); and for app
     // admins, policy_change and org_recovery. Newest first, at most PAGE_LIMIT per page. Object titles are not
     // here: the UI decrypts them only for a viewer who holds the DEK.
@@ -161,11 +162,13 @@ class AuditModel extends Base
         $targets = RecipientResolver::marks(self::TARGET_OWNS);
         $where = [
             'a.actor_user_id IN ('.$in.')',
-            "(a.object_type = 'entry' AND a.object_id IN (SELECT e.id FROM vault_entries e WHERE e.owner_id = ?))",
-            "(a.object_type = 'group' AND a.object_id IN (SELECT g.id FROM vault_groups g WHERE g.owner_id = ?))",
+            // Important 4: the owner principal must be the viewer's live one. A tombstone keeps a deleted owner's id,
+            // which SQLite can hand to a new user.
+            "(a.object_type = 'entry' AND a.object_id IN (SELECT e.id FROM vault_entries e JOIN vault_principals p ON p.user_id = e.owner_id WHERE e.owner_id = ? AND p.live_user_id = ?))",
+            "(a.object_type = 'group' AND a.object_id IN (SELECT g.id FROM vault_groups g JOIN vault_principals p ON p.user_id = g.owner_id WHERE g.owner_id = ? AND p.live_user_id = ?))",
             '(a.action IN ('.$targets.') AND a.target_user_id IN ('.$in.'))',
         ];
-        $params = [...$people, $viewerId, $viewerId, ...self::TARGET_OWNS, ...$people];
+        $params = [...$people, $viewerId, $viewerId, $viewerId, $viewerId, ...self::TARGET_OWNS, ...$people];
         if ($this->isAdmin($viewerId)) {
             $where[] = 'a.action IN ('.RecipientResolver::marks(self::ADMIN_ACTIONS).')';
             array_push($params, ...self::ADMIN_ACTIONS);

@@ -463,4 +463,34 @@ class SettingsTest extends Base
         $x = $this->dom($this->call('index', 'GET', [], null, ['vault_notice' => 'orphan_claimed'])->body);
         $this->assertSame(1, $x->query('//*[@data-vault-orphan-notice]')->length);
     }
+
+    // Alice's entry, shared with Server and read-shared with the admin; alice deleted and purged (a tombstone). The
+    // admin owns the group AdminOwnClaimTarget.
+    /** @return array{0:int, 1:int} [orphan entry, admin group] */
+    private function orphanFixture(): array
+    {
+        $this->principals()->enrolHuman($this->alice, $this->alicePassphrase);
+        $this->principals()->enrolHuman(self::ADMIN, Fixtures::PASSPHRASE);
+        $this->enableServer();
+        $aliceSk = $this->skFor($this->alice, $this->alicePassphrase);
+        $g = $this->store()->createGroup($this->alice, null, ['name' => Fixtures::GROUP_NAME]);
+        $e = $this->store()->createEntry($this->alice, $g, Fixtures::entry(Fixtures::ENTRY_TITLE));
+        $this->grants()->grantServer($this->alice, $e, ['CveHunter'], ['password'], null, null, $aliceSk);
+        $this->grants()->grant($this->alice, 'entry', $e, self::ADMIN, 'read', null, $aliceSk);
+        $this->assertTrue($this->container['userModel']->remove($this->alice));
+        (new \Kanboard\Plugin\Vault\Model\Purger($this->container))->run($this->now, true);
+        return [$e, $this->store()->createGroup(self::ADMIN, null, ['name' => 'AdminOwnClaimTarget'])];
+    }
+
+    // Important 4: a user who now holds a tombstoned id (SQLite reuses the newest deleted id) is named on the page,
+    // since they can't enrol until the orphans are resolved. Kills: no flag.
+    public function testPageFlagsAUserIdHeldByATombstone(): void
+    {
+        $this->orphanFixture();
+        $x = $this->dom($this->call('index')->body);
+        $this->assertSame(0, $x->query('//*[@data-vault-blocked-id]')->length, 'nobody holds the id yet');
+        $this->container['userModel']->create(['id' => $this->alice, 'username' => 'reuses-alices-id', 'password' => 'reuser login password 1']);
+        $x = $this->dom($this->call('index')->body);
+        $this->assertSame([(string) $this->alice], array_map(static fn ($n): string => $n->getAttribute('data-vault-blocked-id'), iterator_to_array($x->query('//*[@data-vault-blocked-id]'))));
+    }
 }

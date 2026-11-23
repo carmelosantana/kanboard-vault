@@ -5,6 +5,7 @@ require_once __DIR__.'/Support/ServerFixture.php';
 use Kanboard\Event\GenericEvent;
 use Kanboard\Plugin\Vault\Crypto\Aead;
 use Kanboard\Plugin\Vault\Crypto\CryptoException;
+use Kanboard\Plugin\Vault\Model\AuditModel;
 use Kanboard\Plugin\Vault\Model\DekContext;
 use Kanboard\Plugin\Vault\Model\ObjectStore;
 use Kanboard\Plugin\Vault\Model\OrphanService;
@@ -340,6 +341,43 @@ class OrphanTest extends Base
         $this->assertSame(self::ADMIN, (int) $this->row('SELECT owner_id FROM vault_entries WHERE id = ?', [$e1])['owner_id']);
         $this->assertCount(1, $this->auditRows('orphan_quarantine'));
         $this->assertSame(Fixtures::ENTRY_PASSWORD, $this->serverRead($e1));
+    }
+
+    // Important 4: Kanboard's SQLite users.id has no AUTOINCREMENT, so deleting the newest user frees their id while
+    // their tombstone lives on. The new user who gets that id (forced here, so every database runs it) sees none of the
+    // dead owner's audit rows, gets a plain refusal at enrolment rather than already_enrolled, and Settings → Vault
+    // names the blocked id. Kills: visibleTo matching owner_id alone; enrolment answering already_enrolled; no flag.
+    public function testATombstonedIdReusedByANewUserIsBlockedAndSeesNothing(): void
+    {
+        $zed = (int) $this->container['userModel']->create(['username' => 'zed-the-last', 'password' => 'zed login password 1']);
+        $this->principals()->enrolHuman($zed, self::ROTATED_PASSPHRASE);
+        $zedSk = $this->skFor($zed, self::ROTATED_PASSPHRASE);
+        $g = $this->store()->createGroup($zed, null, ['name' => 'zed']);
+        $e = $this->store()->createEntry($zed, $g, Fixtures::fullEntry());
+        $this->grants()->grantServer($zed, $e, ['CveHunter'], ['password'], null, null, $zedSk);
+        $this->assertNotSame([], AuditModel::of($this->container)->visibleTo($zed, 0, 200));
+        $this->assertTrue($this->container['userModel']->remove($zed));
+        $this->purge();
+        $this->assertSame('orphaned', $this->principalRow($zed)['state']);
+        $this->assertSame([], $this->orphans()->blockedUserIds(self::ADMIN), 'nobody holds the id yet');
+
+        $reused = (int) $this->container['userModel']->create(['id' => $zed, 'username' => 'yan-the-reuser', 'password' => 'yan login password 1']);
+        $this->assertSame($zed, $reused);
+
+        $this->assertSame([], AuditModel::of($this->container)->visibleTo($reused, 0, 200), 'none of the dead owner\'s rows');
+        $this->assertVaultError('id_held_by_orphans', fn () => $this->principals()->enrolHuman($reused, 'VaultFixtureSecret-yanphrase-Lm2xQ9'));
+        $this->roster([$reused => $this->carol]);
+        $this->assertVaultError('id_held_by_orphans', fn () => $this->agentVault()->enrol($this->carol, $reused, $this->carolSk()));
+        $this->roster([]);
+        $this->assertSame('orphaned', $this->principalRow($zed)['state'], 'the tombstone is untouched');
+        $this->assertSame([$zed], $this->orphans()->blockedUserIds(self::ADMIN));
+        $this->assertSame([], $this->orphans()->blockedUserIds($this->bob), 'admins only');
+
+        $this->orphans()->destroy(self::ADMIN, $e);
+        $this->purge();
+        $this->assertSame([], $this->orphans()->blockedUserIds(self::ADMIN));
+        $this->principals()->enrolHuman($reused, 'VaultFixtureSecret-yanphrase-Lm2xQ9');
+        $this->assertSame('active', $this->principalRow($reused)['state']);
     }
 
     public function testDestroyRemovesTheOrphan(): void

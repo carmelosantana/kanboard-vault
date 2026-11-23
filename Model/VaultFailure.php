@@ -27,6 +27,8 @@ final class VaultFailure
         'passphrase_reuse' => [422, 'passphrase_reuse'],
         'passphrase_mismatch' => [422, 'passphrase_mismatch'],
         'already_enrolled' => [409, 'already_enrolled'],
+        // Important 4: this user id still belongs to a deleted user's orphans (SQLite reuses ids).
+        'id_held_by_orphans' => [409, 'id_held_by_orphans'],
         'not_enrolled' => [409, 'not_enrolled'],
         'not_found' => [404, 'not_found'],
         'conflict' => [409, 'conflict'],

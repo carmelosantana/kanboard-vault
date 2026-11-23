@@ -257,6 +257,7 @@ abstract class BaseVaultController extends BaseController
             'passphrase_weak' => t('Use at least %d characters, and not your username.', PrincipalModel::MIN_PASSPHRASE_CHARS),
             'passphrase_reuse' => t('Don\'t reuse your Kanboard login password.'),
             'already_enrolled' => t('Your vault is already set up. Reload the page.'),
+            'id_held_by_orphans' => t('Your vault can\'t be set up yet: your account reuses the user number of a deleted user whose entries are waiting for an administrator. Ask an administrator to claim or delete them in Settings → Vault.'),
             'forbidden' => t('The page expired. Reload it and try again.'),
             'failed' => t('Something went wrong. Try again.'),
             'locked' => t('Your vault is locked.'),

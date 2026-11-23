@@ -95,6 +95,7 @@ class SettingsController extends BaseVaultController
                 'server_key_path' => $this->container['vaultServerKeyFile']->path(),
                 'orphans' => $orphans->orphans($userId),
                 'at_risk' => $orphans->atRisk(),
+                'blocked_ids' => $orphans->blockedUserIds($userId),
                 'claim_groups' => $groups,
             ]));
         });
