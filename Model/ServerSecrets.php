@@ -134,7 +134,13 @@ class ServerSecrets extends Base implements ServiceSecrets
         } catch (ServerKeyUnavailable) {
             return $this->refuse($cols, 'server_key_unavailable');
         }
-        $value = $this->field($entry, $dek, $ref);
+        // Wiped here, not in field(): while field() runs this frame holds the string too, and sodium_memzero only zeroes
+        // a string nothing else holds.
+        try {
+            $value = $this->field($entry, $dek, $ref);
+        } finally {
+            sodium_memzero($dek);
+        }
         if ($value === null) {
             return $this->refuse($cols, 'not_found');
         }
@@ -208,7 +214,8 @@ class ServerSecrets extends Base implements ServiceSecrets
         return $key !== null && (int) $key['key_epoch'] === (int) $entry['key_epoch'] ? $key : null;
     }
 
-    // Step 11: the one field, or null when the entry doesn't decrypt or hasn't got it. Wipes the DEK and the plaintext.
+    // Step 11: the one field, or null when the entry doesn't decrypt or hasn't got it. Wipes the plaintext JSON and every
+    // decrypted value but the one returned (the caller wipes the DEK).
     private function field(array $entry, #[\SensitiveParameter] string $dek, SecretRef $ref): ?string
     {
         $json = '';
@@ -223,21 +230,37 @@ class ServerSecrets extends Base implements ServiceSecrets
         } catch (CryptoException|JsonException|SodiumException|ValueError) {
             return null;
         } finally {
-            sodium_memzero($dek);
             sodium_memzero($json);
         }
+        $value = null;
         if ($ref->isTopLevel()) {
             $value = $payload[$ref->field] ?? null;
         } else {
-            $value = null;
             foreach (is_array($payload['fields'] ?? null) ? $payload['fields'] : [] as $f) {
                 if (is_array($f) && ($f['name'] ?? null) === $ref->field) {
                     $value = $f['value'] ?? null;
                     break;
                 }
             }
+            unset($f); // the loop's copy would keep the field's array shared and stop the wipe below
         }
-        return is_string($value) ? $value : null;
+        $value = is_string($value) ? $value : null;
+        self::wipe($payload);
+        return $value;
+    }
+
+    // Zeroes every string leaf nothing else holds. A leaf the caller still has ($value) is shared, so it is only
+    // dropped from the array, not zeroed.
+    private static function wipe(#[\SensitiveParameter] array &$a): void
+    {
+        foreach ($a as &$v) {
+            if (is_string($v)) {
+                sodium_memzero($v);
+            } elseif (is_array($v)) {
+                self::wipe($v);
+            }
+        }
+        unset($v);
     }
 
     // Inside the lock: the refusal's audit (R3: rate_limited aggregated) and the closure's result.
