@@ -65,12 +65,12 @@ final class FileKeyProvider extends Base implements KeyProvider
 
     public function openSealedDek(string $sealed, DekContext $ctx): string
     {
-        return $this->withKeypair(static fn (string $keypair): string => Sealer::openDek($sealed, $keypair, $ctx->objectType, $ctx->objectId, $ctx->keyEpoch, $ctx->principalId));
+        return $this->withKeypair(static fn (#[\SensitiveParameter] string $keypair): string => Sealer::openDek($sealed, $keypair, $ctx->objectType, $ctx->objectId, $ctx->keyEpoch, $ctx->principalId));
     }
 
     public function openFieldMacKey(): string
     {
-        return $this->withKeypair(static function (string $keypair, VaultDb $db): string {
+        return $this->withKeypair(static function (#[\SensitiveParameter] string $keypair, VaultDb $db): string {
             $row = $db->fetchOne('SELECT server_field_mac_sealed FROM vault_meta WHERE id = 1');
             $sealed = base64_decode((string) ($row['server_field_mac_sealed'] ?? ''), true);
             if ($sealed === false || $sealed === '') {
@@ -103,7 +103,9 @@ final class FileKeyProvider extends Base implements KeyProvider
     }
 
     /**
-     * Runs $fn with the Server keypair and wipes it after. Every key failure is ServerKeyUnavailable.
+     * Runs $fn with the Server keypair and wipes it after. Every key failure is ServerKeyUnavailable; anything else (a
+     * database error) propagates, so every $fn marks its keypair parameter #[\SensitiveParameter] to keep it out of
+     * that exception's trace.
      *
      * @template T
      * @param callable(string, VaultDb): T $fn

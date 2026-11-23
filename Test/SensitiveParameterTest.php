@@ -13,6 +13,8 @@ use Kanboard\Plugin\Vault\Model\FileKeyProvider;
 use Kanboard\Plugin\Vault\Model\PrincipalModel;
 use Kanboard\Plugin\Vault\Model\ServerKeyFile;
 use Kanboard\Plugin\Vault\Model\ServerKeyUnavailable;
+use Kanboard\Plugin\Vault\Model\ServerPrincipal;
+use Kanboard\Plugin\Vault\Crypto\CryptoException;
 use Kanboard\Plugin\Vault\Model\VaultDb;
 use Kanboard\Plugin\Vault\Model\ServerGrant;
 use Kanboard\Plugin\Vault\Model\UnlockService;
@@ -167,6 +169,48 @@ class SensitiveParameterTest extends Base
                 $this->assertRedacted($fileKey, $e);
             }
             $this->assertStringNotContainsString($fileKey, print_r($provider, true), 'print_r of the provider');
+        } finally {
+            @unlink($dir.'/vault-server/server.key');
+            @unlink($dir.'/vault-server/.lock');
+            @rmdir($dir.'/vault-server');
+            @rmdir($dir);
+        }
+    }
+
+    // Review fix 1: with Server on, a non-crypto failure inside the provider's keypair callback (here a database error
+    // while the keypair is held) propagates; neither the Server keypair nor its sk may be in its trace.
+    // Kills: an unannotated $keypair on a withKeypair callback.
+    public function testServerKeypairIsAbsentWhenTheCallbackFails(): void
+    {
+        $dir = realpath(sys_get_temp_dir()).'/vault-sp-'.bin2hex(random_bytes(6));
+        mkdir($dir, 0700);
+        $file = new ServerKeyFile($dir.'/vault-server/server.key');
+        try {
+            (new ServerPrincipal($this->container, $file, null, fn () => $this->now))->enable(1);
+            $meta = $this->row('SELECT server_wrap_id, server_wrap_nonce, server_wrapped_sk FROM vault_meta WHERE id = 1');
+            $pk = base64_decode($this->row('SELECT public_key FROM vault_principals WHERE user_id = -1')['public_key']);
+            $sk = Wraps::unwrap(['id' => (int) $meta['server_wrap_id'], 'user_id' => -1, 'method' => 'server', 'credential_id' => null,
+                'nonce' => $meta['server_wrap_nonce'], 'wrapped_sk' => $meta['server_wrapped_sk'], 'crypto_v' => 1], Kdf::kek($file->read(), 'server', -1), $pk);
+            $this->assertSame(32, strlen((new FileKeyProvider($this->container, $file))->openFieldMacKey()), 'opens while the column is there');
+
+            $this->pdo()->exec('ALTER TABLE vault_meta RENAME COLUMN server_field_mac_sealed TO server_field_mac_gone');
+            $e = $this->thrown(fn () => (new FileKeyProvider($this->container, $file))->openFieldMacKey());
+            $this->assertNotInstanceOf(ServerKeyUnavailable::class, $e, 'a database error, not a key failure');
+            $this->assertNotInstanceOf(CryptoException::class, $e);
+            $printed = (string) $e."\n".$e->getTraceAsString();
+            $frames = 0;
+            foreach ($e->getTrace() as $frame) {
+                foreach ($frame['args'] ?? [] as $arg) {
+                    $frames++;
+                    foreach (['keypair' => $sk.$pk, 'sk' => $sk] as $what => $secret) {
+                        $this->assertFalse(is_string($arg) && str_contains($arg, $secret), "the Server $what in a raw trace argument of ".($frame['function'] ?? '?'));
+                    }
+                }
+            }
+            $this->assertGreaterThan(0, $frames, 'trace arguments are recorded');
+            $this->assertMatchesRegularExpression('/openFieldMacKey\(\):\d+\}|\{closure\}/', $printed, 'the callback frame is in the trace');
+            $this->assertStringNotContainsString(substr($sk, 0, 15), $printed);
+            $this->assertRedacted($sk.$pk, $e);
         } finally {
             @unlink($dir.'/vault-server/server.key');
             @unlink($dir.'/vault-server/.lock');
