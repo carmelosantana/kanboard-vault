@@ -389,4 +389,78 @@ class SettingsTest extends Base
         $this->assertSame('10000', $x->query('//input[@name="vault_server_rate_max"]/@value')->item(0)?->nodeValue);
         $this->assertSame('1', $x->query('//input[@name="vault_server_burst_max"]/@value')->item(0)?->nodeValue);
     }
+
+    // Spec amendment, requirement 14 (orphans) and the at-risk warning: Settings → Vault lists the quarantined orphans
+    // and the entries at risk by entry id only (no title, no group name of another user), with a claim form whose group
+    // <select> is filled only while the admin's vault is unlocked (their own groups, decrypted) and a step-up destroy form.
+    // Kills: the lists missing; a title or group name of the owner in the page; the select filled while locked; the
+    // destroy passphrase input without the password-manager opt-outs.
+    public function testPageListsOrphansAndEntriesAtRisk(): void
+    {
+        $this->principals()->enrolHuman($this->alice, $this->alicePassphrase);
+        $this->principals()->enrolHuman($this->bob, Fixtures::BOB_PASSPHRASE);
+        $this->principals()->enrolHuman(self::ADMIN, Fixtures::PASSPHRASE);
+        $this->enableServer();
+        $share = function (int $owner, string $sk): int {
+            $g = $this->store()->createGroup($owner, null, ['name' => Fixtures::GROUP_NAME]);
+            $e = $this->store()->createEntry($owner, $g, Fixtures::entry(Fixtures::ENTRY_TITLE));
+            $this->grants()->grantServer($owner, $e, ['CveHunter'], ['password'], null, null, $sk);
+            return $e;
+        };
+        $orphan = $share($this->alice, $this->skFor($this->alice, $this->alicePassphrase));
+        $this->grants()->grant($this->alice, 'entry', $orphan, self::ADMIN, 'read', null, $this->skFor($this->alice, $this->alicePassphrase));
+        $atRisk = $share($this->bob, $this->skFor($this->bob, Fixtures::BOB_PASSPHRASE));
+        $this->assertTrue($this->container['userModel']->remove($this->alice));
+        (new \Kanboard\Plugin\Vault\Model\Purger($this->container))->run($this->now, true);
+        $adminGroup = $this->store()->createGroup(self::ADMIN, null, ['name' => 'AdminOwnClaimTarget']);
+
+        $ids = fn (\DOMXPath $x, string $attr): array => array_map(static fn ($n): int => (int) $n->getAttribute($attr), iterator_to_array($x->query('//*[@'.$attr.']')));
+
+        // Locked: the lists, no group select.
+        $body = $this->call('index')->body;
+        $x = $this->dom($body);
+        $this->assertSame([$orphan], $ids($x, 'data-vault-orphan'));
+        $this->assertSame([$atRisk], $ids($x, 'data-vault-at-risk'));
+        $this->assertSame(0, $x->query('//select[@name="group_id"]')->length, 'no select while locked');
+        $this->assertStringContainsString('Unlock your vault to claim', $body);
+        $this->assertSame(0, $x->query('//*[@data-vault-check="entries_at_risk"][contains(@class, "vault-check-ok")]')->length, 'the at-risk check warns');
+        foreach (['server_sharing', 'key_provider', 'entries_at_risk'] as $key) {
+            $this->assertSame(1, $x->query('//*[@data-vault-check="'.$key.'"]')->length, "check $key listed");
+        }
+        foreach ([Fixtures::ENTRY_TITLE, Fixtures::GROUP_NAME, Fixtures::ENTRY_PASSWORD, 'AdminOwnClaimTarget'] as $secret) {
+            $this->assertStringNotContainsString($secret, $body);
+        }
+
+        // The destroy form: POST to orphans/destroy with the CSRF token, the entry id and a step-up passphrase input.
+        $destroy = $x->query('//form[@data-vault-form="orphan-destroy"]')->item(0);
+        $this->assertSame('post', $destroy?->getAttribute('method'));
+        $this->assertStringContainsString('action=destroy', $destroy->getAttribute('action'));
+        $this->assertStringContainsString('controller=OrphanController', $destroy->getAttribute('action'));
+        $this->assertSame((string) $orphan, $x->query('.//input[@name="entry_id"]/@value', $destroy)->item(0)?->nodeValue);
+        $this->assertTrue($this->container['token']->validateReusableCSRFToken($x->query('.//input[@name="csrf_token"]/@value', $destroy)->item(0)?->nodeValue));
+        $in = $x->query('.//input[@name="passphrase"]', $destroy)->item(0);
+        $this->assertSame(['password', 'off', 'true'], [$in?->getAttribute('type'), $in?->getAttribute('autocomplete'), $in?->getAttribute('data-lpignore')]);
+        $this->assertTrue($in->hasAttribute('data-1p-ignore') && $in->hasAttribute('data-bwignore'), 'A9');
+
+        // Unlocked: the claim form offers the admin's own groups by their decrypted names.
+        $this->unlockAs(self::ADMIN, Fixtures::PASSPHRASE, 'sid-admin');
+        $body = $this->call('index')->body;
+        $x = $this->dom($body);
+        $claim = $x->query('//form[@data-vault-form="orphan-claim"]')->item(0);
+        $this->assertStringContainsString('action=claim', $claim?->getAttribute('action'));
+        $this->assertSame((string) $orphan, $x->query('.//input[@name="entry_id"]/@value', $claim)->item(0)?->nodeValue);
+        $options = [];
+        foreach ($x->query('.//select[@name="group_id"]/option', $claim) as $o) {
+            $options[(int) $o->getAttribute('value')] = trim($o->textContent);
+        }
+        $this->assertSame([$adminGroup => 'AdminOwnClaimTarget'], $options);
+        $this->assertStringNotContainsString('Unlock your vault to claim', $body);
+        foreach ([Fixtures::ENTRY_TITLE, Fixtures::GROUP_NAME] as $secret) {
+            $this->assertStringNotContainsString($secret, $body);
+        }
+
+        // A native claim or destroy comes back here with its notice.
+        $x = $this->dom($this->call('index', 'GET', [], null, ['vault_notice' => 'orphan_claimed'])->body);
+        $this->assertSame(1, $x->query('//*[@data-vault-orphan-notice]')->length);
+    }
 }

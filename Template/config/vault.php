@@ -14,6 +14,9 @@ $expiries = [3600 => t('1 hour'), 86400 => t('1 day'), 604800 => t('7 days')];
 <?php if ($saved): ?>
 <p class="alert alert-success" role="status"><?= t('Settings saved.') ?></p>
 <?php endif ?>
+<?php if ($orphan_notice !== ''): ?>
+<p class="alert alert-success" role="status" data-vault-orphan-notice><?= $this->text->e($orphan_notice) ?></p>
+<?php endif ?>
 <?php if ($error !== ''): ?>
 <p class="alert alert-error" role="alert"><?= $this->text->e($error) ?></p>
 <?php endif ?>
@@ -96,6 +99,54 @@ $expiries = [3600 => t('1 hour'), 86400 => t('1 day'), 604800 => t('7 days')];
     <div class="form-actions"><button type="submit" class="btn btn-blue"><?= t('Turn Server sharing on') ?></button></div>
     <?php endif ?>
 </form>
+
+<h3><?= t('Orphaned entries') ?></h3>
+<p><?= t('Entries shared with Server whose owner was deleted. Nobody can read them, Server included, until an administrator with access claims one (it is re-encrypted into a group of yours) or deletes it. Only the entry number is shown.') ?></p>
+<?php if ($orphans === []): ?>
+<p data-vault-orphans-none><?= t('None.') ?></p>
+<?php endif ?>
+<?php foreach ($orphans as $o): ?>
+<div class="vault-orphan" data-vault-orphan="<?= (int) $o['entry_id'] ?>">
+    <h4><?= t('Entry #%d', (int) $o['entry_id']) ?></h4>
+    <form method="post" action="<?= $this->url->href('OrphanController', 'claim', ['plugin' => 'Vault']) ?>" autocomplete="off" data-vault-form="orphan-claim">
+        <input type="hidden" name="csrf_token" value="<?= $this->text->e($csrf) ?>">
+        <input type="hidden" name="entry_id" value="<?= (int) $o['entry_id'] ?>">
+        <?php if ($claim_groups === null): ?>
+        <p class="form-help"><?= t('Unlock your vault to claim.') ?></p>
+        <?php elseif ($claim_groups === []): ?>
+        <p class="form-help"><?= t('Create a group in your vault to claim into.') ?></p>
+        <?php else: ?>
+        <label for="vault-orphan-group-<?= (int) $o['entry_id'] ?>"><?= t('Move it into your group') ?></label>
+        <select id="vault-orphan-group-<?= (int) $o['entry_id'] ?>" name="group_id" required>
+            <?php foreach ($claim_groups as $id => $name): ?>
+            <option value="<?= (int) $id ?>"><?= $this->text->e($name) ?></option>
+            <?php endforeach ?>
+        </select>
+        <div class="form-actions"><button type="submit" class="btn btn-blue"><?= t('Claim') ?></button></div>
+        <?php endif ?>
+    </form>
+    <form method="post" action="<?= $this->url->href('OrphanController', 'destroy', ['plugin' => 'Vault']) ?>" autocomplete="off" data-vault-form="orphan-destroy">
+        <input type="hidden" name="csrf_token" value="<?= $this->text->e($csrf) ?>">
+        <input type="hidden" name="entry_id" value="<?= (int) $o['entry_id'] ?>">
+        <label for="vault-orphan-passphrase-<?= (int) $o['entry_id'] ?>"><?= t('Your vault passphrase') ?></label>
+        <input type="password" id="vault-orphan-passphrase-<?= (int) $o['entry_id'] ?>" name="passphrase" autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore required>
+        <p class="form-help"><?= t('Your vault must be unlocked. Deleting can\'t be undone.') ?></p>
+        <div class="form-actions"><button type="submit" class="btn btn-red"><?= t('Delete') ?></button></div>
+    </form>
+</div>
+<?php endforeach ?>
+
+<h3><?= t('Entries at risk') ?></h3>
+<p><?= t('Entries shared with Server whose owner is disabled, or that no other administrator has access to: if the owner were deleted, nobody could claim them. Only the entry number is shown.') ?></p>
+<?php if ($at_risk === []): ?>
+<p data-vault-at-risk-none><?= t('None.') ?></p>
+<?php else: ?>
+<ul class="vault-at-risk">
+    <?php foreach ($at_risk as $r): ?>
+    <li data-vault-at-risk="<?= (int) $r['entry_id'] ?>"><?= t('Entry #%d', (int) $r['entry_id']) ?>: <?= $r['reason'] === 'owner_disabled' ? t('the owner is disabled') : t('no other administrator has access') ?></li>
+    <?php endforeach ?>
+</ul>
+<?php endif ?>
 
 <h3><?= t('Hardware keys') ?></h3>
 <?php if ($relying_party !== null): ?>

@@ -4,6 +4,7 @@ namespace Kanboard\Plugin\Vault\Controller;
 use Kanboard\Plugin\Vault\Model\AuditModel;
 use Kanboard\Plugin\Vault\Model\ClientIp;
 use Kanboard\Plugin\Vault\Model\DeploymentChecks;
+use Kanboard\Plugin\Vault\Model\OrphanService;
 use Kanboard\Plugin\Vault\Model\ServerPrincipal;
 use Kanboard\Plugin\Vault\Model\VaultException;
 use Kanboard\Plugin\Vault\Model\VaultSettings;
@@ -22,6 +23,9 @@ use Kanboard\Plugin\Vault\Model\VaultSettings;
 //                              unlocked vault and the admin's vault passphrase, through the passphrase change's throttled
 //                              check (RotationService::confirmPassphrase: back-off, the IP bucket, the Argon2 slot, the
 //                              failed-guess streak and its audit). Off needs admin and CSRF only: failing closed is safe.
+//
+// The page also lists the orphans (claim and destroy post to OrphanController) and the entries at risk, by entry id
+// only. The claim form's groups are the admin's own, decrypted only while their vault is unlocked.
 //
 // There is no "view vault" or "reset user" action here, and org recovery stays CLI only.
 class SettingsController extends BaseVaultController
@@ -50,6 +54,24 @@ class SettingsController extends BaseVaultController
             }
             $session = $this->vaultSession();
             $messages = self::messages();
+            $userId = $this->userId();
+            $orphans = new OrphanService($this->container);
+            // R18: the session's key before any vault lock; null (locked) means no group list.
+            $sk = $session->secretKey();
+            $groups = null;
+            if ($sk !== null) {
+                try {
+                    $groups = [];
+                    foreach ($this->store()->tree($userId, $sk)['groups'] as $g) {
+                        if ($g['owner_id'] === $userId && empty($g['integrity_error'])) {
+                            $groups[$g['id']] = $g['name'];
+                        }
+                    }
+                } finally {
+                    sodium_memzero($sk);
+                }
+            }
+            $notice = $this->request->getStringParam('vault_notice');
             $this->respond()->html($this->helper->layout->config('Vault:config/vault', [
                 'title' => t('Vault settings'),
                 'vault' => $values,
@@ -62,10 +84,18 @@ class SettingsController extends BaseVaultController
                 'integrity' => AuditModel::of($this->container)->integrityFaults($this->userId()),
                 'share_expiries' => VaultSettings::SHARE_EXPIRIES,
                 'error' => $this->codeMessage('vault_error', $messages),
-                'saved' => $this->request->getStringParam('vault_notice') === 'saved',
+                'saved' => $notice === 'saved',
+                'orphan_notice' => match ($notice) {
+                    'orphan_claimed' => t('The entry is yours now, re-encrypted under a new key.'),
+                    'orphan_destroyed' => t('The entry is deleted.'),
+                    default => '',
+                },
                 'server_on' => ServerPrincipal::of($this->container)->isOn(),
                 // A path, not a secret (VAULT_SERVER_KEY_FILE): shown read-only, like the rp_id.
                 'server_key_path' => $this->container['vaultServerKeyFile']->path(),
+                'orphans' => $orphans->orphans($userId),
+                'at_risk' => $orphans->atRisk(),
+                'claim_groups' => $groups,
             ]));
         });
     }

@@ -114,6 +114,8 @@ class Plugin extends Base
         $this->route->addRoute('vault/settings', 'SettingsController', 'index', 'Vault');
         $this->route->addRoute('vault/settings/save', 'SettingsController', 'save', 'Vault');
         $this->route->addRoute('vault/settings/server', 'SettingsController', 'server', 'Vault');
+        $this->route->addRoute('vault/orphans/claim', 'OrphanController', 'claim', 'Vault');
+        $this->route->addRoute('vault/orphans/destroy', 'OrphanController', 'destroy', 'Vault');
         $this->hook->on('template:config:sidebar', ['template' => 'Vault:config/sidebar']);
         $this->hook->on('template:header:dropdown', ['template' => 'Vault:header/dropdown']);
         $this->hook->on('template:dashboard:sidebar', ['template' => 'Vault:dashboard/sidebar']);

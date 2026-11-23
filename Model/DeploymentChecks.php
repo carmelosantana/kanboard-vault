@@ -18,6 +18,13 @@ use Kanboard\Core\Http\Request;
 //                        behind a trusted proxy, Kanboard's own TRUSTED_PROXY_HEADERS should be set.
 //   sodium               ext-sodium with Argon2id.
 //   lock_dir             the Argon2 slot directory (DATA_DIR/vault) is no looser than 0700 (T4 minor).
+//   server_sharing       Server sharing on or off (informational, never a warning).
+//   key_provider         the Server key file (VAULT_SERVER_KEY_FILE) is outside DATA_DIR, so a backup of the data
+//                        directory doesn't carry it (red even while Server is off: the default path is inside); while
+//                        Server is on it is also sound (ServerKeyFile::status) and opens the Server key
+//                        (KeyProvider::healthy). Read only: the file is never created or chmod-repaired here.
+//   entries_at_risk      no entry shared with Server is at risk of becoming an orphan nobody can claim
+//                        (OrphanService::atRisk).
 //
 // Messages are fixed sentences: they name no filesystem path, no address and no header value.
 class DeploymentChecks extends Base
@@ -27,7 +34,8 @@ class DeploymentChecks extends Base
     private array $env;
 
     // $env overrides what the checks read, for tests: plugin_installer (bool), plugins_dir (string),
-    // plugins_writable (bool), lock_dir (string), sodium (bool), trusted_proxy_headers (string).
+    // plugins_writable (bool), lock_dir (string), sodium (bool), trusted_proxy_headers (string), server_on (bool),
+    // server_key_file (ServerKeyFile; its provider is then built on it), data_dir (string), at_risk (int).
     public function __construct($container, array $env = [])
     {
         parent::__construct($container);
@@ -45,7 +53,54 @@ class DeploymentChecks extends Base
             'proxy_headers' => $this->proxyHeaders($r, $cidrs),
             'sodium' => $this->sodium(),
             'lock_dir' => $this->lockDir(),
+            'server_sharing' => $this->serverSharing(),
+            'key_provider' => $this->keyProvider(),
+            'entries_at_risk' => $this->entriesAtRisk(),
         ];
+    }
+
+    private function serverOn(): bool
+    {
+        return (bool) ($this->env['server_on'] ?? ServerPrincipal::of($this->container)->isOn());
+    }
+
+    private function serverSharing(): array
+    {
+        return self::ok($this->serverOn()
+            ? t('Server sharing is on: owners can share single entries with plugins that read them on the server.')
+            : t('Server sharing is off.'));
+    }
+
+    private function keyProvider(): array
+    {
+        $file = $this->env['server_key_file'] ?? (isset($this->container['vaultServerKeyFile']) ? $this->container['vaultServerKeyFile'] : new ServerKeyFile(ServerKeyFile::configuredPath()));
+        if ($file->isUnder((string) ($this->env['data_dir'] ?? DATA_DIR))) {
+            return self::warn(t('The Server key file is inside Kanboard\'s data directory, so a backup of that directory carries the key with the database. Set VAULT_SERVER_KEY_FILE to a path outside it.'));
+        }
+        if (! $this->serverOn()) {
+            return self::ok(t('Not in use while Server sharing is off.'));
+        }
+        $status = $file->status();
+        if ($status === 'missing') {
+            return self::warn(t('The Server key file is missing, so nothing shared with Server can be read. Restore it from its own backup.'));
+        }
+        if ($status !== 'ok') {
+            return self::warn(t('The Server key file isn\'t safe to use: it must be a regular file owned by the web server\'s user with mode 0600, in a directory only that user can write to, with no symbolic link on the way. Vault never repairs it.'));
+        }
+        $provider = isset($this->env['server_key_file']) ? new FileKeyProvider($this->container, $file)
+            : (isset($this->container['vaultKeyProvider']) ? $this->container['vaultKeyProvider'] : new FileKeyProvider($this->container, $file));
+        if (! $provider->healthy()) {
+            return self::warn(t('The Server key file doesn\'t open the Server key: it isn\'t the file Server sharing was turned on with. Restore the original file.'));
+        }
+        return self::ok(t('The Server key file is outside Kanboard\'s data directory and opens the Server key.'));
+    }
+
+    private function entriesAtRisk(): array
+    {
+        $n = (int) ($this->env['at_risk'] ?? count((new OrphanService($this->container))->atRisk()));
+        return $n === 0
+            ? self::ok(t('No entry shared with Server is at risk of becoming an orphan.'))
+            : self::warn(t('%d entries shared with Server have a disabled owner, or no other administrator with access who could claim them if their owner were deleted. They are listed below.', $n));
     }
 
     private function https(Request $r, array $cidrs): array

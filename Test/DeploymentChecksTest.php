@@ -1,9 +1,10 @@
 <?php
 require_once 'tests/units/Base.php';
-require_once __DIR__.'/Support/VaultFixture.php';
+require_once __DIR__.'/Support/ServerFixture.php';
 
 use Kanboard\Core\Http\Request;
 use Kanboard\Plugin\Vault\Model\DeploymentChecks;
+use Kanboard\Plugin\Vault\Model\ServerKeyFile;
 use Kanboard\Plugin\Vault\Model\VaultSettings;
 use KanboardTests\units\Base;
 
@@ -11,7 +12,7 @@ use KanboardTests\units\Base;
 // carries R41 (the https check), T4 minors (IPv4-mapped CIDRs, the lock directory's mode).
 class DeploymentChecksTest extends Base
 {
-    use VaultFixture;
+    use ServerFixture;
 
     private string $tmp;
 
@@ -22,6 +23,7 @@ class DeploymentChecksTest extends Base
         $this->tmp = sys_get_temp_dir().'/vault-t15-'.bin2hex(random_bytes(6));
         mkdir($this->tmp.'/plugins', 0755, true);
         mkdir($this->tmp.'/lock', 0700);
+        $this->setUpServer();
     }
 
     protected function tearDown(): void
@@ -31,6 +33,7 @@ class DeploymentChecksTest extends Base
             @rmdir($this->tmp.'/'.$d);
         }
         @rmdir($this->tmp);
+        $this->tearDownServer();
         $this->tearDownVault();
         parent::tearDown();
     }
@@ -44,6 +47,10 @@ class DeploymentChecksTest extends Base
             'lock_dir' => $this->tmp.'/lock',
             'sodium' => true,
             'trusted_proxy_headers' => '',
+            'server_on' => false,
+            'server_key_file' => new ServerKeyFile($this->keyPath),
+            'data_dir' => $this->tmp,
+            'at_risk' => 0,
         ]);
     }
 
@@ -125,7 +132,7 @@ class DeploymentChecksTest extends Base
     public function testEveryCheckReportsWithoutPaths(): void
     {
         $good = $this->checks()->run($this->req(['REMOTE_ADDR' => '203.0.113.9', 'HTTPS' => 'on']));
-        $this->assertSame(['https', 'plugin_installer', 'plugin_dir_writable', 'proxy_headers', 'sodium', 'lock_dir'], array_keys($good));
+        $this->assertSame(['https', 'plugin_installer', 'plugin_dir_writable', 'proxy_headers', 'sodium', 'lock_dir', 'server_sharing', 'key_provider', 'entries_at_risk'], array_keys($good));
         foreach ($good as $key => $c) {
             $this->assertSame(['ok', 'message'], array_keys($c), $key);
             $this->assertTrue($c['ok'], "$key passes");
@@ -133,8 +140,9 @@ class DeploymentChecksTest extends Base
         }
 
         chmod($this->tmp.'/lock', 0750);
-        $bad = $this->checks(['plugin_installer' => true, 'plugins_writable' => true, 'sodium' => false])
+        $bad = $this->checks(['plugin_installer' => true, 'plugins_writable' => true, 'sodium' => false, 'server_on' => true, 'at_risk' => 3])
             ->run($this->req(['REMOTE_ADDR' => '10.0.0.5']));
+        unset($bad['server_sharing']); // informational: on or off, never a warning
         foreach ($bad as $key => $c) {
             $this->assertFalse($c['ok'], "$key fails");
             $this->assertStringNotContainsString($this->tmp, $c['message'], "$key names no path");
@@ -152,5 +160,73 @@ class DeploymentChecksTest extends Base
         $this->assertSame(! PLUGIN_INSTALLER, $real['plugin_installer']['ok']);
         $this->assertSame(! is_writable(PLUGINS_DIR), $real['plugin_dir_writable']['ok']);
         $this->assertSame(function_exists('sodium_crypto_pwhash'), $real['sodium']['ok']);
+    }
+
+    private function keyProvider(array $env): array
+    {
+        return $this->checks($env)->run($this->req(['REMOTE_ADDR' => '203.0.113.9', 'HTTPS' => 'on']))['key_provider'];
+    }
+
+    // Spec amendment, Server key file: the key file must live outside Kanboard's data directory (a database-and-data
+    // backup must not carry it), be sound (ServerKeyFile::status) and open the Server key (KeyProvider::healthy) while
+    // Server is on. Kills: the isUnder check removed; status ignored; healthy ignored; a check that chmods the file.
+    public function testKeyProviderCheck(): void
+    {
+        $this->enableServer();
+        $on = ['server_on' => true];
+        $ok = $this->keyProvider($on);
+        $this->assertTrue($ok['ok'], 'outside the data directory and valid: '.$ok['message']);
+
+        $under = $this->keyProvider($on + ['data_dir' => $this->serverDir]);
+        $this->assertFalse($under['ok'], 'under the data directory');
+        $this->assertStringContainsString('key file is inside Kanboard', $under['message']); // t() escapes the apostrophe
+        $this->assertStringContainsString('data directory', $under['message']);
+        $off = $this->keyProvider(['data_dir' => $this->serverDir]);
+        $this->assertFalse($off['ok'], 'under the data directory is red even while Server is off (the default path)');
+
+        $missing = $this->keyProvider($on + ['server_key_file' => new ServerKeyFile($this->serverDir.'/vault-server/absent.key')]);
+        $this->assertFalse($missing['ok'], 'missing');
+
+        // A sound key file that isn't the one the Server wrap was made with: status ok, healthy false.
+        $other = $this->serverDir.'/other';
+        mkdir($other, 0700);
+        (new ServerKeyFile($other.'/server.key'))->create();
+        $this->assertSame('ok', (new ServerKeyFile($other.'/server.key'))->status());
+        $this->assertFalse($this->keyProvider($on + ['server_key_file' => new ServerKeyFile($other.'/server.key')])['ok'], 'a key that doesn\'t open the wrap');
+
+        chmod($this->keyPath, 0640);
+        $loose = $this->keyProvider($on);
+        $this->assertFalse($loose['ok'], 'mode 0640');
+        clearstatcache(true, $this->keyPath);
+        $this->assertSame(0640, fileperms($this->keyPath) & 0777, 'the check never repairs the mode');
+
+        foreach ([$ok, $under, $off, $missing, $loose] as $c) {
+            $this->assertStringNotContainsString($this->keyPath, $c['message']);
+            $this->assertStringNotContainsString($this->serverDir, $c['message']);
+            $this->assertStringNotContainsString($this->tmp, $c['message']);
+            $this->assertStringNotContainsString(sys_get_temp_dir(), $c['message']);
+        }
+    }
+
+    // Server off is informational: sharing says it is off, the key file is not in use (no file is looked at). The
+    // at-risk count warns from one. Kills: Server off shown as a warning; the key file checked while off; the count ignored.
+    public function testServerSharingAndEntriesAtRisk(): void
+    {
+        $r = $this->checks(['server_key_file' => new ServerKeyFile($this->serverDir.'/nothing/here.key')])->run($this->req(['REMOTE_ADDR' => '203.0.113.9', 'HTTPS' => 'on']));
+        $this->assertTrue($r['server_sharing']['ok']);
+        $this->assertStringContainsString('Server sharing is off', $r['server_sharing']['message']);
+        $this->assertSame(['ok' => true, 'message' => 'Not in use while Server sharing is off.'], $r['key_provider']);
+
+        $this->enableServer();
+        $real = (new DeploymentChecks($this->container, ['data_dir' => $this->tmp]))->run($this->req(['REMOTE_ADDR' => '203.0.113.9', 'HTTPS' => 'on']));
+        $this->assertTrue($real['server_sharing']['ok']);
+        $this->assertStringContainsString('Server sharing is on', $real['server_sharing']['message']);
+        $this->assertTrue($real['key_provider']['ok'], 'without overrides: the container\'s key file and provider');
+        $this->assertTrue($real['entries_at_risk']['ok'], 'nothing shared with Server');
+
+        $two = $this->checks(['at_risk' => 2])->run($this->req(['REMOTE_ADDR' => '203.0.113.9', 'HTTPS' => 'on']))['entries_at_risk'];
+        $this->assertFalse($two['ok']);
+        $this->assertStringContainsString('2', $two['message']);
+        $this->assertTrue($this->checks(['at_risk' => 0])->run($this->req(['REMOTE_ADDR' => '203.0.113.9', 'HTTPS' => 'on']))['entries_at_risk']['ok']);
     }
 }

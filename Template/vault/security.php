@@ -24,6 +24,18 @@
 <p class="alert alert-error vault-banner" role="alert"><?= $this->text->e($error) ?></p>
 <?php endif ?>
 
+<?php if ($at_risk !== []): ?>
+<section class="vault-card vault-section" data-vault-at-risk-list>
+    <h3><?= t('Entries at risk') ?></h3>
+    <p><?= t('These entries are shared with Server, but no other administrator has access to them, or your account is disabled. If your account were deleted, nobody could take them over and the plugins reading them would stop. Share each with an administrator.') ?></p>
+    <ul>
+        <?php foreach ($at_risk as $r): ?>
+        <li data-vault-at-risk="<?= (int) $r['entry_id'] ?>"><a href="<?= $this->url->href('VaultController', 'index', ['plugin' => 'Vault', 'entry' => (int) $r['entry_id']]) ?>"><?= t('Entry #%d', (int) $r['entry_id']) ?></a></li>
+        <?php endforeach ?>
+    </ul>
+</section>
+<?php endif ?>
+
 <section class="vault-card vault-section">
     <h3><?= t('Hardware keys') ?></h3>
     <p><?= t('Add security keys so unlocking needs your passphrase and a key. With keys, change your passphrase or rotate your keys on the hardware key page.') ?> <?= $this->url->link(t('Manage hardware keys'), 'HardwareKeyController', 'index', ['plugin' => 'Vault'], false, '', '', false, '', false) ?></p>

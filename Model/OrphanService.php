@@ -20,6 +20,9 @@ use Kanboard\Core\Security\Role;
 // A refused claim or destroy is audited (orphan_claim_denied / orphan_destroy_denied, reason the code) in its own
 // transaction after the rollback, then thrown as a VaultException with the same code: not_found for a live or
 // missing entry, a bad group or a locked admin; not_allowed for a non-admin or an admin without a grant.
+//
+// Accepted P1 limitation: an admin who rotates their own key loses their key row on a quarantined orphan and can no
+// longer claim it; another grant-holding admin can, or it can be destroyed.
 final class OrphanService extends Base
 {
     private Closure $clock;
