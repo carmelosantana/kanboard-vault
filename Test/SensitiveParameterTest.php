@@ -21,6 +21,8 @@ use Kanboard\Plugin\Vault\Model\VaultDb;
 use Kanboard\Plugin\Vault\Model\ServerGrant;
 use Kanboard\Plugin\Vault\Model\ServerSecrets;
 use Kanboard\Plugin\Vault\Model\ObjectStore;
+use Kanboard\Plugin\Vault\Model\OrphanService;
+use Kanboard\Plugin\Vault\Model\Rekeyer;
 use Kanboard\Plugin\Vault\Model\UnlockService;
 use KanboardTests\units\Base;
 
@@ -275,6 +277,24 @@ class SensitiveParameterTest extends Base
             @rmdir($dir.'/vault-server');
             @rmdir($dir);
         }
+    }
+
+    // Task 11: the holder's sk handed to Rekeyer::transferRow and the admin's sk handed to OrphanService::claim, when a
+    // database error is raised while they are held (the principal lookup fails). Kills: an unannotated $holderSk on
+    // transferRow, or $adminSk on claim or any frame it passes the key through.
+    public function testOrphanClaimKeysAreAbsent(): void
+    {
+        $this->pdo()->exec('ALTER TABLE vault_principals RENAME COLUMN public_key TO public_key_gone');
+        $sk = str_pad('SK-SENTINEL-transferRow', 32, 'x');
+        $row = ['id' => 1, 'crypto_v' => ObjectStore::CRYPTO_V, 'key_epoch' => 1, 'owner_id' => $this->alice, 'group_id' => 1, 'nonce' => '', 'ciphertext' => ''];
+        $e = $this->thrown(fn () => (new Rekeyer($this->container, fn () => $this->now))->transferRow(new VaultDb($this->container), $row, $this->alice, $sk, 1, 1));
+        $this->assertInstanceOf(\PDOException::class, $e);
+        $this->assertRedacted($sk, $e);
+
+        $sk = str_pad('SK-SENTINEL-claim', 32, 'x');
+        $e = $this->thrown(fn () => (new OrphanService($this->container, fn () => $this->now))->claim(1, 1, 1, $sk));
+        $this->assertInstanceOf(\PDOException::class, $e);
+        $this->assertRedacted($sk, $e);
     }
 
     public static function cryptoCalls(): array

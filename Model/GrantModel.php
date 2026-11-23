@@ -257,7 +257,9 @@ class GrantModel extends Base
                 if ($row === null) {
                     continue;
                 }
-                $after = $resolver->effective($t, $oid, $now, $row, $grantId);
+                // keyHolders, not effective: a quarantined orphan keeps its Server key row and its other grantees' rows
+                // (effective() is empty for it), or a later claim couldn't restore Server reads (Task 11, carry b).
+                $after = $resolver->keyHolders($t, $oid, $now, $row, $grantId);
                 $this->dropLosers($db, $t, $row, $after, [(int) $grant['grantee_id']]);
             }
             $db->execute('DELETE FROM vault_grants WHERE id = ?', [$grantId]);

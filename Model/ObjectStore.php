@@ -494,9 +494,7 @@ class ObjectStore extends Base
             $this->requireCurrentKey($db, $actorId, $sk);
             $this->audit('delete', $actorId, $type, $id);
             if ($type === 'entry') {
-                $this->revokeServerShares($db, [$id]);
-                $this->purgeRefs($db, 'entry', [$id]);
-                $db->execute('DELETE FROM vault_entries WHERE id = ?', [$id]);
+                $this->purgeEntry($db, $id);
                 return;
             }
             $levels = $this->resolver()->subtreeLevels($id);
@@ -516,14 +514,27 @@ class ObjectStore extends Base
         });
     }
 
+    // One entry with its key, grant and re-key queue rows, inside the caller's exclusive lock; vault.secret.revoked
+    // after the commit if it was shared with Server. Not audited here (the caller audits its own action).
+    public function purgeEntry(VaultDb $db, int $entryId): void
+    {
+        $this->revokeServerShares($db, [$entryId]);
+        $this->purgeRefs($db, 'entry', [$entryId]);
+        $db->execute('DELETE FROM vault_entries WHERE id = ?', [$entryId]);
+    }
+
     // v5 owner deletion: every object the principal owns goes, inside the caller's exclusive lock (the purge's orphan
     // sweep). Owned entries, and every owned group with its whole subtree, entries included, as the old users and
     // group_id cascades took them. Key, grant and re-key queue rows go with them; groups are deleted bottom-up, as in
     // deleteObject. Not audited, the same as the cascade. Returns how many objects were deleted.
-    public function deleteOwnedBy(VaultDb $db, int $principalId): int
+    // Task 11: $keepEntries (the quarantined orphans) and $keepGroups (their ancestor groups the principal owns) stay with
+    // their rows. A kept group's own subtree is not taken through it; owned objects inside it still go one by one.
+    /** @param list<int> $keepEntries @param list<int> $keepGroups */
+    public function deleteOwnedBy(VaultDb $db, int $principalId, array $keepEntries = [], array $keepGroups = []): int
     {
         $resolver = $this->resolver();
-        $seen = [];
+        $keepEntry = array_fill_keys($keepEntries, true);
+        $seen = array_fill_keys($keepGroups, true);
         $levelSets = [];
         foreach ($db->fetchAll('SELECT id FROM vault_groups WHERE owner_id = ? ORDER BY id', [$principalId]) as $g) {
             if (isset($seen[(int) $g['id']])) {
@@ -541,12 +552,12 @@ class ObjectStore extends Base
             }
             $levelSets[] = $levels;
         }
-        $groupIds = array_map('intval', array_keys($seen));
+        $groupIds = array_values(array_diff(array_map('intval', array_keys($seen)), $keepGroups));
         $entryIds = $resolver->entriesIn($groupIds);
         foreach ($db->fetchAll('SELECT id FROM vault_entries WHERE owner_id = ? ORDER BY id', [$principalId]) as $e) {
             $entryIds[] = (int) $e['id'];
         }
-        $entryIds = array_values(array_unique($entryIds));
+        $entryIds = array_values(array_filter(array_unique($entryIds), static fn (int $id): bool => ! isset($keepEntry[$id])));
         $this->revokeServerShares($db, $entryIds);
         $this->purgeRefs($db, 'entry', $entryIds);
         $this->purgeRefs($db, 'group', $groupIds);

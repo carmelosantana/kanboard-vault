@@ -42,6 +42,44 @@ class RecipientResolver extends Base
         }
         $ownerId = (int) $row['owner_id'];
         $out = $this->ownsHere($db, $type, $row, $ancestors) ? [$ownerId => ObjectStore::OWNER] : [];
+        foreach ($this->grantSources($db, $type, $id, $ancestors, $now, $excludeGrantId) as $grantee => $perm) {
+            $out[$grantee] ??= $perm;
+        }
+        return $out;
+    }
+
+    // The live grant holders of an object, from its direct and ancestor grants: principal id => 'edit'|'read'. The owner
+    // and whether any owner is gone are ignored (an orphan's grantees are who may claim it).
+    /** @return array<int, 'edit'|'read'> */
+    public function grantees(string $type, int $id, int $now, ?array $row = null, ?int $excludeGrantId = null): array
+    {
+        $row ??= $this->object($type, $id);
+        if ($row === null) {
+            return [];
+        }
+        return $this->grantSources($this->vdb(), $type, $id, $this->ancestors($type, $row), $now, $excludeGrantId);
+    }
+
+    // The principals entitled to key rows on an object, for the paths that drop losers' rows: its effective recipients;
+    // for an object whose chain is gone, readable by nobody (a quarantined orphan until it is claimed or destroyed, or
+    // the purge takes it), its live grant holders, so the Server key row and a claiming admin's row survive.
+    /** @return array<int, 'owner'|'edit'|'read'> */
+    public function keyHolders(string $type, int $id, int $now, ?array $row = null, ?int $excludeGrantId = null): array
+    {
+        $row ??= $this->object($type, $id);
+        if ($row === null) {
+            return [];
+        }
+        return $this->chainGone($this->vdb(), $type, $row)
+            ? $this->grantees($type, $id, $now, $row, $excludeGrantId)
+            : $this->effective($type, $id, $now, $row, $excludeGrantId);
+    }
+
+    // Each grantee's highest permission among the live grants on ($type, $id) and on each ancestor group.
+    /** @param list<int> $ancestors @return array<int, 'edit'|'read'> */
+    private function grantSources(VaultDb $db, string $type, int $id, array $ancestors, int $now, ?int $excludeGrantId): array
+    {
+        $out = [];
         $subjects = [[$type, $id]];
         foreach ($ancestors as $groupId) {
             $subjects[] = ['group', $groupId];
@@ -77,8 +115,9 @@ class RecipientResolver extends Base
 
     // v5: an object follows its owner's principal, not the Kanboard user row, so a deleted owner's objects outlive the
     // user until the purge sweeps them. Until then nobody reads them, as if the old users cascade had removed them:
-    // true when the owner's principal is missing or its Kanboard user is gone (live_user_id NULL). effective() applies
-    // the same test to every ancestor group's owner too, as the group_id and parent_id cascades took those objects.
+    // true when the owner's principal is missing, its Kanboard user is gone (live_user_id NULL) or it is an orphan's
+    // tombstone (state 'orphaned'). effective() applies the same test to every ancestor group's owner too, as the
+    // group_id and parent_id cascades took those objects.
     public function ownerGone(VaultDb $db, array $row): bool
     {
         return $this->anyGone($db, [(int) $row['owner_id']]);
@@ -91,13 +130,14 @@ class RecipientResolver extends Base
         return $this->anyGone($db, array_merge([(int) $row['owner_id']], array_values($this->ancestorOwners($type, $row))));
     }
 
-    // Whether any of these owner principals is missing or has live_user_id NULL. One query.
+    // Whether any of these owner principals is missing, has live_user_id NULL or is a tombstone. One query: the one
+    // owner-liveness predicate, shared by ownerGone, chainGone and effective().
     /** @param list<int> $ownerIds */
     private function anyGone(VaultDb $db, array $ownerIds): bool
     {
         $ids = array_values(array_unique($ownerIds));
         $live = $db->fetchOne(
-            'SELECT COUNT(*) AS n FROM vault_principals WHERE live_user_id IS NOT NULL AND user_id IN ('.self::marks($ids).')',
+            "SELECT COUNT(*) AS n FROM vault_principals WHERE live_user_id IS NOT NULL AND state <> 'orphaned' AND user_id IN (".self::marks($ids).')',
             $ids
         );
         return (int) ($live['n'] ?? 0) !== count($ids);
