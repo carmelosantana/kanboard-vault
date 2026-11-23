@@ -10,6 +10,7 @@ use Kanboard\Plugin\Vault\Crypto\Sealer;
 use Kanboard\Plugin\Vault\Crypto\Wraps;
 use Kanboard\Plugin\Vault\Model\DekContext;
 use Kanboard\Plugin\Vault\Model\FileKeyProvider;
+use Kanboard\Plugin\Vault\Model\GrantModel;
 use Kanboard\Plugin\Vault\Model\PrincipalModel;
 use Kanboard\Plugin\Vault\Model\ServerKeyFile;
 use Kanboard\Plugin\Vault\Model\ServerKeyUnavailable;
@@ -216,6 +217,23 @@ class SensitiveParameterTest extends Base
             @unlink($dir.'/vault-server/.lock');
             @rmdir($dir.'/vault-server');
             @rmdir($dir);
+        }
+    }
+
+    // Task 7: the owner's sk and the plain field names (a custom name is secret, R1) handed to grantServer, refused here
+    // because Server is off. Kills: an unannotated $ownerSk or $fields on grantServer.
+    public function testGrantServerOwnerSkIsAbsent(): void
+    {
+        $this->principals()->enrolHuman($this->alice, $this->alicePassphrase);
+        $sk = str_pad('SK-SENTINEL-grantServer', 32, 'x');
+        $field = 'FIELD-SENTINEL-grantServer';
+        $e = $this->thrown(fn () => (new GrantModel($this->container, fn () => $this->now))->grantServer($this->alice, 1, ['CveHunter'], [$field], null, null, $sk));
+        $this->assertSame('server_off', $e->getMessage());
+        $this->assertRedacted($sk, $e);
+        foreach ($e->getTrace() as $frame) {
+            foreach ($frame['args'] ?? [] as $arg) {
+                $this->assertFalse(is_array($arg) && in_array($field, $arg, true), 'the plain field names in '.($frame['function'] ?? '?'));
+            }
         }
     }
 

@@ -37,6 +37,8 @@ class VaultSettings extends Base
         'vault_agent_cap_max' => 60,            // the hard maximum of an agent's reads per hour
         'vault_audit_retention_days' => 365,
         'vault_trusted_proxy_cidrs' => '',
+        'vault_server_rate_max' => 60,          // the most Server reads a grant may allow per hour
+        'vault_server_burst_max' => 10,         // the largest burst a Server grant may allow
     ];
     private const INT_RANGES = [
         'vault_hw_required' => [0, 1],
@@ -44,6 +46,8 @@ class VaultSettings extends Base
         'vault_reveal_limit' => [1, 1000],
         'vault_agent_cap_max' => [1, 10000],
         'vault_audit_retention_days' => [1, 3650],
+        'vault_server_rate_max' => [1, 10000],
+        'vault_server_burst_max' => [1, 1000],
     ];
 
     private Closure $audit;

@@ -35,6 +35,8 @@ class SettingsController extends BaseVaultController
         'vault_agent_cap_max',
         'vault_audit_retention_days',
         'vault_trusted_proxy_cidrs',
+        'vault_server_rate_max',
+        'vault_server_burst_max',
     ];
 
     public function index(): void

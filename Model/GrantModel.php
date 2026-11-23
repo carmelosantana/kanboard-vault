@@ -77,27 +77,106 @@ class GrantModel extends Base
         });
     }
 
+    // Spec amendment, Server grants: the owner (unlocked) shares one entry with Server for the named consumers and
+    // fields. Entry only, read, no expiry; Server must be on (server_off). The grantee -1 row is upserted with the
+    // canonical consumers and fields and the rates clamped to the admin maxima, then the current DEK is sealed to
+    // Server (a queued entry is re-keyed first, as grant() does) and server_grant is recorded, all in one transaction.
+    //
+    // $fields are plain names from the owner. R1: a custom field name is stored (and audited) only as its MAC under the
+    // field-MAC key, which is wiped after use; a name that is neither top-level nor a custom field of this entry is
+    // payload_invalid. A refusal is recorded as server_grant_denied in its own transaction after the rollback.
+    public function grantServer(int $ownerId, int $entryId, array $consumers, #[\SensitiveParameter] array $fields, ?int $ratePerHour, ?int $rateBurst, #[\SensitiveParameter] string $ownerSk): void
+    {
+        try {
+            $consumers = ServerGrant::consumers($consumers);
+            if ($fields === [] || array_filter($fields, 'is_string') !== $fields) {
+                throw new VaultException('payload_invalid');
+            }
+            $custom = array_values(array_diff($fields, ServerGrant::TOP_LEVEL));
+            if ($custom !== []) {
+                $this->warmKeyProvider();
+            }
+            $this->lock()->exclusive(function () use ($ownerId, $entryId, $consumers, $fields, $custom, $ratePerHour, $rateBurst, $ownerSk): void {
+                $db = $this->vdb();
+                if (! ServerPrincipal::of($this->container)->isOn()) {
+                    throw new VaultException('server_off');
+                }
+                $this->requireUnlockedOwner($db, 'entry', $entryId, $ownerId, $ownerSk);
+                $stored = ServerGrant::fields($custom === [] ? $fields : $this->macFields($entryId, $ownerId, $ownerSk, $fields, $custom));
+                $settings = new VaultSettings($this->container, null, $this->clock);
+                $cols = [
+                    'permission' => ObjectStore::READ,
+                    'granted_by' => $ownerId,
+                    'expires_at' => null,
+                    'consumers' => ServerGrant::encodeList($consumers),
+                    'fields' => ServerGrant::encodeList($stored),
+                    'rate_per_hour' => ServerGrant::rate($ratePerHour, ServerGrant::DEFAULT_RATE, (int) $settings->get('vault_server_rate_max')),
+                    'rate_burst' => ServerGrant::rate($rateBurst, ServerGrant::DEFAULT_BURST, (int) $settings->get('vault_server_burst_max')),
+                ];
+                $existing = $db->fetchOne(
+                    "SELECT id FROM vault_grants WHERE subject_type = 'entry' AND subject_id = ? AND grantee_id = ?",
+                    [$entryId, ServerPrincipal::ID]
+                );
+                if ($existing === null) {
+                    $db->insert('vault_grants', ['subject_type' => 'entry', 'subject_id' => $entryId, 'grantee_id' => ServerPrincipal::ID, 'created_at' => $this->now()] + $cols);
+                } else {
+                    $db->execute(
+                        'UPDATE vault_grants SET '.implode(', ', array_map(static fn (string $c): string => $c.' = ?', array_keys($cols))).' WHERE id = ?',
+                        [...array_values($cols), (int) $existing['id']]
+                    );
+                }
+                $this->sealMissing($db, 'entry', $entryId, $ownerId, $ownerSk);
+                AuditModel::of($this->container, $this->clock)->record('server_grant', [
+                    'actor_user_id' => $ownerId, 'object_type' => 'entry', 'object_id' => $entryId,
+                    'consumers' => $cols['consumers'], 'fields' => $cols['fields'],
+                ]);
+            });
+        } catch (VaultException $e) {
+            $this->recordDenied('server_grant_denied', $ownerId, 'entry', $entryId, $e);
+            throw $e;
+        }
+    }
+
     // The sharing dialog's view of one object, for its owner only (not_found otherwise, like every refusal): the direct
     // grants on it, with each grantee's kind, and for a group the number of entries a grant covers (its whole subtree).
-    // Grants inherited from an ancestor group are revoked there, so they are not listed here.
-    /** @return array{grants: list<array{grantee_id:int, kind:string, permission:string, expires_at:?int}>, covered_entries?: int} */
-    public function sharing(int $ownerId, string $type, int $id): array
+    // Grants inherited from an ancestor group are revoked there, so they are not listed here. A Server grant (grantee
+    // -1) lists its consumers, fields and rates instead of an expiry. With the owner's sk, its custom fields read as
+    // the entry's plain names (R1: matched by MACing the entry's own field names); without it, or for a name the entry
+    // no longer has, as the stored MAC.
+    /** @return array{grants: list<array<string,mixed>>, covered_entries?: int} */
+    public function sharing(int $ownerId, string $type, int $id, #[\SensitiveParameter] ?string $ownerSk = null): array
     {
         self::checkType($type);
-        return $this->lock()->shared(function () use ($ownerId, $type, $id): array {
+        if ($ownerSk !== null) {
+            $this->warmKeyProvider();
+        }
+        return $this->lock()->shared(function () use ($ownerId, $type, $id, $ownerSk): array {
             $this->requireOwner($type, $id, $ownerId);
             $rows = $this->vdb()->fetchAll(
-                'SELECT g.grantee_id, g.permission, g.expires_at, p.kind FROM vault_grants g
+                'SELECT g.grantee_id, g.permission, g.expires_at, g.consumers, g.fields, g.rate_per_hour, g.rate_burst, p.kind FROM vault_grants g
                  LEFT JOIN vault_principals p ON p.user_id = g.grantee_id
                  WHERE g.subject_type = ? AND g.subject_id = ? ORDER BY g.id',
                 [$type, $id]
             );
-            $out = ['grants' => array_map(static fn (array $r): array => [
-                'grantee_id' => (int) $r['grantee_id'],
-                'kind' => $r['kind'] === 'agent' ? 'agent' : 'human',
-                'permission' => (string) $r['permission'],
-                'expires_at' => $r['expires_at'] === null ? null : (int) $r['expires_at'],
-            ], $rows)];
+            $out = ['grants' => array_map(function (array $r) use ($ownerId, $id, $ownerSk): array {
+                if ((int) $r['grantee_id'] === ServerPrincipal::ID) {
+                    return [
+                        'grantee_id' => ServerPrincipal::ID,
+                        'kind' => 'server',
+                        'permission' => (string) $r['permission'],
+                        'consumers' => ServerGrant::decodeList($r['consumers']),
+                        'fields' => $this->plainFields($id, $ownerId, $ownerSk, ServerGrant::decodeList($r['fields'])),
+                        'rate_per_hour' => (int) $r['rate_per_hour'],
+                        'rate_burst' => (int) $r['rate_burst'],
+                    ];
+                }
+                return [
+                    'grantee_id' => (int) $r['grantee_id'],
+                    'kind' => $r['kind'] === 'agent' ? 'agent' : 'human',
+                    'permission' => (string) $r['permission'],
+                    'expires_at' => $r['expires_at'] === null ? null : (int) $r['expires_at'],
+                ];
+            }, $rows)];
             if ($type === 'group') {
                 $out['covered_entries'] = $this->coveredEntries($id);
             }
@@ -118,9 +197,23 @@ class GrantModel extends Base
     // re-keys the object and every object below it with the owner's DEK: a new DEK, the current payload under
     // key_epoch + 1, sealed to the remaining recipients. All in one transaction. An object the owner somehow
     // can't re-key stays queued, so the write barrier still holds for it.
+    // A refused revoke of the Server grant is recorded as server_revoke_denied in its own transaction after the
+    // rollback.
     public function revoke(int $ownerId, string $type, int $id, int $granteeId, #[\SensitiveParameter] string $ownerSk): void
     {
         self::checkType($type);
+        try {
+            $this->revokeLocked($ownerId, $type, $id, $granteeId, $ownerSk);
+        } catch (VaultException $e) {
+            if ($granteeId === ServerPrincipal::ID) {
+                $this->recordDenied('server_revoke_denied', $ownerId, $type, $id, $e);
+            }
+            throw $e;
+        }
+    }
+
+    private function revokeLocked(int $ownerId, string $type, int $id, int $granteeId, #[\SensitiveParameter] string $ownerSk): void
+    {
         $this->lock()->exclusive(function () use ($ownerId, $type, $id, $granteeId, $ownerSk): void {
             $db = $this->vdb();
             $this->requireUnlockedOwner($db, $type, $id, $ownerId, $ownerSk);
@@ -151,7 +244,7 @@ class GrantModel extends Base
     {
         $this->lock()->exclusive(function () use ($grantId, $actorId): void {
             $db = $this->vdb();
-            $grant = $db->fetchOne('SELECT id, subject_type, subject_id, grantee_id FROM vault_grants WHERE id = ?', [$grantId]);
+            $grant = $db->fetchOne('SELECT id, subject_type, subject_id, grantee_id, consumers, fields FROM vault_grants WHERE id = ?', [$grantId]);
             if ($grant === null) {
                 return;
             }
@@ -168,6 +261,18 @@ class GrantModel extends Base
                 $this->dropLosers($db, $t, $row, $after, [(int) $grant['grantee_id']]);
             }
             $db->execute('DELETE FROM vault_grants WHERE id = ?', [$grantId]);
+            if ((int) $grant['grantee_id'] === ServerPrincipal::ID) {
+                // Server grants are entry only. The entry's rate buckets go with the grant: srvread:<consumer>:<entry id>.
+                $db->execute('DELETE FROM vault_rate WHERE bucket LIKE ?', ['srvread:%:'.(int) $grant['subject_id']]);
+                AuditModel::of($this->container, $this->clock)->record('server_revoke', [
+                    'actor_user_id' => $actorId,
+                    'object_type' => isset(RecipientResolver::TABLES[$type]) ? $type : null,
+                    'object_id' => isset(RecipientResolver::TABLES[$type]) ? (int) $grant['subject_id'] : null,
+                    'consumers' => $grant['consumers'],
+                    'fields' => $grant['fields'],
+                ]);
+                return;
+            }
             // live_user_id is NULL once the grantee's Kanboard user is deleted (R26), so it is safe for the FK.
             $live = $db->fetchOne('SELECT live_user_id FROM vault_principals WHERE user_id = ?', [(int) $grant['grantee_id']]);
             AuditModel::of($this->container, $this->clock)->record('revoke', [
@@ -312,6 +417,103 @@ class GrantModel extends Base
         if (($p !== null && $p['kind'] === 'agent') || AgentRoster::of($this->container)->isAgent($granteeId)) {
             throw new VaultException('agent_read_only');
         }
+    }
+
+    // R1: the stored form of $fields, with each custom name (all of them in $custom) replaced by its MAC. Each custom
+    // name must be a custom field of the entry (payload_invalid otherwise); the field-MAC key is wiped after use.
+    /** @return list<string> */
+    private function macFields(int $entryId, int $ownerId, #[\SensitiveParameter] string $ownerSk, #[\SensitiveParameter] array $fields, #[\SensitiveParameter] array $custom): array
+    {
+        $names = array_column($this->entryFields($entryId, $ownerId, $ownerSk), 'name');
+        if (array_diff($custom, $names) !== []) {
+            throw new VaultException('payload_invalid');
+        }
+        $key = $this->fieldMacKey();
+        try {
+            return array_map(static fn (string $f): string => ServerGrant::macField($key, $f), $fields);
+        } finally {
+            sodium_memzero($key);
+        }
+    }
+
+    // The sharing view's names for a Server grant's stored fields: each MAC that matches one of the entry's custom
+    // field names reads as that name. Without the owner's sk, or when there is no MAC to match, the stored form.
+    /** @param list<string> $stored @return list<string> */
+    private function plainFields(int $entryId, int $ownerId, #[\SensitiveParameter] ?string $ownerSk, array $stored): array
+    {
+        if ($ownerSk === null || array_diff($stored, ServerGrant::TOP_LEVEL) === []) {
+            return $stored;
+        }
+        $byMac = [];
+        $entryFields = $this->entryFields($entryId, $ownerId, $ownerSk);
+        try {
+            $key = $this->fieldMacKey();
+        } catch (VaultException) {
+            return $stored;
+        }
+        try {
+            foreach ($entryFields as $f) {
+                try {
+                    $byMac[ServerGrant::macField($key, (string) $f['name'])] = (string) $f['name'];
+                } catch (VaultException) {
+                    // A name no grant can hold (too long, a control character): nothing to match.
+                }
+            }
+        } finally {
+            sodium_memzero($key);
+        }
+        return array_map(static fn (string $f): string => $byMac[$f] ?? $f, $stored);
+    }
+
+    /** @return list<array{name:string, value:string, protected:bool}> the entry's custom fields, read as its owner */
+    private function entryFields(int $entryId, int $ownerId, #[\SensitiveParameter] string $ownerSk): array
+    {
+        return (new ObjectStore($this->container, $this->clock))->readEntry($ownerId, $entryId, $ownerSk)['payload']['fields'];
+    }
+
+    // The field-MAC key through the key provider; server_key_unavailable when it can't be opened. The caller wipes it.
+    private function fieldMacKey(): string
+    {
+        try {
+            return $this->keyProvider()->openFieldMacKey();
+        } catch (ServerKeyUnavailable) {
+            throw new VaultException('server_key_unavailable');
+        }
+    }
+
+    // Reads the key file before the vault lock is taken (no file I/O under the global lock). A failure here is left
+    // to the locked step, which reports it in order (server_off first).
+    private function warmKeyProvider(): void
+    {
+        $provider = $this->keyProvider();
+        if ($provider instanceof FileKeyProvider) {
+            try {
+                $provider->warm();
+            } catch (ServerKeyUnavailable) {
+            }
+        }
+    }
+
+    private function keyProvider(): KeyProvider
+    {
+        return isset($this->container['vaultKeyProvider'])
+            ? $this->container['vaultKeyProvider']
+            : new FileKeyProvider($this->container, isset($this->container['vaultServerKeyFile']) ? $this->container['vaultServerKeyFile'] : new ServerKeyFile(ServerKeyFile::configuredPath()));
+    }
+
+    // A refused Server grant or revoke, recorded in its own transaction once the refused one has rolled back. Only a
+    // reason the audit allows is recorded; any other failure (integrity_error) propagates unrecorded.
+    private function recordDenied(string $action, int $actorId, string $type, int $id, VaultException $e): void
+    {
+        if (! in_array($e->errorCode(), AuditModel::REASONS, true)) {
+            return;
+        }
+        $this->lock()->exclusive(fn () => AuditModel::of($this->container, $this->clock)->record($action, [
+            'actor_user_id' => $actorId > 0 ? $actorId : null,
+            'object_type' => $type,
+            'object_id' => $id > 0 ? $id : null,
+            'reason' => $e->errorCode(),
+        ]));
     }
 
     private function coveredEntries(int $groupId): int

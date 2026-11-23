@@ -65,6 +65,16 @@ final class ServerGrant
         return 'c:'.self::base32(sodium_crypto_generichash($name, $key, 16));
     }
 
+    // A grant's stored rate: the requested value (or the default) clamped to the admin maximum. A requested value
+    // below 1 is payload_invalid.
+    public static function rate(?int $requested, int $default, int $max): int
+    {
+        if ($requested !== null && $requested < 1) {
+            throw new VaultException('payload_invalid');
+        }
+        return min($requested ?? $default, $max);
+    }
+
     public static function encodeList(array $list): string
     {
         return json_encode(array_values($list), self::JSON_FLAGS);

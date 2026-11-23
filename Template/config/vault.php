@@ -60,6 +60,10 @@ $expiries = [3600 => t('1 hour'), 86400 => t('1 day'), 604800 => t('7 days')];
         <input type="number" id="vault-s-reveal" name="vault_reveal_limit" min="1" max="1000" required value="<?= (int) $vault['vault_reveal_limit'] ?>">
         <label for="vault-s-agent"><?= t('Most secret reads an agent may make per hour') ?></label>
         <input type="number" id="vault-s-agent" name="vault_agent_cap_max" min="1" max="10000" required value="<?= (int) $vault['vault_agent_cap_max'] ?>">
+        <label for="vault-s-server-rate"><?= t('Most secret reads a Server grant may allow per hour') ?></label>
+        <input type="number" id="vault-s-server-rate" name="vault_server_rate_max" min="1" max="10000" required value="<?= (int) $vault['vault_server_rate_max'] ?>">
+        <label for="vault-s-server-burst"><?= t('Largest burst a Server grant may allow') ?></label>
+        <input type="number" id="vault-s-server-burst" name="vault_server_burst_max" min="1" max="1000" required value="<?= (int) $vault['vault_server_burst_max'] ?>">
     </fieldset>
 
     <fieldset>

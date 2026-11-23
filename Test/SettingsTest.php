@@ -366,4 +366,27 @@ class SettingsTest extends Base
         $this->assertSame(['password', 'off'], [$in?->getAttribute('type'), $in?->getAttribute('autocomplete')]);
         $this->assertTrue($this->container['token']->validateReusableCSRFToken($x->query('.//input[@name="csrf_token"]/@value', $form)->item(0)?->nodeValue));
     }
+
+    // Task 7: the admin maximum of a Server grant's rate and burst. Each validates its range, saves from the form
+    // (one policy_change per change) and the page shows it with its bounds. Kills: a missing FIELDS entry; a wrong
+    // range; no input on the page.
+    public function testServerRateMaximums(): void
+    {
+        $this->assertSame([60, 10], [$this->settings()->get('vault_server_rate_max'), $this->settings()->get('vault_server_burst_max')]);
+        foreach (['vault_server_rate_max' => [1, 10000], 'vault_server_burst_max' => [1, 1000]] as $key => [$min, $max]) {
+            foreach ([$min - 1, $max + 1, 'x', '1.5'] as $bad) {
+                $r = $this->save([$key => (string) $bad]);
+                $this->assertSame([400, ['ok' => false, 'reason' => 'payload_invalid']], [$r->status, $r->json_()], "$key = $bad");
+            }
+            $x = $this->dom($this->call('index')->body);
+            $this->assertSame([(string) $min, (string) $max], [$x->query('//input[@name="'.$key.'"]/@min')->item(0)?->nodeValue, $x->query('//input[@name="'.$key.'"]/@max')->item(0)?->nodeValue], $key);
+        }
+        $this->assertSame([], $this->auditRows('policy_change'));
+        $this->assertSame(['ok' => true], $this->save(['vault_server_rate_max' => '10000', 'vault_server_burst_max' => '1'])->json_());
+        $this->assertSame([10000, 1], [$this->settings()->get('vault_server_rate_max'), $this->settings()->get('vault_server_burst_max')]);
+        $this->assertCount(2, $this->auditRows('policy_change'));
+        $x = $this->dom($this->call('index')->body);
+        $this->assertSame('10000', $x->query('//input[@name="vault_server_rate_max"]/@value')->item(0)?->nodeValue);
+        $this->assertSame('1', $x->query('//input[@name="vault_server_burst_max"]/@value')->item(0)?->nodeValue);
+    }
 }
