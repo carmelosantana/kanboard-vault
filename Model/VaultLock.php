@@ -13,12 +13,13 @@ use WeakMap;
 // MySQL/Postgres: a transaction that row-locks the vault_meta singleton FOR UPDATE, or for sharing
 // (FOR SHARE on Postgres, LOCK IN SHARE MODE on MySQL/MariaDB).
 // Nesting is tracked per PDO connection, so separate VaultLock instances on one connection share it.
+// afterCommit queues work (events, notices) for after the outermost COMMIT; a rollback drops it.
 class VaultLock extends Base
 {
     public const EXCLUSIVE = 'exclusive';
     public const SHARED = 'shared';
 
-    /** @var WeakMap<PDO, array{mode: string, depth: int, rollbackOnly: bool}>|null */
+    /** @var WeakMap<PDO, array{mode: string, depth: int, rollbackOnly: bool, after: list<callable>}>|null */
     private static ?WeakMap $held = null;
 
     public function exclusive(callable $fn): mixed
@@ -29,6 +30,21 @@ class VaultLock extends Base
     public function shared(callable $fn): mixed
     {
         return $this->run(self::SHARED, $fn);
+    }
+
+    // Inside a lock: $fn runs once after the outermost COMMIT, in the order queued, and never on a rollback. With no
+    // lock held it runs at once. A callback's exception is caught and logged by class only (its message could carry
+    // data); the change is already committed and the next callback still runs.
+    public function afterCommit(callable $fn): void
+    {
+        $pdo = $this->db->getConnection();
+        if (self::$held !== null && isset(self::$held[$pdo])) {
+            $state = self::$held[$pdo];
+            $state['after'][] = $fn;
+            self::$held[$pdo] = $state;
+            return;
+        }
+        $this->runAfter([$fn]);
     }
 
     private function run(string $mode, callable $fn): mixed
@@ -52,13 +68,13 @@ class VaultLock extends Base
                 throw $e;
             } finally {
                 $now = self::$held[$pdo];
-                self::$held[$pdo] = ['depth' => $state['depth'], 'rollbackOnly' => $now['rollbackOnly']] + $state;
+                self::$held[$pdo] = ['depth' => $state['depth'], 'rollbackOnly' => $now['rollbackOnly'], 'after' => $now['after']] + $state;
             }
         }
 
         $driver = $pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
         $this->begin($pdo, $driver, $mode);
-        self::$held[$pdo] = ['mode' => $mode, 'depth' => 1, 'rollbackOnly' => false];
+        self::$held[$pdo] = ['mode' => $mode, 'depth' => 1, 'rollbackOnly' => false, 'after' => []];
         try {
             $this->lockMetaRow($pdo, $driver, $mode);
             $result = $fn();
@@ -67,7 +83,7 @@ class VaultLock extends Base
             $this->rollback($pdo, $driver);
             throw $e;
         }
-        $rollbackOnly = self::$held[$pdo]['rollbackOnly'];
+        ['rollbackOnly' => $rollbackOnly, 'after' => $after] = self::$held[$pdo];
         unset(self::$held[$pdo]);
         if ($rollbackOnly) {
             // A nested operation failed and its exception was swallowed; its partial writes must not commit.
@@ -85,7 +101,20 @@ class VaultLock extends Base
             $this->rollback($pdo, $driver);
             throw $e;
         }
+        $this->runAfter($after);
         return $result;
+    }
+
+    /** @param list<callable> $callbacks */
+    private function runAfter(array $callbacks): void
+    {
+        foreach ($callbacks as $fn) {
+            try {
+                $fn();
+            } catch (Throwable $e) {
+                $this->logger->warning('Vault: an after-commit callback failed ('.get_class($e).')');
+            }
+        }
     }
 
     private function begin(PDO $pdo, string $driver, string $mode): void

@@ -144,8 +144,26 @@ class ServerSecrets extends Base implements ServiceSecrets
         if ($value === null) {
             return $this->refuse($cols, 'not_found');
         }
+        $this->noticeFirstRead($db, $consumer, $entry);
         AuditModel::of($this->container, $this->clock)->record('server_read', ['actor_kind' => 'server'] + $cols);
         return [$value, null];
+    }
+
+    // Inside the lock, before this read's audit row: with no earlier server_read of the entry by the consumer
+    // (vault_audit_object_idx), the owner is emailed after the commit. Best effort: an owner with no live Kanboard user
+    // gets nothing, and a failed notice never fails the read.
+    private function noticeFirstRead(VaultDb $db, string $consumer, array $entry): void
+    {
+        $entryId = (int) $entry['id'];
+        if ($db->fetchOne("SELECT 1 AS seen FROM vault_audit WHERE action = 'server_read' AND object_id = ? AND consumer = ? LIMIT 1", [$entryId, $consumer]) !== null) {
+            return;
+        }
+        $owner = $db->fetchOne('SELECT live_user_id FROM vault_principals WHERE user_id = ?', [(int) $entry['owner_id']]);
+        if ($owner === null || $owner['live_user_id'] === null) {
+            return;
+        }
+        $userId = (int) $owner['live_user_id'];
+        (new VaultLock($this->container))->afterCommit(fn () => Notifier::of($this->container)->serverFirstRead($userId, $consumer, $entryId));
     }
 
     // Steps 3–7 (step 5 only with a consumer). 'field' is the ref's field in its stored form once step 6 has it.

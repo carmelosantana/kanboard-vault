@@ -94,7 +94,7 @@ class LogHygieneTest extends Base
 
         $audit = json_encode($this->auditRows(), JSON_THROW_ON_ERROR);
         $this->assertGreaterThan(20, count($this->auditRows()), 'the run audited its actions');
-        $this->assertCount(3, $this->mails, 'the failure notice, the share-reveal notice and the org recovery notice');
+        $this->assertCount(4, $this->mails, 'the failure notice, the share-reveal notice, the org recovery notice and the Server first-read notice');
         $haystacks = ['Kanboard log' => $kb, 'PHP error log' => $php, 'vault_audit' => $audit, 'emails' => implode("\n", $this->mails)];
         $needles = array_merge(Fixtures::SECRETS, $this->generated);
         $this->assertGreaterThan(count(Fixtures::SECRETS), count($needles));

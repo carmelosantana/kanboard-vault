@@ -202,6 +202,7 @@ class ObjectStore extends Base
                         throw new VaultException('conflict');
                     }
                     $this->audit('update', $actorId, 'entry', $entryId);
+                    ServerEvents::changed($this->container, $entryId, $expectedVersion + 1);
                     return $expectedVersion + 1;
                 } finally {
                     sodium_memzero($dek);
@@ -493,6 +494,7 @@ class ObjectStore extends Base
             $this->requireCurrentKey($db, $actorId, $sk);
             $this->audit('delete', $actorId, $type, $id);
             if ($type === 'entry') {
+                $this->revokeServerShares($db, [$id]);
                 $this->purgeRefs($db, 'entry', [$id]);
                 $db->execute('DELETE FROM vault_entries WHERE id = ?', [$id]);
                 return;
@@ -500,6 +502,7 @@ class ObjectStore extends Base
             $levels = $this->resolver()->subtreeLevels($id);
             $groupIds = array_merge(...$levels);
             $entryIds = $this->resolver()->entriesIn($groupIds);
+            $this->revokeServerShares($db, $entryIds);
             $this->purgeRefs($db, 'entry', $entryIds);
             $this->purgeRefs($db, 'group', $groupIds);
             foreach (array_chunk($entryIds, self::CHUNK) as $chunk) {
@@ -544,6 +547,7 @@ class ObjectStore extends Base
             $entryIds[] = (int) $e['id'];
         }
         $entryIds = array_values(array_unique($entryIds));
+        $this->revokeServerShares($db, $entryIds);
         $this->purgeRefs($db, 'entry', $entryIds);
         $this->purgeRefs($db, 'group', $groupIds);
         foreach (array_chunk($entryIds, self::CHUNK) as $chunk) {
@@ -699,6 +703,22 @@ class ObjectStore extends Base
             'created_at' => (int) ($row['created_at'] ?? 0),
             'updated_at' => (int) ($row['updated_at'] ?? 0),
         ];
+    }
+
+    // vault.secret.revoked, after the commit, for each of these entries that has a Server grant (its grant is about to
+    // go with purgeRefs, which doesn't pass through removeSource, so this is the only dispatch).
+    /** @param list<int> $entryIds */
+    private function revokeServerShares(VaultDb $db, array $entryIds): void
+    {
+        foreach (array_chunk($entryIds, self::CHUNK) as $chunk) {
+            $rows = $db->fetchAll(
+                "SELECT subject_id FROM vault_grants WHERE subject_type = 'entry' AND grantee_id = ? AND subject_id IN (".RecipientResolver::marks($chunk).') ORDER BY subject_id',
+                array_merge([ServerPrincipal::ID], $chunk)
+            );
+            foreach ($rows as $r) {
+                ServerEvents::revoked($this->container, (int) $r['subject_id']);
+            }
+        }
     }
 
     /** @param list<int> $ids */

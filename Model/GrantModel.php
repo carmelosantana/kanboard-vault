@@ -271,6 +271,9 @@ class GrantModel extends Base
                     'consumers' => $grant['consumers'],
                     'fields' => $grant['fields'],
                 ]);
+                if ($type === 'entry') {
+                    ServerEvents::revoked($this->container, (int) $grant['subject_id']);
+                }
                 return;
             }
             // live_user_id is NULL once the grantee's Kanboard user is deleted (R26), so it is safe for the FK.

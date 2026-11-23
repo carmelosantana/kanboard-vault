@@ -276,4 +276,97 @@ class VaultLockTest extends Base
         $this->expectException(\RuntimeException::class);
         $lock->exclusive(fn () => null);
     }
+
+    // Task 10: afterCommit inside nested locks runs once, in order, only after the outermost COMMIT, and sees the
+    // committed row with no transaction open. Kills: running at the inner level, before the commit, or twice.
+    public function testAfterCommitRunsOnceAfterTheOuterCommit(): void
+    {
+        $this->migrate();
+        $pdo = $this->container['db']->getConnection();
+        $lock = new VaultLock($this->container);
+        $seen = [];
+        $lock->exclusive(function () use ($pdo, $lock, &$seen) {
+            $lock->exclusive(function () use ($pdo, $lock, &$seen) {
+                $pdo->exec("INSERT INTO vault_rate (bucket, tokens, updated_at) VALUES ('ac', 1, 1)");
+                $lock->afterCommit(function () use ($pdo, &$seen) {
+                    $seen[] = ['first', $pdo->inTransaction(), $this->rateRows($pdo)];
+                });
+            });
+            $lock->afterCommit(function () use (&$seen) { $seen[] = ['second']; });
+            $this->assertSame([], $seen, 'nothing runs before the outer commit');
+        });
+        $this->assertSame([['first', false, 1], ['second']], $seen);
+        // The queue is gone with the transaction: a later lock runs nothing again.
+        $lock->exclusive(fn () => null);
+        $this->assertCount(2, $seen);
+    }
+
+    // Kills: running the queue on rollback, or keeping it for the next transaction.
+    public function testAfterCommitIsDroppedOnRollback(): void
+    {
+        $this->migrate();
+        $lock = new VaultLock($this->container);
+        $ran = 0;
+        try {
+            $lock->exclusive(function () use ($lock, &$ran) {
+                $lock->exclusive(function () use ($lock, &$ran) {
+                    $lock->afterCommit(function () use (&$ran) { $ran++; });
+                });
+                throw new \RuntimeException('boom');
+            });
+        } catch (\RuntimeException $e) {
+        }
+        $this->assertSame(0, $ran);
+        // A swallowed nested failure makes the transaction rollback-only: its queue goes with it.
+        try {
+            $lock->exclusive(function () use ($lock, &$ran) {
+                $lock->afterCommit(function () use (&$ran) { $ran++; });
+                try {
+                    $lock->exclusive(function () { throw new \LogicException('inner'); });
+                } catch (\LogicException $e) {
+                }
+            });
+            $this->fail('the rollback-only transaction must throw');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString('rollback-only', $e->getMessage());
+        }
+        $this->assertSame(0, $ran);
+        $lock->exclusive(fn () => null);
+        $this->assertSame(0, $ran, 'a dropped callback never runs later');
+    }
+
+    public function testAfterCommitWithNoLockRunsAtOnce(): void
+    {
+        $ran = 0;
+        (new VaultLock($this->container))->afterCommit(function () use (&$ran) { $ran++; });
+        $this->assertSame(1, $ran);
+    }
+
+    // A failing callback can't undo or fail the committed change, the next callback still runs, and the log names the
+    // exception class only. Kills: the exception escaping; the message logged.
+    public function testThrowingCallbackLeavesTheChangeCommittedAndLogsTheClassOnly(): void
+    {
+        $this->migrate();
+        $logged = [];
+        $logger = $this->createMock(\Psr\Log\LoggerInterface::class);
+        foreach (['warning', 'error', 'info', 'notice', 'debug', 'critical'] as $level) {
+            $logger->method($level)->willReturnCallback(function ($msg) use (&$logged) { $logged[] = (string) $msg; });
+        }
+        $this->container['logger'] = $logger;
+        $pdo = $this->container['db']->getConnection();
+        $lock = new VaultLock($this->container);
+        $after = 0;
+        $result = $lock->exclusive(function () use ($pdo, $lock, &$after) {
+            $pdo->exec("INSERT INTO vault_rate (bucket, tokens, updated_at) VALUES ('t', 1, 1)");
+            $lock->afterCommit(function () { throw new \DomainException('secret-canary'); });
+            $lock->afterCommit(function () use (&$after) { $after++; });
+            return 'done';
+        });
+        $this->assertSame('done', $result);
+        $this->assertSame(1, $this->rateRows($pdo));
+        $this->assertSame(1, $after);
+        $this->assertCount(1, $logged);
+        $this->assertStringContainsString('DomainException', $logged[0]);
+        $this->assertStringNotContainsString('secret-canary', $logged[0]);
+    }
 }
