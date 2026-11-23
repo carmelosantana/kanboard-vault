@@ -295,6 +295,53 @@ class OrphanTest extends Base
         $this->assertSame([], $this->auditRows('orphan_claim'));
     }
 
+    // Important 1: claim and destroy act on quarantined orphans only. Before the purge has run, a deleted owner's
+    // private entry (no Server grant) is refused as not_found, and the sweep inside the claim's or destroy's lock deletes
+    // it, as the purge would have. Kills: eligibility by ownerGone alone (the admin keeps a private entry for good); no
+    // sweep in the lock (the entry outlives the refusal); the sweep rolled back with the refusal.
+    /** @return array<string, array{0:string}> */
+    public static function orphanActions(): array
+    {
+        return ['claim' => ['claim'], 'destroy' => ['destroy']];
+    }
+
+    /** @dataProvider orphanActions */
+    public function testAPrivateEntryOfADeletedOwnerIsNeverAnOrphan(string $action): void
+    {
+        [$g1, $e1, $e2] = $this->aliceTree();
+        $this->grants()->grant($this->alice, 'entry', $e2, self::ADMIN, 'read', null, $this->aliceSk());
+        $adminGroup = $this->adminGroup();
+        $this->deleteAlice();
+        $this->assertTrue($this->exists('vault_entries', $e2), 'no purge yet');
+
+        $this->assertVaultError('not_found', fn () => $action === 'claim'
+            ? $this->orphans()->claim(self::ADMIN, $e2, $adminGroup, $this->adminSk())
+            : $this->orphans()->destroy(self::ADMIN, $e2));
+
+        $this->assertFalse($this->exists('vault_entries', $e2), 'the in-lock sweep deleted it');
+        $this->assertSame('orphaned', $this->principalRow($this->alice)['state'], 'and quarantined e1');
+        $this->assertTrue($this->exists('vault_entries', $e1));
+        $this->assertSame(['not_found'], array_column($this->auditRows('orphan_'.$action.'_denied'), 'reason'));
+        $this->assertSame([], $this->auditRows('orphan_'.$action));
+    }
+
+    // Before the purge, a Server-shared entry of a deleted owner is quarantined by the in-lock sweep, then claimed.
+    // Kills: requiring state 'orphaned' without sweeping first (refused until the next purge).
+    public function testAServerSharedEntryIsClaimableBeforeThePurge(): void
+    {
+        [$g1, $e1] = $this->aliceTree();
+        $this->grants()->grant($this->alice, 'entry', $e1, self::ADMIN, 'read', null, $this->aliceSk());
+        $epoch = (int) $this->row('SELECT key_epoch FROM vault_entries WHERE id = ?', [$e1])['key_epoch'];
+        $adminGroup = $this->adminGroup();
+        $this->deleteAlice();
+        $this->assertNotSame('orphaned', $this->principalRow($this->alice)['state'], 'not quarantined yet');
+
+        $this->assertSame($epoch + 1, $this->orphans()->claim(self::ADMIN, $e1, $adminGroup, $this->adminSk()));
+        $this->assertSame(self::ADMIN, (int) $this->row('SELECT owner_id FROM vault_entries WHERE id = ?', [$e1])['owner_id']);
+        $this->assertCount(1, $this->auditRows('orphan_quarantine'));
+        $this->assertSame(Fixtures::ENTRY_PASSWORD, $this->serverRead($e1));
+    }
+
     public function testDestroyRemovesTheOrphan(): void
     {
         $revoked = [];

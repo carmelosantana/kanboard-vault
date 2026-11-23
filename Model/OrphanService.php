@@ -19,7 +19,10 @@ use Kanboard\Core\Security\Role;
 //
 // A refused claim or destroy is audited (orphan_claim_denied / orphan_destroy_denied, reason the code) in its own
 // transaction after the rollback, then thrown as a VaultException with the same code: not_found for a live or
-// missing entry, a bad group or a locked admin; not_allowed for a non-admin or an admin without a grant.
+// missing entry, an entry that isn't quarantined, a bad group or a locked admin; not_allowed for a non-admin or an
+// admin without a grant. Both run the purge's orphan sweep first, inside their lock, and act only on a quarantined
+// entry (its owner a tombstone), so a deleted owner's private entry can't be claimed in the minute before the purge:
+// the sweep deletes it, and that sweep is committed even when the action is then refused.
 //
 // Accepted P1 limitation: an admin who rotates their own key loses their key row on a quarantined orphan and can no
 // longer claim it; another grant-holding admin can, or it can be destroyed.
@@ -70,28 +73,26 @@ final class OrphanService extends Base
     public function claim(int $adminId, int $entryId, int $groupId, #[\SensitiveParameter] string $adminSk): int
     {
         try {
-            return $this->lock()->exclusive(function () use ($adminId, $entryId, $groupId, $adminSk): int {
+            $result = $this->lock()->exclusive(function () use ($adminId, $entryId, $groupId, $adminSk): int|VaultException {
                 $db = $this->vdb();
                 $now = $this->now();
                 $rekeyer = new Rekeyer($this->container, $this->clock);
                 $resolver = $this->resolver();
-                if (! $this->isAdmin($db, $adminId)) {
-                    throw new VaultException('not_allowed');
-                }
-                $admin = $rekeyer->currentPrincipal($db, $adminId, $adminSk);
-                if ($admin === null || $admin['kind'] !== 'human') {
-                    throw new VaultException('not_found');
-                }
-                $row = $resolver->object('entry', $entryId);
-                if ($row === null || ! $resolver->ownerGone($db, $row)) {
-                    throw new VaultException('not_found');
-                }
-                if (! isset($resolver->grantees('entry', $entryId, $now, $row)[$adminId])) {
-                    throw new VaultException('not_allowed');
-                }
-                $group = $resolver->object('group', $groupId);
-                if ($group === null || (int) $group['owner_id'] !== $adminId || $resolver->chainGone($db, 'group', $group)) {
-                    throw new VaultException('not_found');
+                try {
+                    $row = $this->eligible($db, $adminId, $entryId);
+                    $admin = $rekeyer->currentPrincipal($db, $adminId, $adminSk);
+                    if ($admin === null || $admin['kind'] !== 'human') {
+                        throw new VaultException('not_found');
+                    }
+                    if (! isset($resolver->grantees('entry', $entryId, $now, $row)[$adminId])) {
+                        throw new VaultException('not_allowed');
+                    }
+                    $group = $resolver->object('group', $groupId);
+                    if ($group === null || (int) $group['owner_id'] !== $adminId || $resolver->chainGone($db, 'group', $group)) {
+                        throw new VaultException('not_found');
+                    }
+                } catch (VaultException $e) {
+                    return $e; // nothing written but the sweep: commit it, then refuse
                 }
                 // Ownership replaces the admin's own grant. A plain delete, not removeSource: the admin's key row must
                 // stay to open the DEK, and transferRow replaces every key row anyway.
@@ -110,6 +111,10 @@ final class OrphanService extends Base
                 ]);
                 return $epoch;
             });
+            if ($result instanceof VaultException) {
+                throw $result;
+            }
+            return $result;
         } catch (VaultException $e) {
             $this->recordDenied('orphan_claim_denied', $adminId, $entryId, $e);
             throw $e;
@@ -120,14 +125,12 @@ final class OrphanService extends Base
     public function destroy(int $adminId, int $entryId): void
     {
         try {
-            $this->lock()->exclusive(function () use ($adminId, $entryId): void {
+            $refused = $this->lock()->exclusive(function () use ($adminId, $entryId): ?VaultException {
                 $db = $this->vdb();
-                if (! $this->isAdmin($db, $adminId)) {
-                    throw new VaultException('not_allowed');
-                }
-                $row = $this->resolver()->object('entry', $entryId);
-                if ($row === null || ! $this->resolver()->ownerGone($db, $row)) {
-                    throw new VaultException('not_found');
+                try {
+                    $row = $this->eligible($db, $adminId, $entryId);
+                } catch (VaultException $e) {
+                    return $e; // nothing written but the sweep: commit it, then refuse
                 }
                 (new ObjectStore($this->container, $this->clock))->purgeEntry($db, $entryId);
                 AuditModel::of($this->container, $this->clock)->record('orphan_destroy', [
@@ -136,11 +139,34 @@ final class OrphanService extends Base
                     'object_id' => $entryId,
                     'old_owner_id' => (int) $row['owner_id'],
                 ]);
+                return null;
             });
+            if ($refused !== null) {
+                throw $refused;
+            }
         } catch (VaultException $e) {
             $this->recordDenied('orphan_destroy_denied', $adminId, $entryId, $e);
             throw $e;
         }
+    }
+
+    // Inside the claim's or destroy's exclusive lock: an active app admin (not_allowed), then the purge's orphan sweep
+    // (Purger::sweepOrphans, as ObjectStore::beforeWrite runs it), so a deleted owner's entries are quarantined or
+    // deleted first; then the entry must be quarantined, its owner a tombstone (state 'orphaned'), else not_found. A
+    // deleted owner's private entry is never an orphan: the sweep has deleted it.
+    /** @return array<string,mixed> the entry row */
+    private function eligible(VaultDb $db, int $adminId, int $entryId): array
+    {
+        if (! $this->isAdmin($db, $adminId)) {
+            throw new VaultException('not_allowed');
+        }
+        (new Purger($this->container, fn (string $action, array $cols) => AuditModel::of($this->container, $this->clock)->record($action, $cols)))->sweepOrphans($this->now());
+        $row = $this->resolver()->object('entry', $entryId);
+        if ($row === null || ! $this->resolver()->ownerGone($db, $row)
+            || $db->fetchOne("SELECT user_id FROM vault_principals WHERE user_id = ? AND state = 'orphaned'", [(int) $row['owner_id']]) === null) {
+            throw new VaultException('not_found');
+        }
+        return $row;
     }
 
     // Live entries with a live Server grant (of $ownerId's only, when given): owner_disabled when the owner's Kanboard
