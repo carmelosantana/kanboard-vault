@@ -8,7 +8,7 @@ namespace Kanboard\Plugin\Vault\Model;
  * reads by path; dropping its chmod repair is a follow-up in Matinee. Here every deviation fails closed with
  * ServerKeyUnavailable, whose message is always `server_key_unavailable`:
  *
- * - The path must be absolute. It is normalised lexically once (so `..` never reaches the OS) and every component
+ * - The path must be absolute with no `.` or `..` component (refused, not normalised), and every component
  *   from `/` down to the file's directory is lstat'ed: a symlink anywhere, or a component that isn't a directory,
  *   fails. The directory must be owned by the expected uid with no group or other write bit (`mode & 0022 === 0`).
  * - read() never creates and never chmods. It lstats the file (a regular file, so a planted FIFO or device is never
@@ -44,13 +44,13 @@ final class ServerKeyFile
     private const S_IFDIR = 0040000;
     private const S_IFREG = 0100000;
 
-    /** The lexically normalised absolute path, or null when the configured path isn't absolute. */
+    /** The configured path with repeated slashes dropped, or null when it isn't absolute or has `.` or `..`. */
     private ?string $file;
     private ?int $uid;
 
     public function __construct(private string $path, ?int $expectedUid = null)
     {
-        $this->file = self::normalize($path);
+        $this->file = self::strict($path);
         $this->uid = $expectedUid ?? (function_exists('posix_geteuid') ? posix_geteuid() : null);
     }
 
@@ -75,6 +75,10 @@ final class ServerKeyFile
     public function read(): string
     {
         return $this->guard(function () {
+            // The walk comes first, as in create(): under an unsafe directory .lock is never opened or locked.
+            if ($this->walk(dirname($this->file)) !== 'ok') {
+                throw new ServerKeyUnavailable();
+            }
             $lock = $this->openLock(false);
             try {
                 return $this->readUnlocked();
@@ -122,10 +126,7 @@ final class ServerKeyFile
     /** Whether the key's resolved directory is $dir or below it (component-wise, so `data2/` isn't under `data`). */
     public function isUnder(string $dir): bool
     {
-        if ($this->file === null) {
-            return false;
-        }
-        $parent = self::resolve(dirname($this->file));
+        $parent = self::resolve(dirname($this->path));
         $root = self::resolve($dir);
         if ($parent === null || $root === null) {
             return false;
@@ -309,7 +310,7 @@ final class ServerKeyFile
      * lstat every component from `/` down to $dir: 'missing' at the first absent one, 'unsafe' at a symlink or
      * a non-directory. With $ownerRules, $dir itself must be owned by the uid with `mode & 0022 === 0`.
      */
-    private function walk(#[\SensitiveParameter] string $dir, bool $ownerRules = true): string
+    private function walk(string $dir, bool $ownerRules = true): string
     {
         $st = self::lst('/');
         if ($st === false || !self::isType($st, self::S_IFDIR)) {
@@ -333,7 +334,7 @@ final class ServerKeyFile
     }
 
     /** fsync a directory so a new entry in it survives a crash. Best effort: PHP may not open a directory. */
-    private static function fsyncDir(#[\SensitiveParameter] string $dir): void
+    private static function fsyncDir(string $dir): void
     {
         $fh = @fopen($dir, 'r');
         if ($fh !== false) {
@@ -343,7 +344,7 @@ final class ServerKeyFile
     }
 
     /** An uncached lstat (PHP caches the last lstat, and a re-check must see the disk). */
-    private static function lst(#[\SensitiveParameter] string $path): array|false
+    private static function lst(string $path): array|false
     {
         clearstatcache(true);
         return @lstat($path);
@@ -354,8 +355,24 @@ final class ServerKeyFile
         return ($st['mode'] & self::S_IFMT) === $type;
     }
 
-    /** Absolute path with `.`, `..` and repeated slashes resolved lexically; null when relative or not a file path. */
-    private static function normalize(#[\SensitiveParameter] string $path): ?string
+    /**
+     * The path the key file uses: absolute, with no `.` or `..` component (refused, not normalised: `link/..` names
+     * a different directory to the OS than to a lexical resolver). Repeated and trailing slashes are dropped.
+     */
+    private static function strict(string $path): ?string
+    {
+        if ($path === '' || $path[0] !== '/' || str_contains($path, "\0")) {
+            return null;
+        }
+        $parts = array_values(array_filter(explode('/', $path), fn (string $part) => $part !== ''));
+        if ($parts === [] || array_intersect($parts, ['.', '..']) !== []) {
+            return null;
+        }
+        return '/'.implode('/', $parts);
+    }
+
+    /** For isUnder() only: absolute path with `.`, `..` and repeated slashes resolved lexically; null when relative or not a file path. */
+    private static function normalize(string $path): ?string
     {
         if ($path === '' || $path[0] !== '/' || str_contains($path, "\0")) {
             return null;
@@ -375,7 +392,7 @@ final class ServerKeyFile
     }
 
     /** realpath of the deepest existing ancestor, plus the lexically normalised rest. */
-    private static function resolve(#[\SensitiveParameter] string $path): ?string
+    private static function resolve(string $path): ?string
     {
         if ($path === '/') {
             return '/';

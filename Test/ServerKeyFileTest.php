@@ -371,6 +371,69 @@ class ServerKeyFileTest extends TestCase
         $this->assertTrue((new ServerKeyFile($this->base.'/data/vault-server/server.key'))->isUnder($this->base.'/data-link'));
     }
 
+    // Kills a umask(0077) left in place by create(), on success and on failure.
+    public function testCreateRestoresTheUmask(): void
+    {
+        umask(0022);
+        (new ServerKeyFile($this->path))->create();
+        $this->assertSame(0022, umask());
+
+        umask(0027);
+        chmod($this->dir, 0770);
+        unlink($this->path);
+        $this->assertUnavailable(fn () => (new ServerKeyFile($this->path))->create());
+        $this->assertSame(0027, umask());
+    }
+
+    // `.` and `..` components are refused, not normalised: `link/..` would name a different directory to the OS
+    // (the link's target's parent) than to a lexical resolver.
+    public function testDotComponentsFailClosed(): void
+    {
+        mkdir($this->base.'/a/b', 0700, true);
+        mkdir($this->base.'/a/real', 0700);
+        symlink($this->base.'/a/real', $this->base.'/a/link');
+        $this->writeKey($this->base.'/a/b/server.key', random_bytes(32));
+        foreach (['/a/link/../b/server.key', '/a/./b/server.key', '/a/b/../b/server.key'] as $suffix) {
+            $file = new ServerKeyFile($this->base.$suffix);
+            $this->assertUnavailable(fn () => $file->read());
+            $this->assertUnavailable(fn () => $file->create());
+            $this->assertSame('unsafe', $file->status(), $suffix);
+        }
+        $this->assertFalse(file_exists($this->base.'/a/real/server.key'));
+    }
+
+    // Kills taking the lock before the directory walk: with the directory unsafe, read() must fail without touching
+    // .lock (here held LOCK_EX, so a LOCK_SH would block; a planted FIFO would hang the open the same way).
+    public function testReadWalksBeforeTheLock(): void
+    {
+        (new ServerKeyFile($this->path))->create();
+        chmod($this->dir, 0770);
+        $held = fopen($this->dir.'/.lock', 'r');
+        $this->assertTrue(flock($held, LOCK_EX));
+        try {
+            $pipes = [];
+            $proc = proc_open([PHP_BINARY, __DIR__.'/fixtures/server-key-race.php', $this->path, 'read'],
+                [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+            $deadline = microtime(true) + 10;
+            while (proc_get_status($proc)['running'] && microtime(true) < $deadline) {
+                usleep(20000);
+            }
+            $running = proc_get_status($proc)['running'];
+            if ($running) {
+                proc_terminate($proc, 9);
+            }
+            $out = stream_get_contents($pipes[1]);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            proc_close($proc);
+            $this->assertFalse($running, 'read() blocked on the lock');
+            $this->assertSame('server_key_unavailable', trim($out));
+        } finally {
+            flock($held, LOCK_UN);
+            fclose($held);
+        }
+    }
+
     public function testConfiguredPathDefaultsUnderDataDir(): void
     {
         if (defined('VAULT_SERVER_KEY_FILE')) {
