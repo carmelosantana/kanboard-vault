@@ -86,8 +86,10 @@ class AuditModel extends Base
     // The columns an action may fill; id, created_at, action, actor_kind and via are on every row.
     public const COLUMNS = ['actor_user_id', 'object_type', 'object_id', 'share_hash', 'target_user_id', 'ip_trunc', 'ua_family', 'count',
         'consumer', 'field_name', 'entry_version', 'job_ref', 'correlation_id', 'reason', 'consumers', 'fields', 'old_owner_id', 'new_owner_id', 'key_epoch'];
-    // A denied row's reason: a consumer read's refusal, or a grant, revoke, claim or destroy refused.
-    public const REASONS = [...ServiceSecretException::REASONS, 'not_allowed', 'payload_invalid', 'not_enrolled'];
+    // A denied row's reason: a consumer read's refusal, or a grant, revoke, claim or destroy refused (requirement 18:
+    // every refusal writes its row; a code not listed here is recorded as 'failed' by deniedReason, never dropped).
+    public const REASONS = [...ServiceSecretException::REASONS, 'not_allowed', 'payload_invalid', 'not_enrolled',
+        'integrity_error', 'conflict', 'locked', 'unlock_failed', 'busy', 'https_required', 'failed'];
     // 'system' (R39, spec addendum at T25): an action with no actor in a web request, such as a share expiry or a
     // rate-limit summary written by the opportunistic purge.
     // 'server' (spec amendment): the Server principal reading for a consumer.
@@ -129,6 +131,12 @@ class AuditModel extends Base
     public static function of($container, ?callable $clock = null): self
     {
         return isset($container['vaultAudit']) ? $container['vaultAudit'] : new self($container, null, null, $clock);
+    }
+
+    // A refusal code as a denied row's reason: the code when REASONS lists it, else the generic 'failed'.
+    public static function deniedReason(string $code): string
+    {
+        return in_array($code, self::REASONS, true) ? $code : 'failed';
     }
 
     public function record(string $action, array $cols): void

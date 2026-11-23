@@ -146,6 +146,29 @@ class OrphanControllerTest extends Base
         }
         $this->assertTrue($this->entryExists($e));
         $this->assertSame([], $this->auditRows('orphan_claim'));
+        // Requirement 18: the controller's refusal is audited too. Kills: requireAdmin failing before any denied row.
+        foreach (['claim', 'destroy'] as $what) {
+            $rows = $this->auditRows('orphan_'.$what.'_denied');
+            $this->assertCount(1, $rows, $what);
+            $this->assertSame([$this->bob, 'entry', $e, 'not_allowed'], [(int) $rows[0]['actor_user_id'], $rows[0]['object_type'], (int) $rows[0]['object_id'], $rows[0]['reason']], $what);
+        }
+    }
+
+    // Requirement 18: a failed step-up writes orphan_destroy_denied with the step-up's code, and a locked claim writes
+    // orphan_claim_denied locked. Kills: requireFreshReauth or requireUnlocked failing before any denied row.
+    public function testStepUpAndLockedRefusalsAreAudited(): void
+    {
+        [$e, $adminGroup] = $this->orphan();
+        $this->loginAs(self::ADMIN);
+        $r = $this->post('claim', ['entry_id' => (string) $e, 'group_id' => (string) $adminGroup]);
+        $this->assertSame(401, $r->status);
+        $this->assertSame([[self::ADMIN, $e, 'locked']], array_map(static fn (array $row): array => [(int) $row['actor_user_id'], (int) $row['object_id'], $row['reason']], $this->auditRows('orphan_claim_denied')));
+
+        $this->unlockAdmin();
+        $r = $this->post('destroy', ['entry_id' => (string) $e, 'passphrase' => Fixtures::WRONG_PASSPHRASE]);
+        $this->assertSame(401, $r->status);
+        $this->assertSame([[self::ADMIN, $e, 'unlock_failed']], array_map(static fn (array $row): array => [(int) $row['actor_user_id'], (int) $row['object_id'], $row['reason']], $this->auditRows('orphan_destroy_denied')));
+        $this->assertTrue($this->entryExists($e));
     }
 
     // Kills: a CSRF check dropped on either endpoint; a GET accepted.

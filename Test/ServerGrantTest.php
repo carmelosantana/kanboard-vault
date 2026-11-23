@@ -145,6 +145,8 @@ class ServerGrantTest extends Base
             "someone else's sk" => ['not_found', 'carol_sk'],
             'Server off' => ['server_off', 'server_off'],
             'a group id' => ['not_found', 'group'],
+            // Requirement 18: a reason outside the old allowlist was dropped unrecorded.
+            "the owner's key row can't be opened" => ['integrity_error', 'integrity'],
         ];
     }
 
@@ -176,6 +178,10 @@ class ServerGrantTest extends Base
             case 'carol_sk': $sk = $this->carolSk();
                 break;
             case 'server_off': $this->server()->disable(self::ADMIN);
+                break;
+            case 'integrity':
+                $this->pdo()->prepare("UPDATE vault_keys SET sealed_dek = ? WHERE object_type = 'entry' AND object_id = ? AND principal_id = ?")
+                    ->execute([base64_encode(random_bytes(80)), $this->e, $this->alice]);
                 break;
             case 'group':
                 do {

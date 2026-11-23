@@ -228,16 +228,20 @@ final class OrphanService extends Base
         return $db->fetchOne('SELECT id FROM users WHERE id = ? AND role = ? AND is_active = ?', [$userId, Role::APP_ADMIN, 1]) !== null;
     }
 
-    private function recordDenied(string $action, int $actorId, int $entryId, VaultException $e): void
+    // A refused claim or destroy (orphan_claim_denied / orphan_destroy_denied), in its own transaction after the
+    // refused one rolled back. Every refusal is recorded (requirement 18), OrphanController's own (a non-admin, a
+    // locked vault, a failed step-up) included: a code the audit doesn't list goes in as 'failed'.
+    public function recordDenied(string $action, int $actorId, int $entryId, VaultException|string $code): void
     {
-        if (! in_array($e->errorCode(), AuditModel::REASONS, true)) {
-            return;
+        if (! in_array($action, ['orphan_claim_denied', 'orphan_destroy_denied'], true)) {
+            throw new \LogicException('Vault: not an orphan denial');
         }
+        $reason = AuditModel::deniedReason($code instanceof VaultException ? $code->errorCode() : $code);
         $this->lock()->exclusive(fn () => AuditModel::of($this->container, $this->clock)->record($action, [
             'actor_user_id' => $actorId > 0 ? $actorId : null,
             'object_type' => 'entry',
             'object_id' => $entryId > 0 ? $entryId : null,
-            'reason' => $e->errorCode(),
+            'reason' => $reason,
         ]));
     }
 

@@ -652,7 +652,20 @@ class AuditTest extends Base
     public function testReasonsAreTheRefusalsAndTheGrantFailures(): void
     {
         $this->assertSame(['server_off', 'server_key_unavailable', 'not_shared', 'consumer_not_allowed', 'field_not_allowed',
-            'rate_limited', 'revoked', 'not_found', 'orphaned', 'not_allowed', 'payload_invalid', 'not_enrolled'], AuditModel::REASONS);
+            'rate_limited', 'revoked', 'not_found', 'orphaned', 'not_allowed', 'payload_invalid', 'not_enrolled',
+            'integrity_error', 'conflict', 'locked', 'unlock_failed', 'busy', 'https_required', 'failed'], AuditModel::REASONS);
+    }
+
+    // Requirement 18: every refusal writes its row, so a code outside REASONS is recorded as the generic 'failed',
+    // never dropped. Kills: an unknown code passed through (record() throws) or skipped.
+    public function testDeniedReasonNeverDropsARefusal(): void
+    {
+        foreach (AuditModel::REASONS as $reason) {
+            $this->assertSame($reason, AuditModel::deniedReason($reason));
+        }
+        foreach (['hw_assertion_required', 'rotation_in_progress', 'busy_global', 'anything'] as $code) {
+            $this->assertSame('failed', AuditModel::deniedReason($code), $code);
+        }
     }
 
     // Kills: no auto-fill of correlation_id; a new id per row; the id not following Correlation::begin().

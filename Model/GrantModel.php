@@ -526,18 +526,15 @@ class GrantModel extends Base
             : new FileKeyProvider($this->container, isset($this->container['vaultServerKeyFile']) ? $this->container['vaultServerKeyFile'] : new ServerKeyFile(ServerKeyFile::configuredPath()));
     }
 
-    // A refused Server grant or revoke, recorded in its own transaction once the refused one has rolled back. Only a
-    // reason the audit allows is recorded; any other failure (integrity_error) propagates unrecorded.
+    // A refused Server grant or revoke, recorded in its own transaction once the refused one has rolled back. Every
+    // refusal is recorded (requirement 18): a code the audit doesn't list goes in as 'failed' (AuditModel::deniedReason).
     private function recordDenied(string $action, int $actorId, string $type, int $id, VaultException $e): void
     {
-        if (! in_array($e->errorCode(), AuditModel::REASONS, true)) {
-            return;
-        }
         $this->lock()->exclusive(fn () => AuditModel::of($this->container, $this->clock)->record($action, [
             'actor_user_id' => $actorId > 0 ? $actorId : null,
             'object_type' => $type,
             'object_id' => $id > 0 ? $id : null,
-            'reason' => $e->errorCode(),
+            'reason' => AuditModel::deniedReason($e->errorCode()),
         ]));
     }
 
