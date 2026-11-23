@@ -576,6 +576,13 @@ class RotationService extends Base
         (new GrantModel($this->container, $this->clock))->reconcileExpired($type, $id);
         $row = $resolver->object($type, $id);
         $rekeyer = $this->rekeyer();
+        // Final-wave rotation ruling: on an object whose owner chain is gone (a quarantined orphan) nobody can re-key,
+        // so a principal that still holds a grant there gets the same DEK re-sealed to its new key at the same epoch,
+        // and keeps its claim. A row that opens with neither key falls through to the checks below.
+        if ($resolver->chainGone($db, $type, $row) && isset($resolver->keyHolders($type, $id, $this->now(), $row)[$userId])
+            && $this->resealToNewKey($db, $type, $id, (int) $row['key_epoch'], $userId, $sk2)) {
+            return true;
+        }
         if (! isset($resolver->effective($type, $id, $this->now(), $row)[$userId])) {
             $this->dropKeys($db, $type, $id, $userId);
             $rekeyer->enqueue($db, $type, $id, (int) $row['key_epoch']);
@@ -589,6 +596,24 @@ class RotationService extends Base
         }
         $this->dropKeys($db, $type, $id, $userId);
         $rekeyer->enqueue($db, $type, $id, (int) $row['key_epoch']);
+        return true;
+    }
+
+    // The principal's DEK at $epoch (opened with sk2, which reaches the old generation through the bridge) sealed to its
+    // new key in place of its old-generation row. False, and nothing written, when no row at $epoch opens.
+    private function resealToNewKey(VaultDb $db, string $type, int $id, int $epoch, int $userId, #[\SensitiveParameter] string $sk2): bool
+    {
+        $rekeyer = $this->rekeyer();
+        $dek = $rekeyer->openDek($db, $type, $id, $epoch, $userId, $sk2);
+        if ($dek === null) {
+            return false;
+        }
+        try {
+            $this->dropKeys($db, $type, $id, $userId);
+            $rekeyer->sealTo($db, $type, $id, $epoch, $dek, [$userId], false, true);
+        } finally {
+            sodium_memzero($dek);
+        }
         return true;
     }
 

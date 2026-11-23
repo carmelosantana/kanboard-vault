@@ -108,6 +108,13 @@ class OrphanTest extends Base
         }
     }
 
+    private function allRows(string $sql, array $params): array
+    {
+        $s = $this->pdo()->prepare($sql);
+        $s->execute($params);
+        return $s->fetchAll(\PDO::FETCH_ASSOC);
+    }
+
     private function principalRow(int $id): ?array
     {
         return $this->row('SELECT user_id, state, live_user_id FROM vault_principals WHERE user_id = ?', [$id]);
@@ -380,6 +387,56 @@ class OrphanTest extends Base
         $this->assertSame('active', $this->principalRow($reused)['state']);
     }
 
+    // Minor 4 / T11-2 (final-wave rotation ruling): an admin who rotates their keys keeps their claim. The sweep re-seals
+    // the same DEK to the admin's new key on a quarantined orphan they hold a grant on (no re-key: nobody owns it), so
+    // the claim opens it with the new key. Kills: the key row dropped on a chain-gone object (claim not_allowed); a
+    // re-key of the orphan during the sweep (epoch moves).
+    public function testAnAdminWhoRotatesKeepsTheirClaim(): void
+    {
+        [$g1, $e1] = $this->aliceTree();
+        $this->grants()->grant($this->alice, 'entry', $e1, self::ADMIN, 'read', null, $this->aliceSk());
+        $epoch = (int) $this->row('SELECT key_epoch FROM vault_entries WHERE id = ?', [$e1])['key_epoch'];
+        $adminGroup = $this->adminGroup();
+        $this->deleteAlice();
+        $this->purge();
+        $gen = (int) $this->row('SELECT key_gen FROM vault_principals WHERE user_id = ?', [self::ADMIN])['key_gen'];
+
+        $this->rotation()->rotateWithPassphrase(self::ADMIN, $this->adminSk(), self::ADMIN_PASSPHRASE, self::ROTATED_PASSPHRASE, self::IP);
+        $this->assertSame($gen + 1, (int) $this->row('SELECT key_gen FROM vault_principals WHERE user_id = ?', [self::ADMIN])['key_gen'], 'rotated');
+        $this->assertSame([[$gen + 1, $epoch]], array_map(static fn (array $r): array => [(int) $r['principal_key_gen'], (int) $r['key_epoch']],
+            $this->allRows("SELECT principal_key_gen, key_epoch FROM vault_keys WHERE object_type = 'entry' AND object_id = ? AND principal_id = ?", [$e1, self::ADMIN])));
+        $this->assertSame($epoch, (int) $this->row('SELECT key_epoch FROM vault_entries WHERE id = ?', [$e1])['key_epoch'], 'not re-keyed');
+        $this->assertServerRefused('orphaned', $e1);
+
+        $newSk = $this->skFor(self::ADMIN, self::ROTATED_PASSPHRASE);
+        $this->assertSame($epoch + 1, $this->orphans()->claim(self::ADMIN, $e1, $adminGroup, $newSk));
+        $this->assertSame(Fixtures::ENTRY_PASSWORD, $this->serverRead($e1));
+        $this->assertSame(Fixtures::ENTRY_PASSWORD, $this->store()->readEntry(self::ADMIN, $e1, $newSk)['payload']['password']);
+    }
+
+    // T11-2: the claim's openDek refusal. An admin whose key row on the orphan can't be opened is refused not_allowed
+    // after the grant delete, which rolls back: the grant is kept and nothing changes. Kills: the grant delete
+    // committed before the refusal.
+    public function testAClaimWhoseKeyRowDoesNotOpenChangesNothing(): void
+    {
+        [$g1, $e1] = $this->aliceTree();
+        $this->grants()->grant($this->alice, 'entry', $e1, self::ADMIN, 'read', null, $this->aliceSk());
+        $adminGroup = $this->adminGroup();
+        $this->deleteAlice();
+        $this->purge();
+        $this->pdo()->prepare("UPDATE vault_keys SET sealed_dek = ? WHERE object_type = 'entry' AND object_id = ? AND principal_id = ?")
+            ->execute([base64_encode(random_bytes(80)), $e1, self::ADMIN]);
+        $before = $this->snapshot();
+
+        $this->assertVaultError('not_allowed', fn () => $this->orphans()->claim(self::ADMIN, $e1, $adminGroup, $this->adminSk()));
+
+        $after = $this->snapshot();
+        $after['audit'] = array_values(array_filter($after['audit'], static fn (array $r): bool => $r['action'] !== 'orphan_claim_denied'));
+        $this->assertSame($before, $after, 'the grant and every row unchanged');
+        $this->assertSame(1, $this->countRows("SELECT COUNT(*) FROM vault_grants WHERE subject_type = 'entry' AND subject_id = ? AND grantee_id = ?", [$e1, self::ADMIN]));
+        $this->assertSame(['not_allowed'], array_column($this->auditRows('orphan_claim_denied'), 'reason'));
+    }
+
     public function testDestroyRemovesTheOrphan(): void
     {
         $revoked = [];
@@ -449,8 +506,12 @@ class OrphanTest extends Base
                 $t->assertSame(0, $t->keyRows($e1, $t->bob));
             }],
             'a key rotation (RotationService)' => [static function (self $t, int $e1): void {
+                // Final-wave rotation ruling: bob still holds a grant on the quarantined e1, so his row is re-sealed
+                // to his new key (same epoch), not dropped.
+                $gen = (int) $t->row('SELECT key_gen FROM vault_principals WHERE user_id = ?', [$t->bob])['key_gen'];
                 $t->rotation()->rotateWithPassphrase($t->bob, $t->bobSk(), Fixtures::NEW_PASSPHRASE, self::ROTATED_PASSPHRASE, self::IP);
-                $t->assertSame(0, $t->keyRows($e1, $t->bob));
+                $t->assertSame(1, $t->countRows("SELECT COUNT(*) FROM vault_keys WHERE object_type = 'entry' AND object_id = ? AND principal_id = ? AND principal_key_gen = ?", [$e1, $t->bob, $gen + 1]));
+                $t->assertSame(1, $t->keyRows($e1, $t->bob));
             }],
             'an agent re-enrolment (AgentVault)' => [static function (self $t, int $e1): void {
                 $t->agentVault()->reenrol($t->carol, $t->dave, $t->carolSk());

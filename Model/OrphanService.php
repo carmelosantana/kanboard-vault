@@ -24,8 +24,8 @@ use Kanboard\Core\Security\Role;
 // entry (its owner a tombstone), so a deleted owner's private entry can't be claimed in the minute before the purge:
 // the sweep deletes it, and that sweep is committed even when the action is then refused.
 //
-// Accepted P1 limitation: an admin who rotates their own key loses their key row on a quarantined orphan and can no
-// longer claim it; another grant-holding admin can, or it can be destroyed.
+// An admin who rotates their own key keeps their claim: RotationService re-seals the same DEK to the new key on a
+// quarantined orphan they hold a grant on.
 final class OrphanService extends Base
 {
     private Closure $clock;
