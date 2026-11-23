@@ -48,7 +48,7 @@ that the database never holds.
 | **A buggy plugin reading the wrong secret.** | Each Server share names its consumers and fields. Another name gets `consumer_not_allowed` or `field_not_allowed`. |
 | **Silent or runaway use.** | Every read is audited as `server_read`, every refusal as `server_read_denied` with its reason. Reads are rate-limited per consumer and entry. The owner is emailed the first time each consumer reads each entry. |
 | **A tampered key file.** | A key file with a looser mode, another owner, a symbolic link anywhere in its path, a hard link or the wrong size fails closed. Vault never repairs, creates on read or replaces it. |
-| **A departed owner.** | Kanboard has no hook that can stop a user's deletion. Before it, the settings page and the owner's security page list entries at risk. After it, each Server-shared entry is an orphan, quarantined at once (`orphaned`) until an admin with a grant claims it (a full re-key) or an admin destroys it with step-up. |
+| **A departed owner.** | Kanboard has no hook that can stop a user's deletion. Before it, the settings page and the owner's security page list entries at risk. After it, each Server-shared entry is an orphan, quarantined at once (`orphaned`) until an admin with a grant claims it (a full re-key) or an admin destroys it with step-up (the vault passphrase again). A deleted owner's entry that isn't shared with Server is never an orphan: claim and destroy run the purge's sweep first. |
 
 What Server sharing does not defend against:
 

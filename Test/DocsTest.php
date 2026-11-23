@@ -47,6 +47,20 @@ class DocsTest extends Base
         }
     }
 
+    // Minor 1 / T13-1: the behaviours a consumer plugin author relies on, stated as the code has them. Markdown wraps
+    // lines, so whitespace runs compare as one space. Kills: the queued-re-key wording back; the InvalidArgumentException
+    // for a bad job ref, describe()'s skipped steps, the decrypt case of not_found or the retention caveat dropped.
+    public function testReadmeStatesTheConsumerEdges(): void
+    {
+        $server = (string) preg_replace('/\s+/', ' ', self::section(self::doc('README.md'), '## Server sharing'));
+        foreach (['re-keys the entry at once', 'throws `InvalidArgumentException`', 'skips the consumer step and the rate step',
+            "or it doesn't decrypt", 'they last only as long as its rows', 'direct grant on it goes', 'never an orphan'] as $s) {
+            $this->assertStringContainsString($s, $server, $s);
+        }
+        $this->assertStringNotContainsString('queues the entry for re-key. Then', $server);
+        $this->assertStringNotContainsString('in the same transaction as the spent token', $server);
+    }
+
     public function testSecurityPageListsMetadataLeakage(): void
     {
         $security = self::doc('docs/security.md');
@@ -81,10 +95,6 @@ class DocsTest extends Base
         $this->setUpAgents();
         $this->setUpServer();
         try {
-            $this->assertNull(($fn[1])($this->container, 'vault://1/password'), 'no service, no read');
-            $e = $this->serverShare(['CveHunter'], ['password']);
-            $this->container['vaultSecrets'] = $this->serverSecrets();
-            $this->assertSame(Fixtures::ENTRY_PASSWORD, ($fn[1])($this->container, "vault://$e/password"));
             $log = new class () extends \Psr\Log\AbstractLogger {
                 public array $lines = [];
 
@@ -95,6 +105,12 @@ class DocsTest extends Base
             };
             unset($this->container['logger']);
             $this->container['logger'] = $log;
+            // T13-2: without the service the example returns at once, with nothing read or logged.
+            $this->assertNull(($fn[1])($this->container, 'vault://1/password'), 'no service, no read');
+            $this->assertSame([], $log->lines, 'no service, nothing logged');
+            $e = $this->serverShare(['CveHunter'], ['password']);
+            $this->container['vaultSecrets'] = $this->serverSecrets();
+            $this->assertSame(Fixtures::ENTRY_PASSWORD, ($fn[1])($this->container, "vault://$e/password"));
             $this->assertNull(($fn[1])($this->container, "vault://$e/username"), 'a refusal is null');
             $this->assertSame(['warning CveHunter: Vault refused the key: field_not_allowed'], $log->lines, 'the reason is logged');
         } finally {

@@ -58,7 +58,7 @@ Vault's guarantees hold only when these are true. The settings page checks each 
 | sodium | Required for every key operation. |
 | The Argon2 lock directory (`DATA_DIR/vault`) is `0700` or tighter | It holds the lock files that cap concurrent key derivations. |
 | Server sharing | Shows whether it is on. Information only. |
-| The Server key file is outside `DATA_DIR` | A backup of the data directory must not carry the key with the database. Red until you set `VAULT_SERVER_KEY_FILE`, even while Server sharing is off. While it is on, the file must also be sound and open the Server key. See [Server sharing](#server-sharing). |
+| The Server key file is outside `DATA_DIR` | A backup of the data directory must not carry the key with the database. Red while the key file's path is under `DATA_DIR` (the default is), even while Server sharing is off; set `VAULT_SERVER_KEY_FILE` to a path outside it. While it is on, the file must also be sound and open the Server key. See [Server sharing](#server-sharing). |
 | Entries at risk | No entry shared with Server has a disabled owner, or an owner with no other administrator who could claim it. |
 
 ## Behind a reverse proxy or Cloudflare Tunnel
@@ -223,7 +223,8 @@ while Server sharing is on. Fill in:
 - **Rates.** Reads per hour (default 60) and burst (default 10). You may lower them. The admin sets the maximum.
 
 A Server share is always Read, always one entry (never a group) and never expires. Revoking it removes Server's key
-row and queues the entry for re-key. Then rotate the secret at its provider, since Server could have read it.
+row and re-keys the entry at once (a new key at epoch + 1, sealed to the readers left), in the same transaction. Then
+rotate the secret at its provider, since Server could have read it.
 
 Custom field names are never stored in plaintext in grants or the audit log. Vault stores a keyed hash
 (`c:` + base32 of BLAKE2b-128 under a field-name key). That key is sealed to Server, made when Server sharing is turned
@@ -253,11 +254,16 @@ function cveHunterApiKey($container, string $ref): ?string
 ```
 
 - `read(string $consumer, string $ref, ?string $jobRef = null): SecretValue`. The job ref is optional, 1 to 64 of
-  `A-Z a-z 0-9 _ . : -`, and lands in the audit row.
+  `A-Z a-z 0-9 _ . : -`, and lands in the audit row. An invalid job ref is a programming error, not a refusal: it
+  throws `InvalidArgumentException` before anything is checked or audited, which the example above doesn't catch.
+  Pass a constant, or check it against that pattern first.
 - `SecretValue::reveal()` is the only way to the bytes. The value can't be printed, dumped, serialised, cloned or
   cast to a string, so a wrapper can't leak it by accident. The string `reveal()` returns is ordinary PHP data.
 - `describe(string $ref): RefStatus` tells a settings page whether a ref would read: `ok` or the refusal reason. It
-  shows no title or value, writes no audit row and spends no rate token.
+  shows no title or value, writes no audit row and spends no rate token. It takes no consumer, so it skips the
+  consumer step and the rate step, and it doesn't open the key or decrypt: `ok` means every other check up to Server's
+  key row passed, and a read can still answer `consumer_not_allowed`, `rate_limited`, `server_key_unavailable` or
+  `not_found`.
 - `available(): bool` is true when Server sharing is on and the key opens now.
 - Each request (or process) gets one correlation id in its audit rows. A long-running worker calls
   `Kanboard\Plugin\Vault\Model\Correlation::begin()` at the start of each job.
@@ -274,7 +280,7 @@ It carries no title, value, path or previous exception.
 
 | Reason | When |
 |---|---|
-| `not_found` | The ref doesn't parse (P1 has no `@<version>`), the entry doesn't exist, or it has no such field. |
+| `not_found` | The ref doesn't parse (P1 has no `@<version>`), the entry doesn't exist, it has no such field, or it doesn't decrypt. |
 | `server_off` | Server sharing is off. |
 | `revoked` | The entry has no Server share, and its last Server share action was a revoke. |
 | `not_shared` | The entry has no Server share (never shared), or Server's key row is missing or stale. |
@@ -291,8 +297,10 @@ consumer, the field, no owner gone (`orphaned`), a rate token, Server's key row 
 ### Audit, the first-read email and events
 
 Every read writes `server_read` with the consumer, entry id, field, entry version, job ref and correlation id. Every
-refusal writes `server_read_denied` with its reason, in the same transaction as the spent token. A custom field is
-recorded only as its keyed hash. The entry's owner sees these rows in their Vault activity.
+refusal writes `server_read_denied` with its reason. A refusal from the checks inside the vault lock is written in that
+lock's transaction, with the spent token when there is one; the first two (the ref doesn't parse, Server is off) are
+written on their own, before the lock; and `rate_limited` refusals are aggregated (below). A custom field is recorded
+only as its keyed hash. The entry's owner sees these rows in their Vault activity.
 
 `rate_limited` refusals are aggregated so a runaway job can't flood the log. The first refusal per bucket and
 10-minute window writes a row at once. The rest of that window's refusals become one row with their count, written
@@ -301,12 +309,17 @@ once the window has closed.
 The first time a consumer reads an entry, its owner is emailed (when Kanboard has mail set up). The email names only
 the consumer and the entry as `#<entry_id>`.
 
+Two answers read the audit log, so they last only as long as its rows (Settings → Vault: audit retention). "First
+read" means no `server_read` row for that consumer and entry is left: once the earlier rows pass the retention, the
+next read emails the owner again. And `revoked` needs the entry's last Server share row to be a `server_revoke`: once
+that row is gone, a revoked entry answers `not_shared`.
+
 Two events fire on Kanboard's dispatcher, after the change commits. They carry ids only:
 
 | Event | Payload | When |
 |---|---|---|
 | `vault.secret.changed` | `entry_id`, `version` | Any entry was saved. |
-| `vault.secret.revoked` | `entry_id` | An entry lost its Server share: revoked, deleted, or Server sharing turned off. |
+| `vault.secret.revoked` | `entry_id` | An entry lost its Server share: revoked, deleted (with its group, by the purge or as an orphan), or Server sharing turned off. Each such loss also writes `server_revoke`. |
 
 Listen to them to drop a cached value.
 
@@ -325,25 +338,32 @@ quarantined at once: nobody reads it, Server included (`orphaned`), until an app
 and audits `orphan_quarantine`. Settings → Vault lists orphans by entry number only.
 
 - **Claim.** An active app admin who holds a live grant on the entry (directly or through a group), with
-  their vault unlocked, takes it over. The entry
+  their vault unlocked, takes it over. The settings page offers Claim only to such an admin; another admin gets
+  `not_allowed`. The entry
   is re-keyed (new key, epoch + 1) under the admin as owner and moved into a group the admin owns. It is sealed again
-  to everyone who should read it there, Server included while its share lives. The admin's own grant on it goes,
-  since ownership replaces it. Audited `orphan_claim`.
+  to everyone who should read it there, Server included while its share lives. The admin's own direct grant on it goes,
+  since ownership replaces it; a grant through a group stays. Audited `orphan_claim`.
 - **Destroy.** An active app admin deletes the entry and everything that points at it. It needs step-up: your vault
-  passphrase again. Audited `orphan_destroy`.
+  passphrase again, as for turning Server sharing on, also for an admin with hardware keys. Audited `orphan_destroy`.
 
-Refused claims and destroys are audited too (`orphan_claim_denied`, `orphan_destroy_denied`).
+Both act only on a quarantined entry. They run the purge's orphan sweep first, so in the minute before the next purge
+a deleted owner's entry that wasn't shared with Server is deleted then and answers `not_found`; it is never an orphan.
+Every refused claim or destroy is audited too (`orphan_claim_denied`, `orphan_destroy_denied`): a non-admin, a locked
+vault, a failed step-up, no grant, an entry that isn't an orphan.
+
+Kanboard on SQLite reuses the id of the newest deleted user. While a deleted user's orphans wait, their id stays
+reserved: a new user who gets it can't set up a vault (`id_held_by_orphans`, said plainly) and sees none of the dead
+owner's activity. Settings → Vault names such ids; claiming or destroying the orphans frees the id at the next purge.
 
 Before it happens, Settings → Vault and each owner's security page list **entries at risk**: shared with Server, and
 either the owner is disabled or no other active admin holds a grant who could claim them. The owner's page links each
 one to the vault page (`?entry=<id>`).
 
-Known P1 limits:
+An admin who rotates their keys keeps their claim: the rotation re-seals the same key to the admin's new key on each
+orphan they hold a grant on.
 
-- An admin who rotates their own keys loses their key row on a quarantined orphan (the owner is gone, so nobody seals
-  it to the new key) and can no longer claim it. Another admin with a grant can, or it can be destroyed.
-- An admin with hardware keys enrolled can't destroy an orphan from the settings page: step-up for them needs a
-  hardware-key assertion, and the form has no field for it. Another admin can destroy it.
+Known P1 limit: step-up for turning Server sharing on and for destroying an orphan is the vault passphrase only, also
+for an admin with hardware keys (no hardware-key assertion). Hardware-key step-up for both comes in phase 2.
 
 ## One-time links
 
