@@ -4,6 +4,7 @@ require_once __DIR__.'/Support/FileDb.php';
 
 use Kanboard\Plugin\Vault\Model\RateLimiter;
 use KanboardTests\units\Base;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 class RateLimiterTest extends Base
 {
@@ -168,6 +169,7 @@ class RateLimiterTest extends Base
     }
 
     /** @dataProvider badBuckets */
+    #[DataProvider('badBuckets')]
     public function testRejectsBucketKeysThatCannotBeStored(string $bucket): void
     {
         $rl = $this->limiter();

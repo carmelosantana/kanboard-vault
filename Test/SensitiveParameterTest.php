@@ -11,6 +11,7 @@ use Kanboard\Plugin\Vault\Crypto\Wraps;
 use Kanboard\Plugin\Vault\Model\PrincipalModel;
 use Kanboard\Plugin\Vault\Model\UnlockService;
 use KanboardTests\units\Base;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 // Secrets must never reach logs through exception stack-trace arguments. With zend.exception_ignore_args=Off
 // (the engine default; the official Kanboard images ship no php.ini) every frame records its arguments, and
@@ -161,6 +162,7 @@ class SensitiveParameterTest extends Base
     }
 
     /** @dataProvider cryptoCalls */
+    #[DataProvider('cryptoCalls')]
     public function testCryptoHelpersRedactSecrets(string $secret, callable $call): void
     {
         $this->assertRedacted($secret, $this->thrown($call));
