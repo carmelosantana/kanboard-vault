@@ -368,7 +368,9 @@ class OrphanTest extends Base
         $this->assertSame('orphaned', $this->principalRow($zed)['state']);
         $this->assertSame([], $this->orphans()->blockedUserIds(self::ADMIN), 'nobody holds the id yet');
 
-        $reused = (int) $this->container['userModel']->create(['id' => $zed, 'username' => 'yan-the-reuser', 'password' => 'yan login password 1']);
+        // By username: Postgres's lastInsertId reports the sequence, not the explicit id.
+        $this->container['userModel']->create(['id' => $zed, 'username' => 'yan-the-reuser', 'password' => 'yan login password 1']);
+        $reused = (int) $this->container['userModel']->getIdByUsername('yan-the-reuser');
         $this->assertSame($zed, $reused);
 
         $this->assertSame([], AuditModel::of($this->container)->visibleTo($reused, 0, 200), 'none of the dead owner\'s rows');
