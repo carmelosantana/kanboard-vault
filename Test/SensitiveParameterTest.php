@@ -9,6 +9,7 @@ use Kanboard\Plugin\Vault\Crypto\RecoveryCode;
 use Kanboard\Plugin\Vault\Crypto\Sealer;
 use Kanboard\Plugin\Vault\Crypto\Wraps;
 use Kanboard\Plugin\Vault\Model\PrincipalModel;
+use Kanboard\Plugin\Vault\Model\ServerGrant;
 use Kanboard\Plugin\Vault\Model\UnlockService;
 use KanboardTests\units\Base;
 
@@ -157,6 +158,9 @@ class SensitiveParameterTest extends Base
             'Sealer::openDek keypair' => [$k, fn () => Sealer::openDek('sealed', $k.$k, 'entry', 1, 1, 1)],
             'RecoveryCode::parse input' => ['RECOVERY-SENTINEL-INPUT', fn () => RecoveryCode::parse('RECOVERY-SENTINEL-INPUT')],
             'Encoding::enc fields' => [$s, fn () => Encoding::enc('dek', $s, new \stdClass())],
+            // R1: the field-MAC key, and a custom field name (secret: only its MAC is ever stored).
+            'ServerGrant::macField key' => [$k, fn () => ServerGrant::macField($k.'too long', 'api_token')],
+            'ServerGrant::macField name' => [$s, fn () => ServerGrant::macField(str_repeat('k', 32), $s."\x01")],
         ];
     }
 

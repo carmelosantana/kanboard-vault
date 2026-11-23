@@ -5,6 +5,7 @@ use Closure;
 use InvalidArgumentException;
 use Kanboard\Core\Base;
 use Kanboard\Core\Security\Role;
+use Kanboard\Plugin\Vault\Secrets\ServiceSecretException;
 use LogicException;
 
 // The audit log (spec: Audit). vault_audit is append-only: rows are inserted here and deleted only by purge()
@@ -24,6 +25,10 @@ class AuditModel extends Base
 {
     private const SESSION = ['actor_user_id', 'ip_trunc', 'ua_family'];
     private const OBJECT = ['actor_user_id', 'object_type', 'object_id'];
+    // Spec amendment (Server): a consumer's read, a grant or revoke to Server, and a refused admin action.
+    private const SERVER_READ = ['object_type', 'object_id', 'field_name', 'entry_version', 'consumer', 'job_ref', 'correlation_id'];
+    private const SERVER_GRANT = ['actor_user_id', 'object_type', 'object_id', 'consumers', 'fields', 'correlation_id'];
+    private const DENIED = ['actor_user_id', 'object_type', 'object_id', 'reason', 'correlation_id'];
 
     // The spec's per-action table, verbatim.
     public const ALLOW = [
@@ -63,15 +68,35 @@ class AuditModel extends Base
         // Codex security round 1: an agent enrolment refused because the principal still owns objects outside its
         // Agent-created group (actor the owner, target the agent, count the objects).
         'enroll_refused' => ['actor_user_id', 'target_user_id', 'count'],
+        // Spec amendment: the Server and orphan actions, and (P1) their denied variants.
+        'server_read' => self::SERVER_READ,
+        // R3: a rate_limited read denial is one row per bucket and window with its count (like R39's rate_limited);
+        // every other denial is one row per refusal, without a count.
+        'server_read_denied' => [...self::SERVER_READ, 'reason', 'count'],
+        'server_grant' => self::SERVER_GRANT,
+        'server_grant_denied' => self::DENIED,
+        'server_revoke' => self::SERVER_GRANT,
+        'server_revoke_denied' => self::DENIED,
+        'orphan_quarantine' => ['object_type', 'object_id', 'old_owner_id', 'correlation_id'],
+        'orphan_claim' => ['actor_user_id', 'object_type', 'object_id', 'old_owner_id', 'new_owner_id', 'key_epoch', 'correlation_id'],
+        'orphan_claim_denied' => self::DENIED,
+        'orphan_destroy' => ['actor_user_id', 'object_type', 'object_id', 'old_owner_id', 'correlation_id'],
+        'orphan_destroy_denied' => self::DENIED,
     ];
     // The columns an action may fill; id, created_at, action, actor_kind and via are on every row.
-    public const COLUMNS = ['actor_user_id', 'object_type', 'object_id', 'share_hash', 'target_user_id', 'ip_trunc', 'ua_family', 'count'];
+    public const COLUMNS = ['actor_user_id', 'object_type', 'object_id', 'share_hash', 'target_user_id', 'ip_trunc', 'ua_family', 'count',
+        'consumer', 'field_name', 'entry_version', 'job_ref', 'correlation_id', 'reason', 'consumers', 'fields', 'old_owner_id', 'new_owner_id', 'key_epoch'];
+    // A denied row's reason: a consumer read's refusal, or a grant, revoke, claim or destroy refused.
+    public const REASONS = [...ServiceSecretException::REASONS, 'not_allowed', 'payload_invalid', 'not_enrolled'];
     // 'system' (R39, spec addendum at T25): an action with no actor in a web request, such as a share expiry or a
     // rate-limit summary written by the opportunistic purge.
-    public const ACTOR_KINDS = ['human', 'agent', 'public', 'cli', 'system'];
+    // 'server' (spec amendment): the Server principal reading for a consumer.
+    public const ACTOR_KINDS = ['human', 'agent', 'public', 'cli', 'system', 'server'];
     public const VIAS = ['ui', 'api', 'cli'];
     // "App admins see policy_change, org_recovery and aggregate counts."
-    public const ADMIN_ACTIONS = ['policy_change', 'org_recovery'];
+    // Spec amendment: admins decide orphans (claim or destroy), so they see every orphan row.
+    public const ADMIN_ACTIONS = ['policy_change', 'org_recovery', 'orphan_quarantine', 'orphan_claim', 'orphan_claim_denied',
+        'orphan_destroy', 'orphan_destroy_denied'];
     // Actions whose target_user_id is the viewer's own share or rate-limit bucket ("the share is theirs").
     private const TARGET_OWNS = ['share_reveal', 'share_expire', 'rate_limited'];
     public const PAGE_LIMIT = 200;
@@ -80,6 +105,7 @@ class AuditModel extends Base
     // burn capability (32 hex) or a share key can never be recorded; ip_trunc is exactly ClientIp::truncate's output;
     // ua_family exactly UaFamily's.
     private const SHARE_HASH = ShareModel::ID_HASH_PATTERN;
+    private const JOB_REF = '/^[A-Za-z0-9_.:-]{1,64}$/D';
 
     private ?string $actorKind;
     private ?string $via;
@@ -201,6 +227,9 @@ class AuditModel extends Base
                 throw new LogicException('Vault audit: unknown column '.$column);
             }
         }
+        if (in_array('correlation_id', self::ALLOW[$action], true)) {
+            $cols['correlation_id'] ??= Correlation::id();
+        }
         foreach (self::COLUMNS as $column) {
             $value = $cols[$column] ?? null;
             if ($value !== null && ! in_array($column, self::ALLOW[$action], true)) {
@@ -208,6 +237,9 @@ class AuditModel extends Base
             }
             $this->check($column, $value);
             $row[$column] = $value;
+        }
+        if ($row['count'] !== null && $action === 'server_read_denied' && $row['reason'] !== 'rate_limited') {
+            throw new LogicException('Vault audit: server_read_denied count needs reason rate_limited');
         }
         $row['via'] = $context['via'] ?? $this->via ?? $this->processVia();
         $row['actor_kind'] = $context['actor_kind'] ?? $this->actorKind ?? $this->deriveActorKind($row['via'], $row['actor_user_id']);
@@ -226,8 +258,16 @@ class AuditModel extends Base
             return;
         }
         $ok = match ($column) {
-            'actor_user_id', 'object_id', 'target_user_id' => is_int($value) && $value > 0,
+            'actor_user_id', 'object_id', 'target_user_id', 'old_owner_id', 'new_owner_id' => is_int($value) && $value > 0,
             'count' => is_int($value) && $value >= 0,
+            'entry_version', 'key_epoch' => is_int($value) && $value >= 1,
+            'consumer' => ServerGrant::validConsumer($value),
+            'field_name' => ServerGrant::validField($value),
+            'job_ref' => is_string($value) && preg_match(self::JOB_REF, $value) === 1,
+            'correlation_id' => is_string($value) && preg_match(Correlation::PATTERN, $value) === 1,
+            'reason' => in_array($value, self::REASONS, true),
+            'consumers' => self::canonicalList($value, ServerGrant::consumers(...)),
+            'fields' => self::canonicalList($value, ServerGrant::fields(...)),
             'object_type' => in_array($value, ObjectStore::TYPES, true),
             'ip_trunc' => is_string($value) && $value !== '' && (new ClientIp($this->container))->truncate(explode('/', $value)[0]) === $value,
             'share_hash' => is_string($value) && preg_match(self::SHARE_HASH, $value) === 1,
@@ -235,6 +275,17 @@ class AuditModel extends Base
         };
         if (! $ok) {
             throw new LogicException('Vault audit: invalid value for '.$column);
+        }
+    }
+
+    // A stored consumers or fields value: the non-empty canonical list that $canon returns unchanged.
+    private static function canonicalList(mixed $value, callable $canon): bool
+    {
+        try {
+            $list = is_string($value) ? ServerGrant::decodeList($value) : [];
+            return $list !== [] && $canon($list) === $list;
+        } catch (LogicException|VaultException) {
+            return false;
         }
     }
 
@@ -266,7 +317,7 @@ class AuditModel extends Base
 
     private static function typed(array $row): array
     {
-        foreach (['id', 'created_at', 'actor_user_id', 'object_id', 'target_user_id', 'count'] as $c) {
+        foreach (['id', 'created_at', 'actor_user_id', 'object_id', 'target_user_id', 'count', 'entry_version', 'old_owner_id', 'new_owner_id', 'key_epoch'] as $c) {
             if ($row[$c] !== null) {
                 $row[$c] = (int) $row[$c];
             }
