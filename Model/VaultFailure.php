@@ -52,6 +52,8 @@ final class VaultFailure
         'hw_key_limit' => [409, 'hw_key_limit'],
         'hw_enrolment_required' => [403, 'hw_enrolment_required'],
         'hw_assertion_required' => [403, 'hw_assertion_required'],
+        // Server sharing (spec amendment): a Server grant while Server is off.
+        'server_off' => [409, 'server_off'],
     ];
 
     /** @return array{0:int,1:string} [status, reason] */
@@ -59,6 +61,10 @@ final class VaultFailure
     {
         if ($e instanceof VaultException && isset(self::MAP[$e->errorCode()])) {
             return self::MAP[$e->errorCode()];
+        }
+        // The Server key file is missing or unsafe (turning Server on); the deployment checks say which, never where.
+        if ($e instanceof ServerKeyUnavailable) {
+            return [409, ServerKeyUnavailable::REASON];
         }
         if ($e instanceof VaultException || $e instanceof InvalidArgumentException || $e instanceof CryptoException) {
             return [400, 'failed'];

@@ -8,12 +8,14 @@ namespace Kanboard\Plugin\Vault\Crypto;
  * AEAD wraps (passphrase, passphrase+prf, recovery, agent) are vault_wraps rows:
  * id, user_id (the principal), method, credential_id (NULL unless passphrase+prf),
  * nonce and wrapped_sk as base64 text, crypto_v. unwrap() takes such a row as read
- * from the DB. The org wrap is a sealed box and has its own pair of helpers.
+ * from the DB. The Server wrap (method server, principal -1) has the same shape but lives
+ * on the vault_meta lock row (server_wrap_id, server_wrap_nonce, server_wrapped_sk).
+ * The org wrap is a sealed box and has its own pair of helpers.
  */
 final class Wraps
 {
     public const CRYPTO_V = 1;
-    public const METHODS = ['passphrase', 'passphrase+prf', 'recovery', 'agent'];
+    public const METHODS = ['passphrase', 'passphrase+prf', 'recovery', 'agent', 'server'];
 
     public static function wrap(#[\SensitiveParameter] string $sk, #[\SensitiveParameter] string $kek, int $principalId, string $method, string $credentialId, int $wrapId): array
     {

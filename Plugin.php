@@ -10,6 +10,7 @@ use Kanboard\Plugin\Vault\Console\OrgKeygenCommand;
 use Kanboard\Plugin\Vault\Console\OrgRecoverCommand;
 use Kanboard\Plugin\Vault\Console\PurgeCommand;
 use Kanboard\Plugin\Vault\Model\AuditModel;
+use Kanboard\Plugin\Vault\Model\FileKeyProvider;
 use Kanboard\Plugin\Vault\Model\GrantModel;
 use Kanboard\Plugin\Vault\Model\HardwareKeys;
 use Kanboard\Plugin\Vault\Model\Importer;
@@ -19,6 +20,8 @@ use Kanboard\Plugin\Vault\Model\ObjectStore;
 use Kanboard\Plugin\Vault\Model\PrincipalModel;
 use Kanboard\Plugin\Vault\Model\RecoveryService;
 use Kanboard\Plugin\Vault\Model\RotationService;
+use Kanboard\Plugin\Vault\Model\ServerKeyFile;
+use Kanboard\Plugin\Vault\Model\ServerPrincipal;
 use Kanboard\Plugin\Vault\Model\ShareModel;
 use Kanboard\Plugin\Vault\Model\UnlockService;
 use Kanboard\Plugin\Vault\Model\VaultSession;
@@ -49,6 +52,11 @@ class Plugin extends Base
         $this->container['vaultShares'] = static fn ($c): ShareModel => new ShareModel($c);
         $this->container['vaultHardwareKeys'] = static fn ($c): HardwareKeys => new HardwareKeys($c);
         $this->container['vaultImporter'] = static fn ($c): Importer => new Importer($c);
+        // The Server principal (spec amendment): its key file (VAULT_SERVER_KEY_FILE, a path), the provider that opens
+        // what is sealed to it, and on/off.
+        $this->container['vaultServerKeyFile'] = static fn (): ServerKeyFile => new ServerKeyFile(ServerKeyFile::configuredPath());
+        $this->container['vaultKeyProvider'] = static fn ($c): FileKeyProvider => new FileKeyProvider($c, $c['vaultServerKeyFile']);
+        $this->container['vaultServerPrincipal'] = static fn ($c): ServerPrincipal => new ServerPrincipal($c, $c['vaultServerKeyFile'], $c['vaultKeyProvider']);
 
         // The page and its POST endpoints (spec: UI). No template:layout:js or :css: Vault's own templates load
         // vault.js and vault.css, so nothing of Vault's runs on other pages.
@@ -95,6 +103,7 @@ class Plugin extends Base
         // Settings → Vault (admins only; SettingsController checks): the settings and the deployment checks.
         $this->route->addRoute('vault/settings', 'SettingsController', 'index', 'Vault');
         $this->route->addRoute('vault/settings/save', 'SettingsController', 'save', 'Vault');
+        $this->route->addRoute('vault/settings/server', 'SettingsController', 'server', 'Vault');
         $this->hook->on('template:config:sidebar', ['template' => 'Vault:config/sidebar']);
         $this->hook->on('template:header:dropdown', ['template' => 'Vault:header/dropdown']);
         $this->hook->on('template:dashboard:sidebar', ['template' => 'Vault:dashboard/sidebar']);

@@ -71,6 +71,28 @@ $expiries = [3600 => t('1 hour'), 86400 => t('1 day'), 604800 => t('7 days')];
     <div class="form-actions"><button type="submit" class="btn btn-blue"><?= t('Save') ?></button></div>
 </form>
 
+<h3><?= t('Server sharing') ?></h3>
+<p data-vault-server-state="<?= $server_on ? 'on' : 'off' ?>"><?= $server_on
+    ? t('On. Owners can share single entries with Kanboard plugins that read them on the server.')
+    : t('Off. No plugin can read a vault entry on the server.') ?></p>
+<label for="vault-s-server-key"><?= t('Server key file') ?></label>
+<input type="text" id="vault-s-server-key" data-vault-server-key-path readonly spellcheck="false" value="<?= $this->text->e($server_key_path) ?>">
+<p class="form-help"><?= t('Read-only: set it with VAULT_SERVER_KEY_FILE in config.php. Keep this file out of your database backups: a backup without it can\'t open what is shared with Server, and with it, it can.') ?></p>
+<form method="post" action="<?= $this->url->href('SettingsController', 'server', ['plugin' => 'Vault']) ?>" autocomplete="off" data-vault-form="server">
+    <input type="hidden" name="csrf_token" value="<?= $this->text->e($csrf) ?>">
+    <?php if ($server_on): ?>
+    <input type="hidden" name="enabled" value="0">
+    <label><input type="checkbox" name="confirm" value="1" required> <?= t('Turning Server sharing off deletes every Server share. Owners must share each entry again after it is turned back on.') ?></label>
+    <div class="form-actions"><button type="submit" class="btn btn-red"><?= t('Turn Server sharing off') ?></button></div>
+    <?php else: ?>
+    <input type="hidden" name="enabled" value="1">
+    <label for="vault-s-server-passphrase"><?= t('Your vault passphrase') ?></label>
+    <input type="password" id="vault-s-server-passphrase" name="passphrase" autocomplete="off" data-lpignore="true" data-1p-ignore data-bwignore required>
+    <p class="form-help"><?= t('Your vault must be unlocked. Turning this on lets a server that has both the database and the key file read the entries owners share with Server.') ?></p>
+    <div class="form-actions"><button type="submit" class="btn btn-blue"><?= t('Turn Server sharing on') ?></button></div>
+    <?php endif ?>
+</form>
+
 <h3><?= t('Hardware keys') ?></h3>
 <?php if ($relying_party !== null): ?>
 <dl class="vault-readonly">

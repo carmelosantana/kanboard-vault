@@ -22,7 +22,8 @@ final class Kdf
 
     /**
      * KEK = BLAKE2b-256(key = $ikm, msg = enc("kek", ...$context)). Contexts per the spec:
-     * ("passphrase"), ("prf", credential_id, prf_output), ("recovery"), ("agent", agent_user_id).
+     * ("passphrase"), ("prf", credential_id, prf_output), ("recovery"), ("agent", agent_user_id),
+     * ("server", principal_id) with the Server key file's 32 bytes as $ikm.
      * Integers are accepted so ids encode as 8-byte integers, like every other AD.
      */
     public static function kek(#[\SensitiveParameter] string $ikm, #[\SensitiveParameter] string|int ...$context): string

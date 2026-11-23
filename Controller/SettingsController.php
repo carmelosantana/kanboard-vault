@@ -4,6 +4,8 @@ namespace Kanboard\Plugin\Vault\Controller;
 use Kanboard\Plugin\Vault\Model\AuditModel;
 use Kanboard\Plugin\Vault\Model\ClientIp;
 use Kanboard\Plugin\Vault\Model\DeploymentChecks;
+use Kanboard\Plugin\Vault\Model\ServerPrincipal;
+use Kanboard\Plugin\Vault\Model\VaultException;
 use Kanboard\Plugin\Vault\Model\VaultSettings;
 
 // Settings → Vault (spec: Admin settings), for Kanboard app admins only. Anyone else gets the generic forbidden
@@ -16,6 +18,10 @@ use Kanboard\Plugin\Vault\Model\VaultSettings;
 //                              refuses the whole form; then each changed setting is written through VaultSettings::set,
 //                              which audits one policy_change per change, and routes the recovery policy through
 //                              RecoveryService::setPolicy (T9: never Kanboard's generic config save).
+//   POST vault/settings/server Server sharing on (enabled=1) or off (enabled=0, confirm=1). On needs step-up (R2): an
+//                              unlocked vault and the admin's vault passphrase, through the passphrase change's throttled
+//                              check (RotationService::confirmPassphrase: back-off, the IP bucket, the Argon2 slot, the
+//                              failed-guess streak and its audit). Off needs admin and CSRF only: failing closed is safe.
 //
 // There is no "view vault" or "reset user" action here, and org recovery stays CLI only.
 class SettingsController extends BaseVaultController
@@ -55,6 +61,9 @@ class SettingsController extends BaseVaultController
                 'share_expiries' => VaultSettings::SHARE_EXPIRIES,
                 'error' => $this->codeMessage('vault_error', $messages),
                 'saved' => $this->request->getStringParam('vault_notice') === 'saved',
+                'server_on' => ServerPrincipal::of($this->container)->isOn(),
+                // A path, not a secret (VAULT_SERVER_KEY_FILE): shown read-only, like the rp_id.
+                'server_key_path' => $this->container['vaultServerKeyFile']->path(),
             ]));
         });
     }
@@ -78,6 +87,31 @@ class SettingsController extends BaseVaultController
             }
             foreach ($changes as $key => $value) {
                 $settings->set($key, $value, $this->userId());
+            }
+            $this->succeed([], 'saved');
+        });
+    }
+
+    public function server(): void
+    {
+        $this->handle(function (): void {
+            $this->requireAdmin();
+            $this->requirePostCsrf();
+            $server = ServerPrincipal::of($this->container);
+            $enabled = (string) $this->request->getRawValue('enabled');
+            if ($enabled === '1') {
+                $this->requireTransport();
+                $sk = $this->requireUnlocked();
+                try {
+                    $this->rotationService()->confirmPassphrase($this->userId(), $sk, (string) $this->request->getRawValue('passphrase'), $this->clientIp());
+                } finally {
+                    sodium_memzero($sk);
+                }
+                $server->enable($this->userId());
+            } elseif ($enabled === '0' && (string) $this->request->getRawValue('confirm') === '1') {
+                $server->disable($this->userId());
+            } else {
+                throw new VaultException('payload_invalid');
             }
             $this->succeed([], 'saved');
         });

@@ -299,6 +299,8 @@ abstract class BaseVaultController extends BaseController
             'hw_key_limit' => t('You have the most hardware keys allowed.'),
             'hw_enrolment_required' => t('Add two hardware keys before you use your vault.'),
             'hw_assertion_required' => t('Touch one of your hardware keys to confirm.'),
+            'server_off' => t('Server sharing is off. An administrator can turn it on in Settings → Vault.'),
+            'server_key_unavailable' => t('The Server key file is missing or not safe to use. See the deployment checks.'),
             'hw_unsupported' => t('This browser can\'t use hardware keys.'),
             'hw_prf_unsupported' => t('This key can\'t be used: it doesn\'t support the PRF extension.'),
             'hw_cancelled' => t('The hardware key request was cancelled or timed out.'),

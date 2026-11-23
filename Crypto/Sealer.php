@@ -4,11 +4,13 @@ namespace Kanboard\Plugin\Vault\Crypto;
 
 /**
  * Sealed DEKs: crypto_box_seal(enc("dek", object_type, object_id, key_epoch, principal_id, DEK), pk).
+ * The field-MAC key (R1): crypto_box_seal(enc("fieldmac", principal_id, key), pk), sealed to Server.
  * A sealed box has no AD, so every field is checked after opening. Blobs are raw bytes.
  */
 final class Sealer
 {
     public const DEK_BYTES = 32;
+    public const FIELD_MAC_KEY_BYTES = 32;
 
     public static function sealDek(#[\SensitiveParameter] string $dek, string $objectType, int $objectId, int $keyEpoch, int $principalId, string $pk): string
     {
@@ -30,6 +32,31 @@ final class Sealer
         $plain = Wraps::sealOpen($sealed, $keypair, 'dek');
         try {
             return Wraps::field($plain, Encoding::enc('dek', $objectType, $objectId, $keyEpoch, $principalId), self::DEK_BYTES, 'dek');
+        } finally {
+            sodium_memzero($plain);
+        }
+    }
+
+    public static function sealFieldMacKey(#[\SensitiveParameter] string $key, int $principalId, string $pk): string
+    {
+        if (strlen($key) !== self::FIELD_MAC_KEY_BYTES) {
+            throw new CryptoException('fieldmac: bad length');
+        }
+        $plain = Encoding::enc('fieldmac', $principalId, $key);
+        try {
+            return sodium_crypto_box_seal($plain, $pk);
+        } catch (\SodiumException) {
+            throw new CryptoException('fieldmac: bad public key');
+        } finally {
+            sodium_memzero($plain);
+        }
+    }
+
+    public static function openFieldMacKey(string $sealed, #[\SensitiveParameter] string $keypair, int $principalId): string
+    {
+        $plain = Wraps::sealOpen($sealed, $keypair, 'fieldmac');
+        try {
+            return Wraps::field($plain, Encoding::enc('fieldmac', $principalId), self::FIELD_MAC_KEY_BYTES, 'fieldmac');
         } finally {
             sodium_memzero($plain);
         }

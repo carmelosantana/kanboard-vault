@@ -8,7 +8,12 @@ use Kanboard\Plugin\Vault\Crypto\Kdf;
 use Kanboard\Plugin\Vault\Crypto\RecoveryCode;
 use Kanboard\Plugin\Vault\Crypto\Sealer;
 use Kanboard\Plugin\Vault\Crypto\Wraps;
+use Kanboard\Plugin\Vault\Model\DekContext;
+use Kanboard\Plugin\Vault\Model\FileKeyProvider;
 use Kanboard\Plugin\Vault\Model\PrincipalModel;
+use Kanboard\Plugin\Vault\Model\ServerKeyFile;
+use Kanboard\Plugin\Vault\Model\ServerKeyUnavailable;
+use Kanboard\Plugin\Vault\Model\VaultDb;
 use Kanboard\Plugin\Vault\Model\ServerGrant;
 use Kanboard\Plugin\Vault\Model\UnlockService;
 use KanboardTests\units\Base;
@@ -138,6 +143,38 @@ class SensitiveParameterTest extends Base
         $this->assertRedacted($sk, $this->thrown(fn () => $this->session()->create(0, $sk)));
     }
 
+    // The Server sk handed to FileKeyProvider::wrapNew, when the key file can't be read (the failure is raised under
+    // wrapNew's frame); and the file key and Server sk behind openSealedDek / openFieldMacKey, whose refusal is a bare
+    // ServerKeyUnavailable with nothing chained.
+    public function testServerKeySecretsAreAbsent(): void
+    {
+        $dir = realpath(sys_get_temp_dir()).'/vault-sp-'.bin2hex(random_bytes(6));
+        mkdir($dir, 0700);
+        $file = new ServerKeyFile($dir.'/vault-server/server.key');
+        try {
+            $sk = str_pad('SK-SENTINEL-server', 32, 'x');
+            $e = $this->thrown(fn () => (new FileKeyProvider($this->container, $file))->wrapNew(new VaultDb($this->container), $sk));
+            $this->assertInstanceOf(ServerKeyUnavailable::class, $e);
+            $this->assertRedacted($sk, $e);
+
+            $file->create();
+            $fileKey = $file->read();
+            $provider = new FileKeyProvider($this->container, $file);
+            foreach (['openSealedDek' => fn () => $provider->openSealedDek('sealed', new DekContext('entry', 1, 1, -1)), 'openFieldMacKey' => fn () => $provider->openFieldMacKey()] as $what => $call) {
+                $e = $this->thrown($call);
+                $this->assertInstanceOf(ServerKeyUnavailable::class, $e, $what);
+                $this->assertNull($e->getPrevious(), "$what: nothing chained");
+                $this->assertRedacted($fileKey, $e);
+            }
+            $this->assertStringNotContainsString($fileKey, print_r($provider, true), 'print_r of the provider');
+        } finally {
+            @unlink($dir.'/vault-server/server.key');
+            @unlink($dir.'/vault-server/.lock');
+            @rmdir($dir.'/vault-server');
+            @rmdir($dir);
+        }
+    }
+
     public static function cryptoCalls(): array
     {
         $k = str_pad('KEY-SENTINEL-crypto', 32, 'k');
@@ -156,6 +193,9 @@ class SensitiveParameterTest extends Base
             'Wraps::field plain' => [$s, fn () => Wraps::field($s, 'prefix', 3, 'x')],
             'Sealer::sealDek dek' => [$s, fn () => Sealer::sealDek($s.'x', 'entry', 1, 1, 1, 'pk')],
             'Sealer::openDek keypair' => [$k, fn () => Sealer::openDek('sealed', $k.$k, 'entry', 1, 1, 1)],
+            // R1: the field-MAC key sealed to Server, and the keypair that opens it.
+            'Sealer::sealFieldMacKey key' => [$s, fn () => Sealer::sealFieldMacKey($s.'x', -1, 'pk')],
+            'Sealer::openFieldMacKey keypair' => [$k, fn () => Sealer::openFieldMacKey('sealed', $k.$k, -1)],
             'RecoveryCode::parse input' => ['RECOVERY-SENTINEL-INPUT', fn () => RecoveryCode::parse('RECOVERY-SENTINEL-INPUT')],
             'Encoding::enc fields' => [$s, fn () => Encoding::enc('dek', $s, new \stdClass())],
             // R1: the field-MAC key, and a custom field name (secret: only its MAC is ever stored).

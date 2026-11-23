@@ -1,22 +1,25 @@
 <?php
 require_once 'tests/units/Base.php';
-require_once __DIR__.'/Support/ServiceFixture.php';
+require_once __DIR__.'/Support/ServerFixture.php';
 require_once __DIR__.'/Support/VaultTestResponse.php';
 
 use Kanboard\Core\Http\Request;
 use Kanboard\Core\Security\Role;
 use Kanboard\Plugin\Vault\Controller\SettingsController;
 use Kanboard\Plugin\Vault\Model\AuditModel;
+use Kanboard\Plugin\Vault\Model\FailedGuess;
+use Kanboard\Plugin\Vault\Model\VaultDb;
 use Kanboard\Plugin\Vault\Model\VaultSession;
 use Kanboard\Plugin\Vault\Model\VaultSettings;
 use Kanboard\Plugin\Vault\Plugin;
+use Kanboard\Plugin\Vault\Test\Support\Fixtures;
 use KanboardTests\units\Base;
 
 // Spec: Admin settings, Audit (policy_change), Hardware keys (the bound rp_id is read-only), Unlocked sessions (the
 // effective idle cap); carries T9 (the policy only through setPolicy), R37 (integrity faults shown to the admin).
 class SettingsTest extends Base
 {
-    use ServiceFixture;
+    use ServerFixture;
 
     private array $cookies = [];
 
@@ -40,6 +43,7 @@ class SettingsTest extends Base
                 return $this->t->lifetime ?? parent::sessionLifetimeSeconds();
             }
         };
+        $this->setUpServer();
         $this->loginAs(self::ADMIN);
     }
 
@@ -47,6 +51,7 @@ class SettingsTest extends Base
 
     protected function tearDown(): void
     {
+        $this->tearDownServer();
         $this->tearDownVault();
         parent::tearDown();
     }
@@ -63,7 +68,10 @@ class SettingsTest extends Base
         if ($ajax ?? $method === 'POST') {
             $server['HTTP_X_REQUESTED_WITH'] = 'XMLHttpRequest';
         }
-        $this->container['request'] = new Request($this->container, $server, $get, $post, [], []);
+        // The cookie the last unlock set, if any (the vault session).
+        $last = $this->jar->last();
+        $cookies = $last === null || $last['value'] === '' ? [] : [$last['name'] => $last['value']];
+        $this->container['request'] = new Request($this->container, $server, $get, $post, [], $cookies);
         $response = new VaultTestResponse($this->container);
         $this->container['response'] = $response;
         (new SettingsController($this->container))->$action();
@@ -263,5 +271,99 @@ class SettingsTest extends Base
         $this->assertSame(1, $x->query('//*[@data-vault-mapped-cidr]')->length, 'the mapped CIDR is flagged');
         $this->assertStringContainsString('Vault/Assets/css/vault.css', $body);
         $this->assertStringNotContainsString('<script', preg_replace('~<script[^>]*src="[^"]*"[^>]*></script>~', '', $body), 'no inline script');
+    }
+
+    private function server_(array $post, bool $csrf = true, ?bool $ajax = null): VaultTestResponse
+    {
+        return $this->call('server', 'POST', $post + ($csrf ? ['csrf_token' => $this->token()] : []), $ajax);
+    }
+
+    // Spec amendment, Server sharing on and off; R2 (step-up). On: admin, CSRF, an unlocked vault and the admin's vault
+    // passphrase re-entered, checked by the throttled passphrase check (a wrong one is a failed guess and changes
+    // nothing). Off: admin and CSRF only, with the "off deletes every Server share" confirm.
+    // Kills: no admin check; no CSRF check; on without unlock or without the passphrase; a wrong passphrase not counted;
+    // off without the confirm; off demanding an unlocked vault.
+    public function testServerToggle(): void
+    {
+        unset($this->container['vaultRotation']);
+        $this->container['vaultRotation'] = fn () => $this->rotation();
+        $this->principals()->enrolHuman(self::ADMIN, Fixtures::PASSPHRASE);
+        $this->principals()->enrolHuman($this->bob, Fixtures::BOB_PASSPHRASE);
+        $on = fn (): bool => $this->server()->isOn();
+
+        $this->unlockAs($this->bob, Fixtures::BOB_PASSPHRASE, 'sid-bob');
+        $r = $this->server_(['enabled' => '1', 'passphrase' => Fixtures::BOB_PASSPHRASE]);
+        $this->assertHardened($r, 'non-admin');
+        $this->assertSame([403, ['ok' => false, 'reason' => 'forbidden']], [$r->status, $r->json_()], 'non-admin');
+        $this->assertFalse($on());
+
+        $this->jar->sets = [];
+        $this->loginAs(self::ADMIN);
+        $r = $this->server_(['enabled' => '1', 'passphrase' => Fixtures::PASSPHRASE]);
+        $this->assertSame([401, ['ok' => false, 'reason' => 'locked']], [$r->status, $r->json_()], 'admin, vault locked');
+        $this->assertFalse($on());
+
+        $this->unlockAs(self::ADMIN, Fixtures::PASSPHRASE, 'sid-admin');
+        $this->assertSame(403, $this->server_(['enabled' => '1', 'passphrase' => Fixtures::PASSPHRASE], false)->status, 'no CSRF token');
+        $this->assertSame(403, $this->call('server', 'GET', [], false, ['enabled' => '1', 'passphrase' => Fixtures::PASSPHRASE, 'csrf_token' => $this->token()])->status, 'GET');
+        $this->assertFalse($on());
+
+        $streak = fn (): int => FailedGuess::streak(new VaultDb($this->container), self::ADMIN);
+        foreach (['no passphrase' => [], 'wrong passphrase' => ['passphrase' => Fixtures::WRONG_PASSPHRASE]] as $what => $body) {
+            $s0 = $streak();
+            $failed = count($this->auditRows('unlock_failed'));
+            $r = $this->server_(['enabled' => '1'] + $body);
+            $this->assertSame([401, ['ok' => false, 'reason' => 'unlock_failed']], [$r->status, $r->json_()], $what);
+            $this->assertSame($s0 + 1, $streak(), "$what: a failed guess on the streak");
+            $this->assertCount($failed + 1, $this->auditRows('unlock_failed'), "$what: audited");
+            $this->assertFalse($on(), $what);
+            $this->assertFileDoesNotExist($this->keyPath, "$what: nothing created");
+        }
+        $this->assertSame([], $this->auditRows('policy_change'));
+
+        $r = $this->server_(['enabled' => '1', 'passphrase' => Fixtures::PASSPHRASE]);
+        $this->assertHardened($r, 'on');
+        $this->assertSame(['ok' => true], $r->json_());
+        $this->assertTrue($on());
+        $this->assertSame(0, $streak(), 'the right passphrase resets the streak');
+        $this->assertCount(1, $this->auditRows('policy_change'));
+        foreach ([$r->body, implode('', $r->headers)] as $out) {
+            $this->assertStringNotContainsString(Fixtures::PASSPHRASE, $out);
+        }
+
+        // The page: on, the configured key path read-only, the off form with its confirm.
+        $x = $this->dom($this->call('index')->body);
+        $this->assertSame('on', $x->query('//*[@data-vault-server-state]')->item(0)?->getAttribute('data-vault-server-state'));
+        $path = $x->query('//input[@data-vault-server-key-path]')->item(0);
+        $this->assertSame([$this->keyPath, true], [$path?->getAttribute('value'), $path?->hasAttribute('readonly')]);
+        $off = $x->query('//form[@data-vault-form="server"]')->item(0);
+        $this->assertStringContainsString('action=server', $off?->getAttribute('action'));
+        $this->assertSame(1, $x->query('.//input[@name="confirm"][@value="1"][@required]', $off)->length, 'the off confirm');
+        $this->assertSame(1, $x->query('.//input[@name="enabled"][@value="0"]', $off)->length);
+
+        // Off: the confirm is required; admin and CSRF only, so it works with the vault locked.
+        $this->jar->sets = [];
+        $r = $this->server_(['enabled' => '0']);
+        $this->assertSame([400, ['ok' => false, 'reason' => 'payload_invalid']], [$r->status, $r->json_()], 'off without confirm');
+        $this->assertTrue($on());
+        $this->assertSame(403, $this->server_(['enabled' => '0', 'confirm' => '1'], false)->status, 'off without CSRF');
+        $this->assertTrue($on());
+        $this->loginAs($this->bob);
+        $this->assertSame(403, $this->server_(['enabled' => '0', 'confirm' => '1'])->status, 'off as a non-admin');
+        $this->assertTrue($on());
+        $this->loginAs(self::ADMIN);
+        $r = $this->server_(['enabled' => '0', 'confirm' => '1'], true, false);
+        $this->assertStringEndsWith('vault_notice=saved', $r->headers['Location'] ?? '', 'native off: back to the page');
+        $this->assertFalse($on());
+        $this->assertCount(2, $this->auditRows('policy_change'));
+
+        // Off, the page offers the on form with the passphrase field.
+        $x = $this->dom($this->call('index')->body);
+        $this->assertSame('off', $x->query('//*[@data-vault-server-state]')->item(0)?->getAttribute('data-vault-server-state'));
+        $form = $x->query('//form[@data-vault-form="server"]')->item(0);
+        $this->assertSame(1, $x->query('.//input[@name="enabled"][@value="1"]', $form)->length);
+        $in = $x->query('.//input[@name="passphrase"]', $form)->item(0);
+        $this->assertSame(['password', 'off'], [$in?->getAttribute('type'), $in?->getAttribute('autocomplete')]);
+        $this->assertTrue($this->container['token']->validateReusableCSRFToken($x->query('.//input[@name="csrf_token"]/@value', $form)->item(0)?->nodeValue));
     }
 }

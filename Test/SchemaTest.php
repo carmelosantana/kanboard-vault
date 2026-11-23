@@ -600,7 +600,8 @@ class SchemaTest extends Base
 
     // The part of the identity rule a MySQL-family CHECK may not carry, enforced in code on every driver: every
     // principal insert and kind change goes through PrincipalModel::assertIdentity. Kills: one direction of the ⇔ (or
-    // the live_user_id half) missing from the guard; an insert or kind change in Model/ that skips it.
+    // the live_user_id half) missing from the guard; an insert or kind change in Model/, Controller/ or Console/ that
+    // skips it, including a second write in a file whose first write is guarded.
     public function testPrincipalIdentityGuardInCode(): void
     {
         $guard = static function (string $kind, int $id, ?int $live): bool {
@@ -618,11 +619,90 @@ class SchemaTest extends Base
         foreach ([['host', -4, 1], ['server', 5, null], ['human', -2, null], ['agent', -3, null], ['server', -1, 1]] as [$kind, $id, $live]) {
             $this->assertFalse($guard($kind, $id, $live), "$kind $id ".var_export($live, true));
         }
-        foreach (glob(__DIR__.'/../Model/*.php') as $file) {
-            $src = file_get_contents($file);
-            $writes = preg_match_all("/insert\\('vault_principals'|UPDATE vault_principals SET kind\\b/", $src);
-            $this->assertGreaterThanOrEqual($writes, substr_count($src, 'PrincipalModel::assertIdentity(') + substr_count($src, 'self::assertIdentity('), basename($file));
+
+        // The scanner itself, on known sources: each write form is caught, and each needs its own nearby guard.
+        $g = "PrincipalModel::assertIdentity('agent', \$id, \$id);\n";
+        $cases = [
+            "\$db->insert('vault_principals', [])" => 1,
+            "\$db->execute('INSERT INTO vault_principals (user_id) VALUES (?)', [1])" => 1,
+            "\$db->execute(\"insert  into\n vault_principals (user_id) VALUES (?)\", [1])" => 1,
+            "\$this->db->table('vault_principals')->insert([])" => 1,
+            "\$this->db->table( 'vault_principals' )->save([])" => 1,
+            "\$this->db->update('vault_principals', [])" => 1,
+            "\$db->execute(\"UPDATE vault_principals SET kind = 'agent' WHERE user_id = ?\")" => 1,
+            "\$db->execute(\"UPDATE vault_principals SET state = 'active', public_key = ?, kind = 'agent' WHERE user_id = ?\")" => 1,
+            "\$db->execute('UPDATE vault_principals SET notices = 0 WHERE user_id = ?')" => 0,
+            "\$db->execute('UPDATE vault_principals SET state = ? WHERE kind = ?')" => 0,
+            "\$db->execute('DELETE FROM vault_principals WHERE user_id = -1')" => 0,
+        ];
+        foreach ($cases as $src => $writes) {
+            $this->assertSame($writes, count(self::principalWrites($src)), "writes in: $src");
+            $this->assertSame($writes, count(self::unguardedPrincipalWrites($src)), "unguarded: $src");
+            $this->assertSame([], self::unguardedPrincipalWrites($g.$src), "guarded: $src");
         }
+        $two = "\$db->insert('vault_principals', []);\n\$db->execute(\"UPDATE vault_principals SET kind = 'x' WHERE 1\");";
+        $this->assertCount(1, self::unguardedPrincipalWrites($g.$two), 'one guard covers one write, not the file');
+        $far = $g.str_repeat("\$x = 1;\n", self::GUARD_WINDOW_LINES + 1)."\$db->insert('vault_principals', [])";
+        $this->assertCount(1, self::unguardedPrincipalWrites($far), 'a guard far above the write does not count');
+        $this->assertCount(1, self::unguardedPrincipalWrites("public static function assertIdentity(\n\$db->insert('vault_principals', [])"), 'the definition is not a call');
+
+        $root = dirname(__DIR__);
+        $files = array_merge(...array_map(static fn (string $dir): array => glob($root.'/'.$dir.'/*.php') ?: [], ['Model', 'Controller', 'Console']));
+        $this->assertNotEmpty($files);
+        $sites = 0;
+        foreach ($files as $file) {
+            $src = file_get_contents($file);
+            $sites += count(self::principalWrites($src));
+            $this->assertSame([], self::unguardedPrincipalWrites($src), basename($file).': a principal write without PrincipalModel::assertIdentity just before it');
+        }
+        $this->assertGreaterThanOrEqual(3, $sites, 'the scan found the known write sites');
+    }
+
+    // How close (in lines) the assertIdentity call must come before the write it guards.
+    private const GUARD_WINDOW_LINES = 12;
+
+    // Every vault_principals insert or kind change in $src, as byte offsets. INSERT INTO in SQL, insert('vault_principals'
+    // through VaultDb, PicoDb's table('vault_principals')->insert/save/update and ->update('vault_principals', and an
+    // UPDATE whose SET list (up to WHERE or the statement's end) assigns kind anywhere.
+    /** @return list<int> */
+    private static function principalWrites(string $src): array
+    {
+        $patterns = [
+            '/\bINSERT\s+INTO\s+vault_principals\b/i',
+            "/\\binsert\\(\\s*['\"]vault_principals['\"]/",
+            "/\\btable\\(\\s*['\"]vault_principals['\"]\\s*\\)\\s*->\\s*(?:insert|save|update|persist)\\s*\\(/",
+            "/->\\s*update\\(\\s*['\"]vault_principals['\"]/",
+            '/\bUPDATE\s+vault_principals\s+SET\b(?:(?!\bWHERE\b|;).)*?\bkind\s*=/is',
+        ];
+        $at = [];
+        foreach ($patterns as $re) {
+            preg_match_all($re, $src, $m, PREG_OFFSET_CAPTURE);
+            foreach ($m[0] as [, $offset]) {
+                $at[$offset] = true;
+            }
+        }
+        $at = array_keys($at);
+        sort($at);
+        return $at;
+    }
+
+    // The writes with no `::assertIdentity(` call between them and the previous write (so each write has its own),
+    // within GUARD_WINDOW_LINES lines above.
+    /** @return list<int> */
+    private static function unguardedPrincipalWrites(string $src): array
+    {
+        $bad = [];
+        $prev = 0;
+        foreach (self::principalWrites($src) as $offset) {
+            $lines = explode("\n", substr($src, 0, $offset));
+            $windowStart = strlen(implode("\n", array_slice($lines, 0, max(0, count($lines) - 1 - self::GUARD_WINDOW_LINES))));
+            $from = max($prev, $windowStart);
+            if (! str_contains(substr($src, $from, $offset - $from), '::assertIdentity(')) {
+                $bad[] = $offset;
+            }
+            $prev = $offset + 1;
+        }
+        return $bad;
     }
 
     // Kills: a Server grant without its columns; a group, edit or expiring grant to a negative principal; Server
