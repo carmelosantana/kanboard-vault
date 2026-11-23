@@ -229,6 +229,9 @@ class AuditTest extends Base
         $alice = $this->alice;
         $bob = $this->bob;
         $carol = (int) $this->container['userModel']->create(['username' => 'carol', 'password' => 'carol login password 1']);
+        foreach ([$alice, $bob] as $owner) { // v5: an object's owner is a principal
+            $this->pdo()->prepare("INSERT INTO vault_principals (user_id, kind, public_key, created_at, live_user_id) VALUES (?, 'human', 'cGs=', 0, ?)")->execute([$owner, $owner]);
+        }
         $group = fn (int $owner): int => $this->insertId("INSERT INTO vault_groups (owner_id, parent_id, kind, key_epoch, nonce, ciphertext, crypto_v, position, created_at, updated_at) VALUES (?, NULL, 'normal', 1, '', '', 1, 0, 0, 0)", [$owner]);
         $bobGroup = $group($bob);
         $aliceGroup = $group($alice);

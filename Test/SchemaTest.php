@@ -82,6 +82,7 @@ class SchemaTest extends Base
     {
         $this->migrate();
         $db = $this->container['db'];
+        $db->table('vault_principals')->insert(self::ROWS['vault_principals']); // v5: an object's owner is a principal
         foreach (['vault_groups', 'vault_entries'] as $table) {
             if ($table === 'vault_entries') {
                 $db->table('vault_groups')->insert(self::ROWS['vault_groups']);
@@ -97,7 +98,7 @@ class SchemaTest extends Base
 
         $src = file_get_contents(__DIR__.'/../Schema/Sqlite.php');
         $this->assertSame(0, preg_match('/\bid INTEGER PRIMARY KEY,/', $src), 'every SQLite surrogate key is AUTOINCREMENT');
-        $this->assertSame(10, substr_count($src, 'id INTEGER PRIMARY KEY AUTOINCREMENT'), 'v1 tables plus the v2 rebuild of vault_grants and the v3 rebuild of vault_audit');
+        $this->assertSame(14, substr_count($src, 'id INTEGER PRIMARY KEY AUTOINCREMENT'), 'v1 tables, the v2 rebuild of vault_grants, the v3 rebuild of vault_audit and the v5 rebuilds of vault_groups, vault_entries, vault_grants and vault_audit');
     }
 
     // R26: deleting a user no longer deletes the principal (the purge must first turn its grants and key rows into
@@ -203,7 +204,7 @@ class SchemaTest extends Base
         $tables = array_merge(['vault_meta'], array_keys(self::ROWS));
         foreach (['Sqlite', 'Mysql', 'Postgres'] as $d) {
             $src = file_get_contents(__DIR__."/../Schema/$d.php");
-            $this->assertStringContainsString('const VERSION = 4;', $src, $d);
+            $this->assertStringContainsString('const VERSION = 5;', $src, $d);
             $this->assertStringContainsString('function version_1($pdo)', $src, $d);
             $this->assertStringContainsString('function version_2($pdo)', $src, $d);
             // Comments mention constraints too; count code only.
@@ -483,7 +484,7 @@ class SchemaTest extends Base
         $handler = new \Kanboard\Core\Plugin\SchemaHandler($this->container);
         $this->assertSame(0, $handler->getSchemaVersion('Vault'));
         $handler->migrateSchema('Vault');
-        $this->assertSame(4, $handler->getSchemaVersion('Vault'));
+        $this->assertSame(5, $handler->getSchemaVersion('Vault'));
 
         $this->assertSame($user, (int) $pdo->query('SELECT live_user_id FROM vault_principals')->fetchColumn());
         foreach (['org_pk', 'last_purge_at'] as $c) {
@@ -525,5 +526,206 @@ class SchemaTest extends Base
         }
         $this->expectException(\PDOException::class);
         \Kanboard\Plugin\Vault\Schema\version_3($pdo);
+    }
+
+    // v5 on SQLite rebuilds five FK-linked tables inside Kanboard's migration transaction, where PRAGMA foreign_keys
+    // can't be turned off: dropping a parent first would cascade-delete its children. Rows, ids, AUTOINCREMENT counters
+    // and every FK target survive. Kills: dropping vault_groups (or vault_principals) before its children; a lost
+    // sequence; an FK left pointing at a *_v5 name or at users.
+    public function testVersion5RebuildKeepsEveryRowWithForeignKeysOn(): void
+    {
+        vault_test_sqlite_only();
+        require_once __DIR__.'/../Schema/Sqlite.php';
+        $pdo = $this->container['db']->getConnection();
+        foreach ([1, 2, 3, 4] as $v) {
+            call_user_func('\Kanboard\Plugin\Vault\Schema\version_'.$v, $pdo);
+        }
+        $db = $this->container['db'];
+        $db->table('vault_principals')->insert(['live_user_id' => 1] + self::ROWS['vault_principals']);
+        $db->table('vault_groups')->insert(self::ROWS['vault_groups']);
+        $db->table('vault_groups')->insert(['parent_id' => 1] + self::ROWS['vault_groups']);
+        foreach ([1, 2, 2] as $g) {
+            $db->table('vault_entries')->insert(['group_id' => $g] + self::ROWS['vault_entries']);
+        }
+        $db->table('vault_entries')->eq('id', 3)->remove();
+        $db->table('vault_grants')->insert(self::ROWS['vault_grants']);
+        $db->table('vault_keys')->insert(self::ROWS['vault_keys']);
+        $this->assertTrue(vault_test_foreign_keys_enforced($pdo));
+
+        $pdo->beginTransaction(); // as SchemaHandler runs it: FKs stay on
+        \Kanboard\Plugin\Vault\Schema\version_5($pdo);
+        $pdo->commit();
+
+        $this->assertSame([1, 2], array_map('intval', $db->table('vault_entries')->asc('id')->findAllByColumn('id')));
+        $this->assertSame(2, $db->table('vault_groups')->count());
+        $this->assertSame(1, $db->table('vault_grants')->count());
+        $this->assertSame(1, $db->table('vault_keys')->count());
+        $db->table('vault_entries')->insert(['group_id' => 1] + self::ROWS['vault_entries']);
+        $this->assertSame(4, (int) $db->getLastId(), 'the entries counter survived');
+        $fk = static fn (string $t): array => array_map(static fn ($f) => [$f['from'], $f['table'], $f['on_delete']],
+            $pdo->query("PRAGMA foreign_key_list($t)")->fetchAll(\PDO::FETCH_ASSOC));
+        $this->assertContains(['owner_id', 'vault_principals', 'CASCADE'], $fk('vault_entries'));
+        $this->assertContains(['group_id', 'vault_groups', 'CASCADE'], $fk('vault_entries'));
+        $this->assertContains(['owner_id', 'vault_principals', 'CASCADE'], $fk('vault_groups'));
+        $this->assertContains(['parent_id', 'vault_groups', 'CASCADE'], $fk('vault_groups'));
+        $this->assertContains(['grantee_id', 'vault_principals', 'CASCADE'], $fk('vault_grants'));
+        $this->assertContains(['principal_id', 'vault_principals', 'CASCADE'], $fk('vault_keys'));
+        $this->assertSame([], $pdo->query('PRAGMA foreign_key_check')->fetchAll());
+        $this->assertSame(0, (int) $pdo->query("SELECT COUNT(*) FROM sqlite_master WHERE sql LIKE '%\_v5%' ESCAPE '\\'")->fetchColumn());
+    }
+
+    // Every dialect. Kills: one direction of the ⇔ missing; 'server' not admitted; 'orphaned' not admitted. SQLite and
+    // Postgres carry the full CHECK. The MySQL family carries the full CHECK or, where the server refuses live_user_id
+    // (MySQL 3823, MariaDB 1901), the documented fallback; the catalogue says which, and the test follows it.
+    public function testVersion5PrincipalIdentityCheck(): void
+    {
+        $this->migrate();
+        $pdo = $this->container['db']->getConnection();
+        $ins = fn (int $id, string $kind, ?int $live, string $state = 'active') => $pdo->prepare(
+            'INSERT INTO vault_principals (user_id, kind, public_key, key_gen, state, created_at, live_user_id) VALUES (?, ?, ?, 1, ?, 1, ?)'
+        )->execute([$id, $kind, 'cGs=', $state, $live]);
+        $ins(-1, 'server', null);
+        $ins(1, 'human', null, 'orphaned');
+        foreach ([[5, 'server', null], [-2, 'human', null], [-3, 'robot', null]] as [$id, $kind, $live]) {
+            $this->assertRefused(fn () => $ins($id, $kind, $live), "$kind $id");
+        }
+        $form = self::checkForm($pdo, 'vault_principals', 'vault_principals_identity_chk', 'live_user_id');
+        $this->assertContains($form, ['full', 'fallback']);
+        if ($form === 'full') {
+            $this->assertRefused(fn () => $ins(-4, 'host', 1), 'a host linked to a user');
+        } else {
+            $this->assertTrue($ins(-4, 'host', 1), 'the fallback leaves live_user_id to PrincipalModel::assertIdentity');
+        }
+    }
+
+    // The part of the identity rule a MySQL-family CHECK may not carry, enforced in code on every driver: every
+    // principal insert and kind change goes through PrincipalModel::assertIdentity. Kills: one direction of the ⇔ (or
+    // the live_user_id half) missing from the guard; an insert or kind change in Model/ that skips it.
+    public function testPrincipalIdentityGuardInCode(): void
+    {
+        $guard = static function (string $kind, int $id, ?int $live): bool {
+            try {
+                \Kanboard\Plugin\Vault\Model\PrincipalModel::assertIdentity($kind, $id, $live);
+                return true;
+            } catch (\LogicException) {
+                return false;
+            }
+        };
+        $this->assertTrue($guard('server', -1, null));
+        $this->assertTrue($guard('host', -2, null));
+        $this->assertTrue($guard('human', 2, 2));
+        $this->assertTrue($guard('agent', 3, null), 'a deleted user keeps its principal with live_user_id NULL');
+        foreach ([['host', -4, 1], ['server', 5, null], ['human', -2, null], ['agent', -3, null], ['server', -1, 1]] as [$kind, $id, $live]) {
+            $this->assertFalse($guard($kind, $id, $live), "$kind $id ".var_export($live, true));
+        }
+        foreach (glob(__DIR__.'/../Model/*.php') as $file) {
+            $src = file_get_contents($file);
+            $writes = preg_match_all("/insert\\('vault_principals'|UPDATE vault_principals SET kind\\b/", $src);
+            $this->assertGreaterThanOrEqual($writes, substr_count($src, 'PrincipalModel::assertIdentity(') + substr_count($src, 'self::assertIdentity('), basename($file));
+        }
+    }
+
+    // Kills: a Server grant without its columns; a group, edit or expiring grant to a negative principal; Server
+    // columns on a human grant. R1: a MACed custom field name (c: + base32) is a valid fields value. On the MySQL family
+    // the grantee_id halves may be refused (MySQL 3823); the catalogue says which CHECKs are in place.
+    public function testVersion5ServerGrantChecks(): void
+    {
+        $this->migrate();
+        $db = $this->container['db'];
+        $pdo = $db->getConnection();
+        $db->table('vault_principals')->insert(self::ROWS['vault_principals']);
+        $db->table('vault_principals')->insert(['user_id' => -1, 'kind' => 'server', 'live_user_id' => null] + self::ROWS['vault_principals']);
+        $server = ['grantee_id' => -1, 'subject_type' => 'entry', 'permission' => 'read', 'consumers' => '["CveHunter"]',
+            'fields' => '["password","c:ABCDEFGHIJKLMNOPQRSTUVWXYZ"]', 'rate_per_hour' => 60, 'rate_burst' => 10] + self::ROWS['vault_grants'];
+        $this->assertTrue($db->table('vault_grants')->insert($server));
+        $this->assertRefused(fn () => $db->table('vault_grants')->insert(array_merge($server, ['subject_id' => 100, 'consumers' => null])), 'consumers null');
+        $negative = self::checkForm($pdo, 'vault_grants', 'vault_grants_negative_chk', 'grantee_id');
+        $this->assertContains($negative, ['full', 'absent']);
+        foreach ([['subject_type' => 'group', 'subject_id' => 9], ['permission' => 'edit', 'subject_id' => 8], ['expires_at' => 99, 'subject_id' => 7]] as $i => $bad) {
+            $call = fn () => $db->table('vault_grants')->insert(array_merge($server, ['subject_id' => 101 + $i], $bad));
+            if ($negative === 'full') {
+                $this->assertRefused($call, json_encode($bad));
+            } else {
+                $this->assertNotFalse(@$call(), 'no negative CHECK: Vault code refuses '.json_encode($bad));
+            }
+        }
+        $human = fn () => $db->table('vault_grants')->insert(['grantee_id' => 1, 'consumers' => '["x"]', 'fields' => '["password"]',
+            'rate_per_hour' => 1, 'rate_burst' => 1] + self::ROWS['vault_grants']);
+        $form = self::checkForm($pdo, 'vault_grants', 'vault_grants_server_chk', 'grantee_id');
+        $this->assertContains($form, ['full', 'fallback']);
+        if ($form === 'full') {
+            $this->assertRefused($human, 'Server columns on a human grant');
+        } else {
+            $this->assertNotFalse(@$human(), 'the fallback leaves the grantee half to Vault code');
+        }
+    }
+
+    // Kills: owner FKs still on users (the user delete would take the objects); no cascade off the principal.
+    public function testVersion5ObjectsFollowTheOwnerPrincipalNotTheUser(): void
+    {
+        $this->migrate();
+        $this->users('owner'); // id 2
+        $db = $this->container['db'];
+        $db->table('vault_principals')->insert(['user_id' => 2, 'live_user_id' => 2] + self::ROWS['vault_principals']);
+        $db->table('vault_groups')->insert(['owner_id' => 2] + self::ROWS['vault_groups']);
+        $db->table('vault_entries')->insert(['owner_id' => 2, 'created_by' => 2] + self::ROWS['vault_entries']);
+        $this->assertTrue($this->container['userModel']->remove(2));
+        $this->assertSame(1, $db->table('vault_entries')->eq('owner_id', 2)->count(), 'the user delete cascades nothing');
+        $this->assertSame(1, $db->table('vault_groups')->eq('owner_id', 2)->count());
+        $this->assertTrue($db->table('vault_principals')->eq('user_id', 2)->remove());
+        $this->assertSame(0, $db->table('vault_entries')->count());
+        $this->assertSame(0, $db->table('vault_groups')->count());
+    }
+
+    // Kills: 'server' actor refused; a new column missing; the meta CHECK missing. R1: the sealed field-MAC key column
+    // exists and a MACed field name fits field_name.
+    public function testVersion5AuditAndMetaColumns(): void
+    {
+        $this->migrate();
+        $pdo = $this->container['db']->getConnection();
+        $pdo->exec("INSERT INTO vault_audit (created_at, actor_kind, action, via, field_name) VALUES (1, 'server', 'server_read', 'cli', 'c:ABCDEFGHIJKLMNOPQRSTUVWXYZ')");
+        foreach (['consumer', 'field_name', 'entry_version', 'job_ref', 'correlation_id', 'reason', 'consumers', 'fields', 'old_owner_id', 'new_owner_id', 'key_epoch'] as $c) {
+            $this->assertContains($c, vault_test_columns($pdo, 'vault_audit'), $c);
+        }
+        foreach (['server_provider', 'server_wrap_id', 'server_wrap_nonce', 'server_wrapped_sk', 'server_field_mac_sealed'] as $c) {
+            $this->assertContains($c, vault_test_columns($pdo, 'vault_meta'), $c);
+        }
+        $this->assertSame(0, (int) $pdo->query('SELECT server_wrap_id FROM vault_meta WHERE id = 1')->fetchColumn());
+        $pdo->exec("UPDATE vault_meta SET server_provider = 'file' WHERE id = 1");
+        $this->assertRefused(fn () => $pdo->exec("UPDATE vault_meta SET server_provider = 'bogus' WHERE id = 1"), 'provider');
+        $this->assertRefused(fn () => $pdo->exec("INSERT INTO vault_audit (created_at, actor_kind, action, via) VALUES (1, 'robot', 'x', 'ui')"), 'robot');
+    }
+
+    // Passes when the database refused the call: a PDOException or PicoDb's SQLException (Postgres), or PicoDb's false
+    // (SQLite and MySQL; see testVaultMetaHasSingletonRow).
+    private function assertRefused(callable $call, string $message): void
+    {
+        try {
+            $result = @$call();
+        } catch (\PDOException | \PicoDb\SQLException) {
+            $result = false;
+        }
+        $this->assertFalse($result, "refused: $message");
+    }
+
+    // Which form of a v5 CHECK the database holds: 'full' when its clause mentions $column, 'fallback' when it is
+    // there without it, 'absent' when it isn't there. SQLite and Postgres always hold the full form (no fallback
+    // exists for them); the MySQL family is read from the catalogue. MySQL's CHECK_CONSTRAINTS has no TABLE_NAME
+    // (MariaDB's has), so the table comes from TABLE_CONSTRAINTS.
+    private static function checkForm(\PDO $pdo, string $table, string $name, string $column): string
+    {
+        if ($pdo->getAttribute(\PDO::ATTR_DRIVER_NAME) !== 'mysql') {
+            return 'full';
+        }
+        $st = $pdo->prepare("SELECT cc.CHECK_CLAUSE FROM information_schema.CHECK_CONSTRAINTS cc
+            JOIN information_schema.TABLE_CONSTRAINTS tc ON tc.CONSTRAINT_SCHEMA = cc.CONSTRAINT_SCHEMA
+              AND tc.CONSTRAINT_NAME = cc.CONSTRAINT_NAME AND tc.CONSTRAINT_TYPE = 'CHECK'
+            WHERE cc.CONSTRAINT_SCHEMA = DATABASE() AND LOWER(tc.TABLE_NAME) = ? AND cc.CONSTRAINT_NAME = ?");
+        $st->execute([$table, $name]);
+        $clause = $st->fetchColumn();
+        if ($clause === false) {
+            return 'absent';
+        }
+        return str_contains((string) $clause, $column) ? 'full' : 'fallback';
     }
 }

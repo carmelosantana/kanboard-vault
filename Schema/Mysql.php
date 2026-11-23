@@ -1,7 +1,7 @@
 <?php
 namespace Kanboard\Plugin\Vault\Schema;
 
-const VERSION = 4;
+const VERSION = 5;
 
 // Binary values are base64 TEXT (entry and group ciphertext LONGTEXT); timestamps are Unix seconds.
 // Ownership references to users(id) cascade; provenance columns (created_by, granted_by, audit actor/target) are SET NULL.
@@ -253,29 +253,32 @@ function version_2($pdo)
 // error, rather than leaving the column unchecked.
 function version_3($pdo)
 {
-    $old = function () use ($pdo): array {
-        $stmt = $pdo->prepare("SELECT CONSTRAINT_NAME FROM information_schema.CHECK_CONSTRAINTS
-            WHERE CONSTRAINT_SCHEMA = DATABASE() AND CHECK_CLAUSE LIKE '%actor_kind%' AND CHECK_CLAUSE LIKE '%human%'
-              AND CHECK_CLAUSE NOT LIKE '%system%'");
-        $stmt->execute();
-        return $stmt->fetchAll(\PDO::FETCH_COLUMN);
-    };
-    $hasNew = constraint_exists($pdo, 'vault_audit', 'vault_audit_actor_kind_chk');
-    if (! $hasNew && $old() === []) {
-        throw new \PDOException('Vault schema v3: the actor_kind CHECK on vault_audit was not found');
-    }
-    add_constraint($pdo, 'vault_audit', 'vault_audit_actor_kind_chk', "CHECK (actor_kind IN ('human', 'agent', 'public', 'cli', 'system'))");
-    if ($old() !== []) {
-        $pdo->exec('ALTER TABLE vault_audit MODIFY actor_kind VARCHAR(16) NOT NULL');
-        foreach ($old() as $name) {
-            $pdo->exec('ALTER TABLE vault_audit DROP CONSTRAINT `'.str_replace('`', '', (string) $name).'`');
+    // v5 replaces this CHECK with vault_audit_actor_kind_chk5; a re-run after v5 leaves it alone.
+    if (! constraint_exists($pdo, 'vault_audit', 'vault_audit_actor_kind_chk5')) {
+        $old = function () use ($pdo): array {
+            $stmt = $pdo->prepare("SELECT CONSTRAINT_NAME FROM information_schema.CHECK_CONSTRAINTS
+                WHERE CONSTRAINT_SCHEMA = DATABASE() AND CHECK_CLAUSE LIKE '%actor_kind%' AND CHECK_CLAUSE LIKE '%human%'
+                  AND CHECK_CLAUSE NOT LIKE '%system%'");
+            $stmt->execute();
+            return $stmt->fetchAll(\PDO::FETCH_COLUMN);
+        };
+        $hasNew = constraint_exists($pdo, 'vault_audit', 'vault_audit_actor_kind_chk');
+        if (! $hasNew && $old() === []) {
+            throw new \PDOException('Vault schema v3: the actor_kind CHECK on vault_audit was not found');
         }
+        add_constraint($pdo, 'vault_audit', 'vault_audit_actor_kind_chk', "CHECK (actor_kind IN ('human', 'agent', 'public', 'cli', 'system'))");
         if ($old() !== []) {
-            throw new \PDOException('Vault schema v3: the old actor_kind CHECK on vault_audit could not be dropped');
+            $pdo->exec('ALTER TABLE vault_audit MODIFY actor_kind VARCHAR(16) NOT NULL');
+            foreach ($old() as $name) {
+                $pdo->exec('ALTER TABLE vault_audit DROP CONSTRAINT `'.str_replace('`', '', (string) $name).'`');
+            }
+            if ($old() !== []) {
+                throw new \PDOException('Vault schema v3: the old actor_kind CHECK on vault_audit could not be dropped');
+            }
         }
-    }
-    if (! constraint_exists($pdo, 'vault_audit', 'vault_audit_actor_kind_chk')) {
-        throw new \PDOException('Vault schema v3: the actor_kind CHECK on vault_audit is missing');
+        if (! constraint_exists($pdo, 'vault_audit', 'vault_audit_actor_kind_chk')) {
+            throw new \PDOException('Vault schema v3: the actor_kind CHECK on vault_audit is missing');
+        }
     }
 
     add_column($pdo, 'vault_rotations', 'sweep_type', 'VARCHAR(16) NULL');
@@ -290,6 +293,71 @@ function version_4($pdo)
     add_column($pdo, 'vault_share_reservations', 'share_expires_at', 'BIGINT NOT NULL DEFAULT 0');
     add_column($pdo, 'vault_shares', 'crypto_v', 'INT NOT NULL DEFAULT 1');
     $pdo->exec('ALTER TABLE vault_shares MODIFY ciphertext MEDIUMTEXT NOT NULL');
+}
+
+// Server reader (P1); see Sqlite.php version_5 for the why. Every step checks before it alters, so a re-run after a
+// failure midway finishes the job (DDL commits on its own; see the resuming note above).
+// The kind, state and actor_kind lists follow version_3's pattern: the new, named list is added first, then the old one
+// (found by its clause) dropped, MODIFY for MariaDB's column-level CHECK and DROP CONSTRAINT for MySQL's named one.
+// A CHECK can't use a column that an FK's referential action uses: MySQL 8.0.16+ refuses live_user_id (SET NULL) and
+// grantee_id (CASCADE) with error 3823; MariaDB refuses live_user_id only, with error 1901 (it allows a CASCADE column,
+// which the action never writes). On such a refusal the identity and Server-grant CHECKs drop their live_user_id /
+// grantee_id halves, and the grantee_id-only negative CHECK is left out. Vault's code enforces the dropped parts
+// (PrincipalModel::assertIdentity for principals; Tasks 5-7 for Server grants), and the tests read which CHECK is in
+// place from the catalogue.
+function version_5($pdo)
+{
+    add_column($pdo, 'vault_meta', 'server_provider', 'VARCHAR(16) NULL');
+    add_column($pdo, 'vault_meta', 'server_wrap_id', 'INT NOT NULL DEFAULT 0');
+    add_column($pdo, 'vault_meta', 'server_wrap_nonce', 'TEXT NULL');
+    add_column($pdo, 'vault_meta', 'server_wrapped_sk', 'TEXT NULL');
+    add_column($pdo, 'vault_meta', 'server_field_mac_sealed', 'TEXT NULL');
+    add_constraint($pdo, 'vault_meta', 'vault_meta_server_provider_chk', "CHECK (server_provider IN ('file', 'migrating', 'joist'))");
+
+    replace_check($pdo, 'vault_principals', 'kind', 'VARCHAR(16) NOT NULL', 'vault_principals_kind_chk5',
+        "kind IN ('human', 'agent', 'server', 'host')", ['%human%'], '%server%');
+    replace_check($pdo, 'vault_principals', 'state', "VARCHAR(16) NOT NULL DEFAULT 'active'", 'vault_principals_state_chk5',
+        "state IN ('active', 'rotating', 'orphaned')", ['%rotating%'], '%orphaned%');
+    add_check_with_fallback($pdo, 'vault_principals', 'vault_principals_identity_chk',
+        "(kind IN ('server', 'host')) = (user_id < 0 AND live_user_id IS NULL)",
+        "(kind IN ('server', 'host')) = (user_id < 0)");
+
+    foreach (['vault_groups', 'vault_entries'] as $table) {
+        drop_user_fk($pdo, $table, 'owner_id');
+        add_constraint($pdo, $table, $table.'_owner_fk', 'FOREIGN KEY(owner_id) REFERENCES vault_principals(user_id) ON DELETE CASCADE');
+    }
+
+    add_column($pdo, 'vault_grants', 'consumers', 'TEXT NULL');
+    add_column($pdo, 'vault_grants', 'fields', 'TEXT NULL');
+    add_column($pdo, 'vault_grants', 'rate_per_hour', 'INT NULL');
+    add_column($pdo, 'vault_grants', 'rate_burst', 'INT NULL');
+    add_check_with_fallback($pdo, 'vault_grants', 'vault_grants_server_chk',
+        '(grantee_id = -1) = (consumers IS NOT NULL AND fields IS NOT NULL AND rate_per_hour IS NOT NULL AND rate_burst IS NOT NULL)',
+        '(consumers IS NULL) = (fields IS NULL)');
+    add_check_with_fallback($pdo, 'vault_grants', 'vault_grants_negative_chk',
+        "grantee_id >= 0 OR (subject_type = 'entry' AND permission = 'read' AND expires_at IS NULL)", null);
+
+    replace_check($pdo, 'vault_audit', 'actor_kind', 'VARCHAR(16) NOT NULL', 'vault_audit_actor_kind_chk5',
+        "actor_kind IN ('human', 'agent', 'public', 'cli', 'system', 'server')", ['%actor_kind%', '%human%'], '%server%');
+    add_column($pdo, 'vault_audit', 'consumer', 'VARCHAR(64) NULL');
+    add_column($pdo, 'vault_audit', 'field_name', 'VARCHAR(128) NULL');
+    add_column($pdo, 'vault_audit', 'entry_version', 'INT NULL');
+    add_column($pdo, 'vault_audit', 'job_ref', 'VARCHAR(64) NULL');
+    add_column($pdo, 'vault_audit', 'correlation_id', 'VARCHAR(64) NULL');
+    add_column($pdo, 'vault_audit', 'reason', 'VARCHAR(32) NULL');
+    add_column($pdo, 'vault_audit', 'consumers', 'TEXT NULL');
+    add_column($pdo, 'vault_audit', 'fields', 'TEXT NULL');
+    add_column($pdo, 'vault_audit', 'old_owner_id', 'INT NULL');
+    add_column($pdo, 'vault_audit', 'new_owner_id', 'INT NULL');
+    add_column($pdo, 'vault_audit', 'key_epoch', 'INT NULL');
+
+    // MySQL 8 has no CREATE INDEX IF NOT EXISTS.
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM information_schema.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE() AND LOWER(TABLE_NAME) = 'vault_audit' AND INDEX_NAME = 'vault_audit_object_idx'");
+    $stmt->execute();
+    if ((int) $stmt->fetchColumn() === 0) {
+        $pdo->exec('CREATE INDEX vault_audit_object_idx ON vault_audit(object_id)');
+    }
 }
 
 function column_exists($pdo, string $table, string $column): bool
@@ -323,6 +391,62 @@ function add_constraint($pdo, string $table, string $name, string $definition): 
     }
 }
 
+// The CHECKs on $table whose clause matches every $like pattern and not $notLike. MySQL's CHECK_CONSTRAINTS has no
+// TABLE_NAME (MariaDB's has), so the table comes from TABLE_CONSTRAINTS.
+function check_names($pdo, string $table, array $like, string $notLike): array
+{
+    $sql = "SELECT DISTINCT cc.CONSTRAINT_NAME FROM information_schema.CHECK_CONSTRAINTS cc
+        JOIN information_schema.TABLE_CONSTRAINTS tc ON tc.CONSTRAINT_SCHEMA = cc.CONSTRAINT_SCHEMA
+          AND tc.CONSTRAINT_NAME = cc.CONSTRAINT_NAME AND tc.CONSTRAINT_TYPE = 'CHECK'
+        WHERE cc.CONSTRAINT_SCHEMA = DATABASE() AND LOWER(tc.TABLE_NAME) = LOWER(?) AND cc.CHECK_CLAUSE NOT LIKE ?";
+    foreach ($like as $unused) {
+        $sql .= ' AND cc.CHECK_CLAUSE LIKE ?';
+    }
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute(array_merge([$table, $notLike], $like));
+    return $stmt->fetchAll(\PDO::FETCH_COLUMN);
+}
+
+// Replaces a CHECK list on $table.$column (see version_3): the new, named CHECK first, then the old list, found by its
+// clause, dropped. A run stopped at any point leaves at least one list in place; neither there is an error.
+function replace_check($pdo, string $table, string $column, string $columnDefinition, string $name, string $clause, array $oldLike, string $oldNotLike): void
+{
+    $old = fn (): array => check_names($pdo, $table, $oldLike, $oldNotLike);
+    if (! constraint_exists($pdo, $table, $name) && $old() === []) {
+        throw new \PDOException('Vault schema v5: the '.$column.' CHECK on '.$table.' was not found');
+    }
+    add_constraint($pdo, $table, $name, 'CHECK ('.$clause.')');
+    if ($old() !== []) {
+        $pdo->exec('ALTER TABLE '.$table.' MODIFY '.$column.' '.$columnDefinition);
+        foreach ($old() as $oldName) {
+            $pdo->exec('ALTER TABLE '.$table.' DROP CONSTRAINT `'.str_replace('`', '', (string) $oldName).'`');
+        }
+    }
+    if ($old() !== [] || ! constraint_exists($pdo, $table, $name)) {
+        throw new \PDOException('Vault schema v5: the '.$column.' CHECK on '.$table.' could not be replaced');
+    }
+}
+
+// Adds CHECK $full; when the server refuses it for using a column an FK's referential action uses (MySQL 3823,
+// MariaDB 1901), adds $fallback under the same name instead, or nothing when $fallback is null. Vault's code enforces
+// the rest.
+function add_check_with_fallback($pdo, string $table, string $name, string $full, ?string $fallback): void
+{
+    if (constraint_exists($pdo, $table, $name)) {
+        return;
+    }
+    try {
+        $pdo->exec('ALTER TABLE '.$table.' ADD CONSTRAINT '.$name.' CHECK ('.$full.')');
+    } catch (\PDOException $e) {
+        if (! in_array((int) ($e->errorInfo[1] ?? 0), [3823, 1901], true)) {
+            throw $e;
+        }
+        if ($fallback !== null) {
+            $pdo->exec('ALTER TABLE '.$table.' ADD CONSTRAINT '.$name.' CHECK ('.$fallback.')');
+        }
+    }
+}
+
 // The names of the FKs from $table.$column to users. Table names compare case-insensitively, so a server with
 // lower_case_table_names set either way finds them.
 function user_fks($pdo, string $table, string $column): array
@@ -345,6 +469,6 @@ function drop_user_fk($pdo, string $table, string $column): void
 function assert_no_user_fk($pdo, string $table, string $column): void
 {
     if (user_fks($pdo, $table, $column) !== []) {
-        throw new \PDOException('Vault schema v2: '.$table.'.'.$column.' still has a foreign key to users');
+        throw new \PDOException('Vault schema: '.$table.'.'.$column.' still has a foreign key to users');
     }
 }
