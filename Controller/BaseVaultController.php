@@ -225,6 +225,7 @@ abstract class BaseVaultController extends BaseController
         foreach (['sharing', 'grant', 'revoke', 'activity'] as $action) {
             $endpoints[$action] = $url($action, 'ShareGrantController');
         }
+        $endpoints['grant_server'] = $url('grantServer', 'ShareGrantController');
         $endpoints += ['passphrase' => $url('passphrase', 'SecurityController'), 'rotate' => $url('rotate', 'SecurityController'), 'recovery_code' => $url('recoveryCode', 'SecurityController')];
         foreach (['reserve', 'create', 'revoke', 'mine'] as $action) {
             $endpoints['share_'.$action] = $url($action, 'VaultShareController');

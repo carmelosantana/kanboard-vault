@@ -37,6 +37,12 @@ final class ServerGrant
         return is_string($f) && (in_array($f, self::TOP_LEVEL, true) || preg_match(self::MAC_PATTERN, $f) === 1);
     }
 
+    // A stored custom field name (R1): what a UI never shows. A top-level name is not one.
+    public static function isMac(mixed $f): bool
+    {
+        return is_string($f) && preg_match(self::MAC_PATTERN, $f) === 1;
+    }
+
     /** @return list<string> */
     public static function consumers(array $list): array
     {

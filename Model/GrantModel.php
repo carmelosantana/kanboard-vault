@@ -444,12 +444,32 @@ class GrantModel extends Base
         if ($ownerSk === null || array_diff($stored, ServerGrant::TOP_LEVEL) === []) {
             return $stored;
         }
+        $byMac = $this->macNames($this->entryFields($entryId, $ownerId, $ownerSk));
+        return array_map(static fn (string $f): string => $byMac[$f] ?? $f, $stored);
+    }
+
+    // R1, for the activity view: the entry's custom field names by their MAC, as $viewerId reads the entry with $sk
+    // now. Empty when the viewer can't read it (gone, no access) or the field-MAC key can't be opened (Server off).
+    // Called outside the vault lock: the key file is read first.
+    /** @return array<string,string> */
+    public function fieldNamesByMac(int $viewerId, int $entryId, #[\SensitiveParameter] string $sk): array
+    {
+        $this->warmKeyProvider();
+        try {
+            return $this->macNames($this->entryFields($entryId, $viewerId, $sk));
+        } catch (VaultException) {
+            return [];
+        }
+    }
+
+    /** @param list<array{name:string}> $entryFields @return array<string,string> */
+    private function macNames(#[\SensitiveParameter] array $entryFields): array
+    {
         $byMac = [];
-        $entryFields = $this->entryFields($entryId, $ownerId, $ownerSk);
         try {
             $key = $this->fieldMacKey();
         } catch (VaultException) {
-            return $stored;
+            return [];
         }
         try {
             foreach ($entryFields as $f) {
@@ -462,7 +482,7 @@ class GrantModel extends Base
         } finally {
             sodium_memzero($key);
         }
-        return array_map(static fn (string $f): string => $byMac[$f] ?? $f, $stored);
+        return $byMac;
     }
 
     /** @return list<array{name:string, value:string, protected:bool}> the entry's custom fields, read as its owner */

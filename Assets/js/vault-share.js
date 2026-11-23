@@ -6,7 +6,10 @@
  *   activity(offset)        loads one page of vault/activity into the activity view (offset 0 starts it again).
  * The share buttons vault-browser.js shows (owner only) carry data-vault-share-type/-id/-label. A grant on a group is
  * sent once to get the server's count, confirmed with that count, then sent again with confirm=1. An agent can only be
- * given Read. A revoke shows the suggestion to rotate the secrets. Only the latest dialog renders: an answer for a
+ * given Read. A revoke shows the suggestion to rotate the secrets. The Server section (spec amendment) shows only when
+ * vault/sharing answers server.available; it posts the consumers, the checked fields (fields[]), the custom field names
+ * and optional rates to vault/grant-server. A Server grant lists its consumers and fields; revoking it says to rotate
+ * the secret at its provider, since Server could have read it. Only the latest dialog renders: an answer for a
  * dialog that has since been closed or opened for another item is dropped. Everything reaches the DOM through
  * textContent, an input's value or setAttribute on a fixed attribute.
  */
@@ -83,6 +86,9 @@
     ui.rotate.hidden = true;
     ui.covered.hidden = true;
     ui.expires.value = '';
+    ui.server.hidden = true;
+    ui.serverRotate.hidden = true;
+    resetServer();
     ui.dialog.hidden = false;
     return refresh(mine);
   }
@@ -108,6 +114,7 @@
       }
       fillCandidates(res.candidates || []);
       fillGrants(res.grants || []);
+      ui.server.hidden = !(res.server && res.server.available === true);
       var n = res.covered_entries;
       ui.covered.hidden = target.type !== 'group' || typeof n !== 'number';
       ui.covered.textContent = ui.covered.hidden ? '' : dmsg('covered', n);
@@ -145,12 +152,24 @@
     ui.agentNote.hidden = !agent;
   }
 
-  function fillGrants(list) {
+  // A Server grant's field: its plain name, or a label for one the entry no longer has (the server never sends a MAC).
+  function fieldName(f) {
+    return f === null || f === undefined ? dmsg('field-hidden') : text(f);
+  }
+
+  function list(v) {
+    return Array.isArray(v) ? v : [];
+  }
+
+  function fillGrants(grants) {
     ui.grants.textContent = '';
-    list.forEach(function (g) {
+    grants.forEach(function (g) {
       var li = el('li', 'vault-share-grant');
-      var who = text(g.name) + (g.kind === 'agent' ? ' (' + dmsg('agent') + ')' : '');
-      var what = dmsg(g.permission === 'edit' ? 'edit' : 'read') + (g.expires_at ? ' ' + dmsg('until') + ' ' + when(g.expires_at) : '');
+      var server = g.kind === 'server';
+      var who = server ? dmsg('server') : text(g.name) + (g.kind === 'agent' ? ' (' + dmsg('agent') + ')' : '');
+      var what = server
+        ? [list(g.consumers).map(text).join(', '), list(g.fields).map(fieldName).join(', '), dmsg('per-hour', g.rate_per_hour)].join(' · ')
+        : dmsg(g.permission === 'edit' ? 'edit' : 'read') + (g.expires_at ? ' ' + dmsg('until') + ' ' + when(g.expires_at) : '');
       li.appendChild(el('span', 'vault-share-who', who));
       li.appendChild(el('span', 'vault-muted', ' ' + what + ' '));
       var b = el('button', 'btn btn-small btn-red', dmsg('revoke'));
@@ -162,7 +181,7 @@
       li.appendChild(b);
       ui.grants.appendChild(li);
     });
-    ui.none.hidden = list.length > 0;
+    ui.none.hidden = grants.length > 0;
   }
 
   // The expiry input is local time ("2030-01-02T03:04"); the server takes a Unix time, or '' for none.
@@ -210,6 +229,51 @@
     }, done);
   }
 
+  // ---- Sharing with Server -------------------------------------------------------------------------------------
+
+  function resetServer() {
+    ui.consumers.value = '';
+    ui.custom.value = '';
+    ui.rate.value = '';
+    ui.burst.value = '';
+    ui.serverFields.forEach(function (c) {
+      c.checked = false;
+    });
+  }
+
+  function submitServer(ev) {
+    ev.preventDefault();
+    if (!ui.target || ui.busy) {
+      return;
+    }
+    var mine = ui.session;
+    var body = {
+      id: ui.target.id,
+      consumers: text(ui.consumers.value),
+      'fields[]': ui.serverFields.filter(function (c) {
+        return c.checked;
+      }).map(function (c) {
+        return text(c.value);
+      }),
+      custom_fields: text(ui.custom.value)
+    };
+    if (text(ui.rate.value) !== '') {
+      body.rate_per_hour = text(ui.rate.value);
+    }
+    if (text(ui.burst.value) !== '') {
+      body.rate_burst = text(ui.burst.value);
+    }
+    ui.busy = true;
+    ui.serverRotate.hidden = true;
+    var done = function () {
+      ui.busy = false;
+    };
+    kb().api('grant_server', body).then(function (res) {
+      granted(mine, res);
+      done();
+    }, done);
+  }
+
   function granted(mine, res) {
     if (!current(mine)) {
       return;
@@ -223,7 +287,8 @@
   }
 
   function revoke(granteeId) {
-    if (!ui.target || !win.confirm(dmsg('confirm-revoke'))) {
+    var server = granteeId === '-1';
+    if (!ui.target || !win.confirm(dmsg(server ? 'confirm-revoke-server' : 'confirm-revoke'))) {
       return;
     }
     var mine = ui.session;
@@ -235,7 +300,9 @@
         return failure(res, ui.status);
       }
       ui.status.textContent = '';
-      ui.rotate.hidden = !res.suggest_rotate;
+      // Spec amendment: Server could have read the secret, so the owner rotates it at its provider.
+      ui.rotate.hidden = server || !res.suggest_rotate;
+      ui.serverRotate.hidden = !server || !res.suggest_rotate;
       refresh(mine);
     });
   }
@@ -266,6 +333,12 @@
   function addActivityRow(r) {
     var tr = el('tr', 'vault-row');
     var who = r.actor !== null && r.actor !== undefined ? text(r.actor) : text(r.actor_kind);
+    if (r.actor_kind === 'server') {
+      // Spec amendment, Audit: Server · <consumer> · <field>.
+      who = [dmsg('server')].concat([r.consumer, r.field_name].filter(function (x) {
+        return x !== null && x !== undefined && x !== '';
+      }).map(text)).join(' · ');
+    }
     var item = r.object_type ? (r.title !== null && r.title !== undefined && r.title !== '' ? text(r.title) : text(r.object_type) + ' #' + text(r.object_id)) : '';
     var details = [];
     if (r.target !== null && r.target !== undefined && r.target !== '') {
@@ -273,6 +346,12 @@
     }
     if (r.count !== null && r.count !== undefined) {
       details.push('× ' + text(r.count));
+    }
+    if (r.entry_version !== null && r.entry_version !== undefined) {
+      details.push('v' + text(r.entry_version));
+    }
+    if (r.reason) {
+      details.push(text(r.reason));
     }
     if (r.ip_trunc) {
       details.push(text(r.ip_trunc));
@@ -311,6 +390,14 @@
       rotate: q('[data-vault-share-rotate]', dialog),
       grants: q('[data-vault-share-grants]', dialog),
       none: q('[data-vault-share-none]', dialog),
+      server: q('[data-vault-share-server]', dialog),
+      serverForm: q('[data-vault-form="share-server"]', dialog),
+      consumers: q('[data-vault-server-consumers]', dialog),
+      serverFields: Array.prototype.slice.call(dialog.querySelectorAll('[data-vault-server-field]')),
+      custom: q('[data-vault-server-custom]', dialog),
+      rate: q('[data-vault-server-rate]', dialog),
+      burst: q('[data-vault-server-burst]', dialog),
+      serverRotate: q('[data-vault-share-server-rotate]', dialog),
       activity: q('[data-vault-activity]'),
       activityRows: q('[data-vault-activity-rows]'),
       activityEmpty: q('[data-vault-activity-empty]'),
@@ -333,6 +420,7 @@
     });
     q('[data-vault-action="share-close"]', dialog).addEventListener('click', close);
     ui.form.addEventListener('submit', submit);
+    ui.serverForm.addEventListener('submit', submitServer);
     ui.grantee.addEventListener('change', agentRule);
     var link = q('[data-vault-action="activity"]');
     if (link && ui.activity) {

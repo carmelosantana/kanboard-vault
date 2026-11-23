@@ -1,6 +1,6 @@
 <?php
 require_once 'tests/units/Base.php';
-require_once __DIR__.'/Support/ServiceFixture.php';
+require_once __DIR__.'/Support/ServerFixture.php';
 require_once __DIR__.'/Support/VaultTestResponse.php';
 
 use Kanboard\Core\Http\Request;
@@ -9,6 +9,8 @@ use Kanboard\Plugin\Vault\Controller\ShareGrantController;
 use Kanboard\Plugin\Vault\Controller\VaultController;
 use Kanboard\Plugin\Vault\Model\AuditModel;
 use Kanboard\Plugin\Vault\Model\Housekeeping;
+use Kanboard\Plugin\Vault\Model\ServerGrant;
+use Kanboard\Plugin\Vault\Model\ServerPrincipal;
 use Kanboard\Plugin\Vault\Plugin;
 use Kanboard\Plugin\Vault\Test\Support\Fixtures;
 use KanboardTests\units\Base;
@@ -30,11 +32,10 @@ class VaultShareSpyHousekeeping extends Housekeeping
 // sees what. Alice, Bob and Carol share Kanboard project "Ops"; Dave is in no project of theirs.
 class ShareGrantControllerTest extends Base
 {
-    use ServiceFixture;
+    use ServerFixture;
 
-    private int $carol;
-    private int $dave;
     private int $project;
+    private bool $serverUp = false;
     private VaultShareSpyHousekeeping $hk;
 
     protected function setUp(): void
@@ -62,6 +63,9 @@ class ShareGrantControllerTest extends Base
 
     protected function tearDown(): void
     {
+        if ($this->serverUp) {
+            $this->tearDownServer();
+        }
         $this->tearDownVault();
         parent::tearDown();
     }
@@ -402,9 +406,151 @@ class ShareGrantControllerTest extends Base
         $this->assertSame(1, $xp->query('//section[@data-vault-activity]//tbody[@data-vault-activity-rows]')->length);
         $this->assertSame(1, $xp->query('//button[@data-vault-action="activity"]')->length);
         $endpoints = json_decode($xp->query('//*[@id="vault-app"]')->item(0)->getAttribute('data-endpoints'), true);
-        foreach (['sharing', 'grant', 'revoke', 'activity'] as $a) {
+        foreach (['sharing', 'grant', 'revoke', 'activity', 'grant_server'] as $a) {
             $this->assertArrayHasKey($a, $endpoints);
         }
+        // The Server section: its own form, posted natively with the token; one checkbox per top-level key.
+        $server = $xp->query('//section[@data-vault-share]//section[@data-vault-share-server]//form[@data-vault-form="share-server"]')->item(0);
+        $this->assertNotNull($server);
+        $this->assertSame('post', strtolower($server->getAttribute('method')));
+        $this->assertStringContainsString('grantServer', $server->getAttribute('action'));
+        $this->assertSame(1, $xp->query('.//input[@type="hidden"][@name="csrf_token"][@value!=""]', $server)->length);
+        $boxes = array_map(fn ($n) => $n->getAttribute('value'), iterator_to_array($xp->query('.//input[@type="checkbox"][@name="fields[]"]', $server)));
+        $this->assertSame(ServerGrant::TOP_LEVEL, $boxes);
+    }
+
+    // Server on, and alice's entry (the fixture entry has the custom field 'api key').
+    private function serverOn(): int
+    {
+        $this->setUpServer();
+        $this->serverUp = true;
+        $this->enableServer();
+        return $this->entry($this->group());
+    }
+
+    private function serverGrantRow(int $entryId): ?array
+    {
+        return $this->row('SELECT consumers, fields, rate_per_hour, rate_burst, permission, expires_at FROM vault_grants WHERE subject_type = ? AND subject_id = ? AND grantee_id = ?', ['entry', $entryId, ServerPrincipal::ID]);
+    }
+
+    private function fieldMac(string $name): string
+    {
+        return ServerGrant::macField($this->freshProvider()->openFieldMacKey(), $name);
+    }
+
+    // Spec amendment, The sharing dialog: the owner shares an entry with Server for named consumers and fields. The
+    // consumers come comma- or newline-separated, the fields from the checkboxes (fields[]) and a comma-separated list
+    // of custom field names. The sharing view lists the Server grant with its consumers, the plain field names (R1:
+    // never the stored MAC) and the rates, and offers Server only for an entry while Server is on.
+    // Kills: the consumers not split on commas and newlines; custom_fields ignored; the rate not passed; no afterWrite;
+    // the sharing view reading expires_at off a Server row; a MAC shown; server.available true for a group.
+    public function testOwnerSharesAnEntryWithServer(): void
+    {
+        $e = $this->serverOn();
+        $g = $this->group(null, 'Other');
+        $this->unlock($this->alice, Fixtures::PASSPHRASE);
+        $before = $this->post('sharing', ['type' => 'entry', 'id' => $e])->json_();
+        $this->assertSame(['available' => true], $before['server']);
+        $this->assertSame(['available' => false], $this->post('sharing', ['type' => 'group', 'id' => $g])->json_()['server'], 'Server grants are entry only');
+
+        $r = $this->post('grantServer', ['id' => $e, 'consumers' => "CveHunter, Lifeboat\nAudit_Bot", 'fields' => ['password'], 'custom_fields' => ' api key ', 'rate_per_hour' => '30']);
+        $this->assertSame(['ok' => true], $r->json_());
+        $mac = $this->fieldMac('api key');
+        $this->assertSame([
+            'consumers' => '["Audit_Bot","CveHunter","Lifeboat"]',
+            'fields' => json_encode([$mac, 'password']),
+            'rate_per_hour' => 30, 'rate_burst' => ServerGrant::DEFAULT_BURST, 'permission' => 'read', 'expires_at' => null,
+        ], array_map(fn ($v) => is_numeric($v) ? (int) $v : $v, $this->serverGrantRow($e)));
+        $this->assertSame([$this->alice], $this->hk->writes, 'the grant is a write');
+
+        $view = $this->post('sharing', ['type' => 'entry', 'id' => $e]);
+        $this->assertSame([[
+            'grantee_id' => ServerPrincipal::ID, 'name' => 'Server', 'kind' => 'server', 'permission' => 'read',
+            'consumers' => ['Audit_Bot', 'CveHunter', 'Lifeboat'], 'fields' => ['api key', 'password'],
+            'rate_per_hour' => 30, 'rate_burst' => ServerGrant::DEFAULT_BURST,
+        ]], $view->json_()['grants']);
+        $this->assertStringNotContainsString($mac, $view->body, 'the stored MAC never reaches the owner');
+        $this->assertNoSecretIn($view->body);
+
+        // The custom field is renamed: its MAC matches no field any more, so it shows as an unknown field, never a MAC.
+        $payload = $this->store()->readEntry($this->alice, $e, $this->aliceSk());
+        $p = $payload['payload'];
+        $p['fields'][0]['name'] = 'renamed key';
+        $this->store()->updateEntry($this->alice, $e, (int) $payload['version'], $p, $this->aliceSk());
+        $view = $this->post('sharing', ['type' => 'entry', 'id' => $e]);
+        $this->assertSame([null, 'password'], $view->json_()['grants'][0]['fields']);
+        $this->assertStringNotContainsString($mac, $view->body);
+    }
+
+    // The grant-server endpoint is a POST with the CSRF token from an unlocked session, takes an entry id only, needs
+    // Server on and is the owner's. Refusals are the usual JSON and grant nothing.
+    // Kills: no CSRF or lock check; a group accepted; server_off lost; a non-owner granting.
+    public function testGrantServerRefusals(): void
+    {
+        $e = $this->serverOn();
+        $g = $this->group(null, 'G');
+        $body = ['id' => $e, 'consumers' => 'CveHunter', 'fields' => ['password']];
+        $this->sid = 'php-session-locked';
+        $this->assertFailure($this->post('grantServer', $body), 401, 'locked', 'locked');
+        $this->unlock($this->alice, Fixtures::PASSPHRASE);
+        $this->assertFailure($this->call(ShareGrantController::class, 'grantServer', 'POST', $body), 403, 'forbidden', 'without token');
+        $this->assertFailure($this->call(ShareGrantController::class, 'grantServer', 'GET', $body + ['csrf_token' => $this->token()]), 403, 'forbidden', 'GET');
+        $this->assertFailure($this->post('grantServer', ['type' => 'group', 'id' => $g] + $body), 404, 'not_found', 'a group');
+        $this->assertFailure($this->post('grantServer', ['consumers' => 'not valid!'] + $body), 400, 'payload_invalid', 'a bad consumer');
+        $this->assertFailure($this->post('grantServer', ['fields' => 'password'] + $body), 400, 'payload_invalid', 'fields not a list');
+        $this->assertFailure($this->post('grantServer', ['fields' => [], 'custom_fields' => 'no such field'] + $body), 400, 'payload_invalid', 'a custom field the entry lacks');
+        $this->assertFailure($this->post('grantServer', ['rate_per_hour' => 'lots'] + $body), 400, 'payload_invalid', 'a bad rate');
+        $this->assertNull($this->serverGrantRow($e));
+
+        $this->grants()->grant($this->alice, 'entry', $e, $this->bob, 'edit', null, $this->aliceSk());
+        $this->unlock($this->bob, Fixtures::BOB_PASSPHRASE);
+        $this->assertFailure($this->post('grantServer', $body), 404, 'not_found', 'an edit grantee');
+        $this->assertNull($this->serverGrantRow($e));
+
+        $this->server()->disable(self::ADMIN);
+        $this->unlock($this->alice, Fixtures::PASSPHRASE);
+        $this->assertFailure($this->post('grantServer', $body), 409, 'server_off', 'Server off');
+        $this->assertSame(['available' => false], $this->post('sharing', ['type' => 'entry', 'id' => $e])->json_()['server'], 'not offered while off');
+        $this->assertNull($this->serverGrantRow($e));
+    }
+
+    // Spec amendment: revoking the Server grant removes it and the UI says to rotate the secret at its provider (Server
+    // could have read it). Revoke needs no directory check for -1. Kills: revoke of -1 refused; no suggest_rotate.
+    public function testServerRevokeSuggestsRotation(): void
+    {
+        $e = $this->serverOn();
+        $this->grants()->grantServer($this->alice, $e, ['CveHunter'], ['password'], null, null, $this->aliceSk());
+        $this->unlock($this->alice, Fixtures::PASSPHRASE);
+        $r = $this->post('revoke', ['type' => 'entry', 'id' => $e, 'grantee_id' => '-1']);
+        $this->assertSame(['ok' => true, 'suggest_rotate' => true], $r->json_());
+        $this->assertNull($this->serverGrantRow($e));
+        $this->assertCount(1, $this->auditRows('server_revoke'));
+        $this->assertSame([], $this->post('sharing', ['type' => 'entry', 'id' => $e])->json_()['grants']);
+    }
+
+    // Spec amendment, Audit: the owner's activity view shows Server's reads and refusals of her entry with the consumer,
+    // the field (its plain name, R1: never the MAC), the entry version and the reason.
+    // Kills: the new columns missing from the answer; a MAC shown; another user seeing the rows.
+    public function testActivityShowsServerReads(): void
+    {
+        $e = $this->serverOn();
+        $mac = $this->fieldMac('api key');
+        $audit = AuditModel::of($this->container);
+        $audit->record('server_read', ['actor_kind' => 'server', 'via' => 'api', 'object_type' => 'entry', 'object_id' => $e, 'consumer' => 'CveHunter', 'field_name' => $mac, 'entry_version' => 1]);
+        $audit->record('server_read_denied', ['actor_kind' => 'server', 'via' => 'api', 'object_type' => 'entry', 'object_id' => $e, 'consumer' => 'Lifeboat', 'field_name' => 'password', 'reason' => 'consumer_not_allowed']);
+        $this->unlock($this->alice, Fixtures::PASSPHRASE);
+        $r = $this->post('activity', ['offset' => 0]);
+        $rows = array_values(array_filter($r->json_()['rows'], fn (array $x): bool => str_starts_with($x['action'], 'server_read')));
+        $pick = fn (array $x): array => [$x['action'], $x['actor_kind'], $x['consumer'], $x['field_name'], $x['entry_version'], $x['reason'], $x['title']];
+        $this->assertSame([
+            ['server_read_denied', 'server', 'Lifeboat', 'password', null, 'consumer_not_allowed', 'Postgres'],
+            ['server_read', 'server', 'CveHunter', 'api key', 1, null, 'Postgres'],
+        ], array_map($pick, $rows));
+        $this->assertStringNotContainsString($mac, $r->body);
+        $this->assertNoSecretIn($r->body);
+
+        $this->unlock($this->bob, Fixtures::BOB_PASSPHRASE);
+        $this->assertSame([], array_values(array_filter($this->post('activity', ['offset' => 0])->json_()['rows'], fn (array $x): bool => str_starts_with($x['action'], 'server_'))));
     }
 
     private function assertNoSecretIn(string $body): void

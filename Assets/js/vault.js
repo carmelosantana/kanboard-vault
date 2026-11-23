@@ -46,6 +46,13 @@
     var params = new win.URLSearchParams();
     Object.keys(body || {}).forEach(function (k) {
       var v = body[k];
+      // A form list (fields[]=a&fields[]=b), as a native form posts checkboxes; any other object goes as JSON.
+      if (Array.isArray(v) && /\[\]$/.test(k)) {
+        v.forEach(function (x) {
+          params.append(k, String(x));
+        });
+        return;
+      }
       params.append(k, v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v));
     });
     params.set('csrf_token', cfg.csrf);

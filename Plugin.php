@@ -77,6 +77,7 @@ class Plugin extends Base
         foreach (['sharing', 'grant', 'revoke', 'activity'] as $action) {
             $this->route->addRoute('vault/'.$action, 'ShareGrantController', $action, 'Vault');
         }
+        $this->route->addRoute('vault/grant-server', 'ShareGrantController', 'grantServer', 'Vault');
         // KeePassXC import (spec: KeePassXC import and export → Import): the page, then start and batch.
         $this->route->addRoute('vault/import', 'ImportController', 'index', 'Vault');
         $this->route->addRoute('vault/import/start', 'ImportController', 'start', 'Vault');
