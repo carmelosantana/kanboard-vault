@@ -239,7 +239,7 @@ class UnlockService extends Base
             [$userId, 1]
         );
         // T14: an agent never unlocks as a human, not even with a human principal left from before its adoption (agent
-        // enrolment converts that one).
+        // enrolment converts that one). Only kind human unlocks: Server and host never do (security requirement 7).
         if ($principal === null || $principal['kind'] !== 'human' || AgentRoster::of($this->container)->isAgent($userId)) {
             return null;
         }

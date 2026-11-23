@@ -30,9 +30,15 @@ use ValueError;
 // next key only, so a re-keyed object never again holds an old-generation row. Either secret key is accepted as
 // the principal's: sk1 opens old-generation rows, and sk2 opens new-generation rows directly and old-generation
 // rows through the bridge (sk1 under a key derived from sk2), with both keys checked against their public keys.
+//
+// Server (and, later, host) principals are seal targets only (spec amendment: security requirement 7): principal()
+// admits a Server principal so DEKs are sealed to it and every re-key re-seals to it while its grant lives, but only
+// HOLDER_KINDS hold a key here: holder(), currentPrincipal() and holderKeypairs() refuse every other kind, so Server
+// never opens a DEK, re-keys or drains the queue through this class.
 class Rekeyer extends Base
 {
     public const MAX_DRAIN = 500;
+    private const HOLDER_KINDS = ['human', 'agent'];
 
     private Closure $clock;
 
@@ -264,10 +270,10 @@ class Rekeyer extends Base
 
     // The principal, provided $sk is its current secret key (pk(sk) equals the stored pk) or, while it is
     // rotating, the next key (pk(sk) equals the rotation's new_pk); otherwise null.
-    /** @return array{public_key:string,key_gen:int}|null  the stored (current) key */
+    /** @return array{public_key:string,key_gen:int,kind:string}|null  the stored (current) key */
     public function currentPrincipal(VaultDb $db, int $userId, #[\SensitiveParameter] string $sk): ?array
     {
-        $principal = $this->principal($db, $userId);
+        $principal = $this->holder($db, $userId);
         if ($principal === null) {
             return null;
         }
@@ -318,7 +324,7 @@ class Rekeyer extends Base
     /** @return array<int,string> */
     private function holderKeypairs(VaultDb $db, int $userId, #[\SensitiveParameter] string $sk): array
     {
-        $principal = $this->principal($db, $userId);
+        $principal = $this->holder($db, $userId);
         if ($principal === null) {
             return [];
         }
@@ -357,11 +363,15 @@ class Rekeyer extends Base
     }
 
     // A principal whose Kanboard user was deleted (live_user_id NULL, R26) counts as not enrolled, so nothing is
-    // ever sealed to it again; the purge (or the next write) sweeps it into re-keys.
-    /** @return array{public_key:string,key_gen:int}|null  public_key as raw bytes */
+    // ever sealed to it again; the purge (or the next write) sweeps it into re-keys. The Server principal has no
+    // Kanboard user (live_user_id is always NULL) and is admitted as a seal target.
+    /** @return array{public_key:string,key_gen:int,kind:string}|null  public_key as raw bytes */
     public function principal(VaultDb $db, int $userId): ?array
     {
-        $row = $db->fetchOne('SELECT public_key, key_gen FROM vault_principals WHERE user_id = ? AND live_user_id IS NOT NULL', [$userId]);
+        $row = $db->fetchOne(
+            "SELECT public_key, key_gen, kind FROM vault_principals WHERE user_id = ? AND (live_user_id IS NOT NULL OR kind = 'server')",
+            [$userId]
+        );
         if ($row === null) {
             return null;
         }
@@ -369,7 +379,15 @@ class Rekeyer extends Base
         if ($pk === false || strlen($pk) !== SODIUM_CRYPTO_BOX_PUBLICKEYBYTES) {
             return null;
         }
-        return ['public_key' => $pk, 'key_gen' => (int) $row['key_gen']];
+        return ['public_key' => $pk, 'key_gen' => (int) $row['key_gen'], 'kind' => (string) $row['kind']];
+    }
+
+    // principal(), for a kind that may hold a key: a live human or agent. Null for Server (a seal target only).
+    /** @return array{public_key:string,key_gen:int,kind:string}|null */
+    public function holder(VaultDb $db, int $userId): ?array
+    {
+        $principal = $this->principal($db, $userId);
+        return $principal !== null && in_array($principal['kind'], self::HOLDER_KINDS, true) ? $principal : null;
     }
 
     private function dequeue(VaultDb $db, string $type, int $id): void

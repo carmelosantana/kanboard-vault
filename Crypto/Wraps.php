@@ -15,7 +15,9 @@ namespace Kanboard\Plugin\Vault\Crypto;
 final class Wraps
 {
     public const CRYPTO_V = 1;
-    public const METHODS = ['passphrase', 'passphrase+prf', 'recovery', 'agent', 'server'];
+    // The methods of a human's or agent's vault_wraps rows. Server's wrap (method server) never belongs to one.
+    public const HOLDER_METHODS = ['passphrase', 'passphrase+prf', 'recovery', 'agent'];
+    public const METHODS = [...self::HOLDER_METHODS, 'server'];
 
     public static function wrap(#[\SensitiveParameter] string $sk, #[\SensitiveParameter] string $kek, int $principalId, string $method, string $credentialId, int $wrapId): array
     {

@@ -677,9 +677,10 @@ class ObjectStore extends Base
         return $this->rekeyer()->currentPrincipal($db, $actorId, $sk) ?? throw new VaultException('not_found');
     }
 
+    // Server and host never own an object: only a holder (human or agent) creates one.
     private function requirePrincipal(VaultDb $db, int $userId): array
     {
-        return $this->rekeyer()->principal($db, $userId) ?? throw new VaultException('not_enrolled');
+        return $this->rekeyer()->holder($db, $userId) ?? throw new VaultException('not_enrolled');
     }
 
     private function fetchObject(VaultDb $db, string $type, int $id): ?array

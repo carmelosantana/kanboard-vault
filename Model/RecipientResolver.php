@@ -21,6 +21,7 @@ class RecipientResolver extends Base
     public const TABLES = ['entry' => 'vault_entries', 'group' => 'vault_groups'];
     private const RANK = [ObjectStore::READ => 1, ObjectStore::EDIT => 2, ObjectStore::OWNER => 3];
     private const CHUNK = 500;
+    private const READ_ONLY_KINDS = ['agent', 'server', 'host'];
 
     /**
      * @param array|null $row the object's row when the caller already has it (saves a fetch)
@@ -57,8 +58,9 @@ class RecipientResolver extends Base
                 if ((int) $g['id'] === $excludeGrantId || ! in_array($perm, [ObjectStore::READ, ObjectStore::EDIT], true)) {
                     continue;
                 }
-                // R47/A8, held here as well as at grant time: an agent principal never holds more than Read.
-                if ($g['kind'] === 'agent') {
+                // R47/A8, held here as well as at grant time: an agent principal never holds more than Read; nor do
+                // Server and host, whose grants are read-only by schema.
+                if (in_array($g['kind'], self::READ_ONLY_KINDS, true)) {
                     $perm = ObjectStore::READ;
                 }
                 if ($g['expires_at'] !== null && (int) $g['expires_at'] <= $now) {
@@ -95,12 +97,15 @@ class RecipientResolver extends Base
     }
 
     // Whether owner_id makes its principal the owner here: always for a human; for an agent only on its Agent-created
-    // group and below it.
+    // group and below it; never for Server or host.
     /** @param list<int> $ancestors */
     private function ownsHere(VaultDb $db, string $type, array $row, array $ancestors): bool
     {
         $ownerId = (int) $row['owner_id'];
         $p = $db->fetchOne('SELECT kind FROM vault_principals WHERE user_id = ?', [$ownerId]);
+        if ($p !== null && in_array($p['kind'], ['server', 'host'], true)) {
+            return false;
+        }
         if ($p === null || $p['kind'] !== 'agent') {
             return true;
         }

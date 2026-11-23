@@ -41,6 +41,11 @@ class GrantModel extends Base
             if ($expiresAt !== null && $expiresAt <= $now) {
                 throw new VaultException('payload_invalid');
             }
+            // Server and host take only a Server grant (entry, read, no expiry; grantServer), never a human grant.
+            $kind = $db->fetchOne('SELECT kind FROM vault_principals WHERE user_id = ?', [$granteeId]);
+            if ($kind !== null && in_array($kind['kind'], ['server', 'host'], true)) {
+                throw new VaultException('payload_invalid');
+            }
             if ($this->rekeyer()->principal($db, $granteeId) === null) {
                 throw new VaultException('not_enrolled');
             }
