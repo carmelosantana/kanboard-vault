@@ -437,6 +437,32 @@ class OrphanTest extends Base
         $this->assertSame(['not_allowed'], array_column($this->auditRows('orphan_claim_denied'), 'reason'));
     }
 
+    // Minor 5: every removal of a Server share writes server_revoke, not only a revoke. An owner's group delete takes
+    // the share with its entry (actor the owner); the purge deleting a live user's Server-shared entry under a deleted
+    // user's group takes it too (no actor, system). Kills: revokeServerShares firing the event only.
+    public function testAGroupDeleteOrAPurgeThatTakesAServerShareIsAudited(): void
+    {
+        [$g1, $e1] = $this->aliceTree();
+        $this->store()->deleteObject($this->alice, 'group', $g1, $this->aliceSk());
+        $rows = $this->auditRows('server_revoke');
+        $this->assertCount(1, $rows);
+        $this->assertSame([$this->alice, 'entry', $e1, '["CveHunter"]', '["password"]'],
+            [(int) $rows[0]['actor_user_id'], $rows[0]['object_type'], (int) $rows[0]['object_id'], $rows[0]['consumers'], $rows[0]['fields']]);
+
+        // Bob's Server-shared entry sitting in alice's group (entries normally take the group owner's id).
+        $ga = $this->store()->createGroup($this->alice, null, ['name' => 'ga']);
+        $gb = $this->store()->createGroup($this->bob, null, ['name' => 'gb']);
+        $eb = $this->store()->createEntry($this->bob, $gb, Fixtures::fullEntry());
+        $this->grants()->grantServer($this->bob, $eb, ['CveHunter'], ['password'], null, null, $this->bobSk());
+        $this->pdo()->prepare('UPDATE vault_entries SET group_id = ? WHERE id = ?')->execute([$ga, $eb]);
+        $this->deleteAlice();
+        $this->purge();
+        $this->assertFalse($this->exists('vault_entries', $eb));
+        $rows = $this->auditRows('server_revoke');
+        $this->assertCount(2, $rows);
+        $this->assertSame([null, 'system', $eb], [$rows[1]['actor_user_id'], $rows[1]['actor_kind'], (int) $rows[1]['object_id']]);
+    }
+
     public function testDestroyRemovesTheOrphan(): void
     {
         $revoked = [];

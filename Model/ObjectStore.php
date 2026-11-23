@@ -494,13 +494,13 @@ class ObjectStore extends Base
             $this->requireCurrentKey($db, $actorId, $sk);
             $this->audit('delete', $actorId, $type, $id);
             if ($type === 'entry') {
-                $this->purgeEntry($db, $id);
+                $this->purgeEntry($db, $id, $actorId);
                 return;
             }
             $levels = $this->resolver()->subtreeLevels($id);
             $groupIds = array_merge(...$levels);
             $entryIds = $this->resolver()->entriesIn($groupIds);
-            $this->revokeServerShares($db, $entryIds);
+            $this->revokeServerShares($db, $entryIds, $actorId);
             $this->purgeRefs($db, 'entry', $entryIds);
             $this->purgeRefs($db, 'group', $groupIds);
             foreach (array_chunk($entryIds, self::CHUNK) as $chunk) {
@@ -514,11 +514,11 @@ class ObjectStore extends Base
         });
     }
 
-    // One entry with its key, grant and re-key queue rows, inside the caller's exclusive lock; vault.secret.revoked
-    // after the commit if it was shared with Server. Not audited here (the caller audits its own action).
-    public function purgeEntry(VaultDb $db, int $entryId): void
+    // One entry with its key, grant and re-key queue rows, inside the caller's exclusive lock; if it was shared with
+    // Server, server_revoke (actor $actorId) and vault.secret.revoked after the commit. The caller audits its own action.
+    public function purgeEntry(VaultDb $db, int $entryId, ?int $actorId = null): void
     {
-        $this->revokeServerShares($db, [$entryId]);
+        $this->revokeServerShares($db, [$entryId], $actorId);
         $this->purgeRefs($db, 'entry', [$entryId]);
         $db->execute('DELETE FROM vault_entries WHERE id = ?', [$entryId]);
     }
@@ -558,7 +558,7 @@ class ObjectStore extends Base
             $entryIds[] = (int) $e['id'];
         }
         $entryIds = array_values(array_filter(array_unique($entryIds), static fn (int $id): bool => ! isset($keepEntry[$id])));
-        $this->revokeServerShares($db, $entryIds);
+        $this->revokeServerShares($db, $entryIds, null);
         $this->purgeRefs($db, 'entry', $entryIds);
         $this->purgeRefs($db, 'group', $groupIds);
         foreach (array_chunk($entryIds, self::CHUNK) as $chunk) {
@@ -716,17 +716,26 @@ class ObjectStore extends Base
         ];
     }
 
-    // vault.secret.revoked, after the commit, for each of these entries that has a Server grant (its grant is about to
-    // go with purgeRefs, which doesn't pass through removeSource, so this is the only dispatch).
+    // For each of these entries that has a Server grant (about to go with purgeRefs, which doesn't pass through
+    // removeSource): server_revoke in the caller's transaction (actor $actorId, or the system for the purge; Minor 5)
+    // and vault.secret.revoked after the commit. This is the only record and dispatch for these removals.
     /** @param list<int> $entryIds */
-    private function revokeServerShares(VaultDb $db, array $entryIds): void
+    private function revokeServerShares(VaultDb $db, array $entryIds, ?int $actorId): void
     {
+        $audit = AuditModel::of($this->container, $this->clock);
         foreach (array_chunk($entryIds, self::CHUNK) as $chunk) {
             $rows = $db->fetchAll(
-                "SELECT subject_id FROM vault_grants WHERE subject_type = 'entry' AND grantee_id = ? AND subject_id IN (".RecipientResolver::marks($chunk).') ORDER BY subject_id',
+                "SELECT subject_id, consumers, fields FROM vault_grants WHERE subject_type = 'entry' AND grantee_id = ? AND subject_id IN (".RecipientResolver::marks($chunk).') ORDER BY subject_id',
                 array_merge([ServerPrincipal::ID], $chunk)
             );
             foreach ($rows as $r) {
+                $audit->record('server_revoke', [
+                    'actor_user_id' => $actorId !== null && $actorId > 0 ? $actorId : null,
+                    'object_type' => 'entry',
+                    'object_id' => (int) $r['subject_id'],
+                    'consumers' => $r['consumers'],
+                    'fields' => $r['fields'],
+                ] + ($actorId === null ? ['actor_kind' => 'system'] : []));
                 ServerEvents::revoked($this->container, (int) $r['subject_id']);
             }
         }

@@ -152,7 +152,7 @@ final class OrphanService extends Base
                 } catch (VaultException $e) {
                     return $e; // nothing written but the sweep: commit it, then refuse
                 }
-                (new ObjectStore($this->container, $this->clock))->purgeEntry($db, $entryId);
+                (new ObjectStore($this->container, $this->clock))->purgeEntry($db, $entryId, $adminId);
                 AuditModel::of($this->container, $this->clock)->record('orphan_destroy', [
                     'actor_user_id' => $adminId,
                     'object_type' => 'entry',
