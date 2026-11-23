@@ -11,7 +11,8 @@ use Kanboard\Core\Base;
 // own Agent-created group (that group and everything below it); anywhere else owner_id gives it nothing (Codex security
 // round 1: a converted human must not keep its former vault). A grant is expired once expires_at <= now. Grant
 // rows whose subject is missing never reach here (only existing objects and their existing ancestors are looked up),
-// so they are ignored (R8). An object whose owner is gone (ownerGone) has no recipients at all.
+// so they are ignored (R8). An object whose owner, or any ancestor group's owner, is gone (ownerGone) has no
+// recipients at all.
 //
 // Read-only. Callers run it inside the vault lock, against the rows of that transaction; all SQL goes
 // through VaultDb (R13).
@@ -33,10 +34,11 @@ class RecipientResolver extends Base
             return [];
         }
         $db = $this->vdb();
-        if ($this->ownerGone($db, $row)) {
+        $chain = $this->ancestorOwners($type, $row);
+        $ancestors = array_keys($chain);
+        if ($this->anyGone($db, array_merge([(int) $row['owner_id']], array_values($chain)))) {
             return [];
         }
-        $ancestors = $this->ancestors($type, $row);
         $ownerId = (int) $row['owner_id'];
         $out = $this->ownsHere($db, $type, $row, $ancestors) ? [$ownerId => ObjectStore::OWNER] : [];
         $subjects = [[$type, $id]];
@@ -73,11 +75,23 @@ class RecipientResolver extends Base
 
     // v5: an object follows its owner's principal, not the Kanboard user row, so a deleted owner's objects outlive the
     // user until the purge sweeps them. Until then nobody reads them, as if the old users cascade had removed them:
-    // true when the owner's principal is missing or its Kanboard user is gone (live_user_id NULL).
+    // true when the owner's principal is missing or its Kanboard user is gone (live_user_id NULL). effective() applies
+    // the same test to every ancestor group's owner too, as the group_id and parent_id cascades took those objects.
     public function ownerGone(VaultDb $db, array $row): bool
     {
-        $p = $db->fetchOne('SELECT live_user_id FROM vault_principals WHERE user_id = ?', [(int) $row['owner_id']]);
-        return $p === null || $p['live_user_id'] === null;
+        return $this->anyGone($db, [(int) $row['owner_id']]);
+    }
+
+    // Whether any of these owner principals is missing or has live_user_id NULL. One query.
+    /** @param list<int> $ownerIds */
+    private function anyGone(VaultDb $db, array $ownerIds): bool
+    {
+        $ids = array_values(array_unique($ownerIds));
+        $live = $db->fetchOne(
+            'SELECT COUNT(*) AS n FROM vault_principals WHERE live_user_id IS NOT NULL AND user_id IN ('.self::marks($ids).')',
+            $ids
+        );
+        return (int) ($live['n'] ?? 0) !== count($ids);
     }
 
     // Whether owner_id makes its principal the owner here: always for a human; for an agent only on its Agent-created
@@ -110,6 +124,13 @@ class RecipientResolver extends Base
     /** @return list<int> */
     public function ancestors(string $type, array $row): array
     {
+        return array_keys($this->ancestorOwners($type, $row));
+    }
+
+    // ancestors() with each group's owner_id, in the same order: group id => owner id.
+    /** @return array<int,int> */
+    private function ancestorOwners(string $type, array $row): array
+    {
         $next = $type === 'entry' ? $row['group_id'] : $row['parent_id'];
         $seen = $type === 'group' ? [(int) $row['id'] => true] : [];
         $out = [];
@@ -119,7 +140,7 @@ class RecipientResolver extends Base
                 break;
             }
             $seen[(int) $next] = true;
-            $out[] = (int) $next;
+            $out[(int) $next] = (int) $group['owner_id'];
             $next = $group['parent_id'];
         }
         return $out;
