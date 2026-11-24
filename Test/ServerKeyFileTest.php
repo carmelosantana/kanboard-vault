@@ -4,6 +4,7 @@ require_once 'tests/units/Base.php';
 use Kanboard\Plugin\Vault\Model\ServerKeyFile;
 use Kanboard\Plugin\Vault\Model\ServerKeyUnavailable;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 // Spec amendment: Server key file (SEC-12). Ports Matinee's KeyStoreTest file cases and adds the stricter ones:
 // no-follow on every path component, fstat of the open descriptor (regular, owner, mode exactly 0600, nlink 1,
@@ -187,6 +188,7 @@ class ServerKeyFileTest extends TestCase
      *
      * @dataProvider looseModes
      */
+    #[DataProvider('looseModes')]
     public function testLooseModeFailsClosedNeverRepaired(int $mode): void
     {
         $bytes = random_bytes(32);

@@ -3,6 +3,7 @@ require_once 'tests/units/Base.php';
 
 use Kanboard\Plugin\Vault\Secrets\SecretRef;
 use KanboardTests\units\Base;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 // Spec amendment: Consumer API → refs. vault://<entry_id>/<field>: an id of 1 to 18 digits with no leading zero, and a
 // percent-encoded field that decodes to a top-level key or a custom name (valid UTF-8, 1..128 bytes, no control
@@ -24,6 +25,7 @@ class SecretRefTest extends Base
     }
 
     /** @dataProvider valid */
+    #[DataProvider('valid')]
     public function testValidRefs(string $ref, int $id, string $field, bool $top): void
     {
         $r = SecretRef::parse($ref);
@@ -59,6 +61,7 @@ class SecretRefTest extends Base
     }
 
     /** @dataProvider invalid */
+    #[DataProvider('invalid')]
     public function testInvalidRefsAreNull(string $ref): void
     {
         $this->assertNull(SecretRef::parse($ref));

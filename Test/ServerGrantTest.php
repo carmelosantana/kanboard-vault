@@ -12,6 +12,7 @@ use Kanboard\Plugin\Vault\Model\VaultSettings;
 use Kanboard\Plugin\Vault\Secrets\ServiceSecretException;
 use Kanboard\Plugin\Vault\Test\Support\Fixtures;
 use KanboardTests\units\Base;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 // Spec amendment: Server grants (validation part). Consumers and fields are canonical lists: unique, sorted, 1..16
 // consumers and 1..32 fields. R1: a field is a top-level name (stored plain) or a custom name stored only as
@@ -155,6 +156,7 @@ class ServerGrantTest extends Base
      *
      * @dataProvider refusals
      */
+    #[DataProvider('refusals')]
     public function testRefusalsAreAuditedAndWriteNothing(string $reason, string $case): void
     {
         $this->boot();

@@ -619,6 +619,7 @@ class AuditTest extends Base
 
     // Kills: each column check removed or loosened (any of these would be stored).
     /** @dataProvider malformedServerColumns */
+    #[DataProvider('malformedServerColumns')]
     public function testServerColumnsRefuseMalformedValues(string $action, array $cols, string $column, int|string $bad): void
     {
         $this->audit()->record($action, $cols); // the base row is valid

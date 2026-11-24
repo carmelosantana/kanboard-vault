@@ -13,6 +13,7 @@ use Kanboard\Plugin\Vault\Secrets\ServiceSecretException;
 use Kanboard\Plugin\Vault\Secrets\ServiceSecrets;
 use Kanboard\Plugin\Vault\Test\Support\Fixtures;
 use KanboardTests\units\Base;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 // Spec amendment: Consumer API → The read path; security requirements 4, 5 and 13. ServerSecrets::read runs steps 1–11
 // in order, steps 3–11 in one exclusive transaction that also holds the audit row and the spent token; every refusal
@@ -125,6 +126,7 @@ class ServerSecretsTest extends Base
     // Kills: any of steps 1–11 skipped or reordered so a refusal leaks a later stage; a refusal not audited; a value or
     // title in the exception.
     /** @dataProvider refusals */
+    #[DataProvider('refusals')]
     public function testEveryRefusalIsTypedAuditedAndCarriesNothing(string $reason, callable $arrange): void
     {
         $e = $this->serverShare(['CveHunter'], ['password']);

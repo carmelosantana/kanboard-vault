@@ -17,6 +17,7 @@ use Kanboard\Plugin\Vault\Model\VaultDb;
 use Kanboard\Plugin\Vault\Secrets\ServiceSecretException;
 use Kanboard\Plugin\Vault\Test\Support\Fixtures;
 use KanboardTests\units\Base;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 // Spec amendment: security requirement 14 with Codex NEW-02 (quarantine wins). A deleted owner's Server-shared entries
 // outlive the purge with their ancestor groups and the owner's principal as a tombstone (state 'orphaned'), readable by
@@ -279,6 +280,7 @@ class OrphanTest extends Base
 
     // Each refusal: the code, one orphan_claim_denied row (written although the claim rolled back) and the row unchanged.
     /** @dataProvider claimRefusals */
+    #[DataProvider('claimRefusals')]
     public function testClaimRefusals(string $code, callable $arrange): void
     {
         [$g1, $e1] = $this->aliceTree();
@@ -314,6 +316,7 @@ class OrphanTest extends Base
     }
 
     /** @dataProvider orphanActions */
+    #[DataProvider('orphanActions')]
     public function testAPrivateEntryOfADeletedOwnerIsNeverAnOrphan(string $action): void
     {
         [$g1, $e1, $e2] = $this->aliceTree();
@@ -566,6 +569,7 @@ class OrphanTest extends Base
     // Carry (b): the paths that drop the key rows of principals who lost access keep a quarantined orphan's Server key
     // row and grant (and the claiming admin's key row), so a claim still restores Server reads.
     /** @dataProvider loserPaths */
+    #[DataProvider('loserPaths')]
     public function testLoserReconciliationKeepsTheOrphansServerKey(callable $path): void
     {
         $this->roster([$this->dave => $this->carol]);
