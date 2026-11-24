@@ -5,7 +5,7 @@ require_once __DIR__.'/Support/VaultTestResponse.php';
 
 use Kanboard\Core\Http\Request;
 use Kanboard\Core\Security\Role;
-use Kanboard\Plugin\Vault\Controller\SettingsController;
+use Kanboard\Plugin\Vault\Controller\VaultSettingsController;
 use Kanboard\Plugin\Vault\Model\AuditModel;
 use Kanboard\Plugin\Vault\Model\FailedGuess;
 use Kanboard\Plugin\Vault\Model\VaultDb;
@@ -74,7 +74,7 @@ class SettingsTest extends Base
         $this->container['request'] = new Request($this->container, $server, $get, $post, [], $cookies);
         $response = new VaultTestResponse($this->container);
         $this->container['response'] = $response;
-        (new SettingsController($this->container))->$action();
+        (new VaultSettingsController($this->container))->$action();
         return $response;
     }
 

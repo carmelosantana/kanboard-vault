@@ -110,10 +110,10 @@ class Plugin extends Base
         foreach (['reserve', 'create', 'revoke', 'mine'] as $action) {
             $this->route->addRoute('vault/share/'.$action, 'VaultShareController', $action, 'Vault');
         }
-        // Settings → Vault (admins only; SettingsController checks): the settings and the deployment checks.
-        $this->route->addRoute('vault/settings', 'SettingsController', 'index', 'Vault');
-        $this->route->addRoute('vault/settings/save', 'SettingsController', 'save', 'Vault');
-        $this->route->addRoute('vault/settings/server', 'SettingsController', 'server', 'Vault');
+        // Settings → Vault (admins only; VaultSettingsController checks): the settings and the deployment checks.
+        $this->route->addRoute('vault/settings', 'VaultSettingsController', 'index', 'Vault');
+        $this->route->addRoute('vault/settings/save', 'VaultSettingsController', 'save', 'Vault');
+        $this->route->addRoute('vault/settings/server', 'VaultSettingsController', 'server', 'Vault');
         $this->route->addRoute('vault/orphans/claim', 'OrphanController', 'claim', 'Vault');
         $this->route->addRoute('vault/orphans/destroy', 'OrphanController', 'destroy', 'Vault');
         $this->hook->on('template:config:sidebar', ['template' => 'Vault:config/sidebar']);

@@ -1,3 +1,3 @@
-<li <?= $this->app->checkMenuSelection('SettingsController', 'index', 'Vault') ?>>
-    <?= $this->url->link(t('Vault'), 'SettingsController', 'index', ['plugin' => 'Vault']) ?>
+<li <?= $this->app->checkMenuSelection('VaultSettingsController', 'index', 'Vault') ?>>
+    <?= $this->url->link(t('Vault'), 'VaultSettingsController', 'index', ['plugin' => 'Vault']) ?>
 </li>

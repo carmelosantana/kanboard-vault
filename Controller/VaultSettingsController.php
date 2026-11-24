@@ -28,7 +28,7 @@ use Kanboard\Plugin\Vault\Model\VaultSettings;
 // only. The claim form's groups are the admin's own, decrypted only while their vault is unlocked.
 //
 // There is no "view vault" or "reset user" action here, and org recovery stays CLI only.
-class SettingsController extends BaseVaultController
+class VaultSettingsController extends BaseVaultController
 {
     public const FIELDS = [
         VaultSettings::POLICY,
@@ -163,6 +163,6 @@ class SettingsController extends BaseVaultController
 
     protected function returnRoute(): array
     {
-        return ['SettingsController', 'index'];
+        return ['VaultSettingsController', 'index'];
     }
 }

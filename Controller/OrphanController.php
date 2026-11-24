@@ -79,6 +79,6 @@ class OrphanController extends BaseVaultController
 
     protected function returnRoute(): array
     {
-        return ['SettingsController', 'index'];
+        return ['VaultSettingsController', 'index'];
     }
 }

@@ -21,7 +21,7 @@ $expiries = [3600 => t('1 hour'), 86400 => t('1 day'), 604800 => t('7 days')];
 <p class="alert alert-error" role="alert"><?= $this->text->e($error) ?></p>
 <?php endif ?>
 
-<form method="post" action="<?= $this->url->href('SettingsController', 'save', ['plugin' => 'Vault']) ?>" autocomplete="off">
+<form method="post" action="<?= $this->url->href('VaultSettingsController', 'save', ['plugin' => 'Vault']) ?>" autocomplete="off">
     <input type="hidden" name="csrf_token" value="<?= $this->text->e($csrf) ?>">
 
     <fieldset>
@@ -85,7 +85,7 @@ $expiries = [3600 => t('1 hour'), 86400 => t('1 day'), 604800 => t('7 days')];
 <label for="vault-s-server-key"><?= t('Server key file') ?></label>
 <input type="text" id="vault-s-server-key" data-vault-server-key-path readonly spellcheck="false" value="<?= $this->text->e($server_key_path) ?>">
 <p class="form-help"><?= t('Read-only: set it with VAULT_SERVER_KEY_FILE in config.php. Keep this file out of your database backups: a backup without it can\'t open what is shared with Server, and with it, it can.') ?></p>
-<form method="post" action="<?= $this->url->href('SettingsController', 'server', ['plugin' => 'Vault']) ?>" autocomplete="off" data-vault-form="server">
+<form method="post" action="<?= $this->url->href('VaultSettingsController', 'server', ['plugin' => 'Vault']) ?>" autocomplete="off" data-vault-form="server">
     <input type="hidden" name="csrf_token" value="<?= $this->text->e($csrf) ?>">
     <?php if ($server_on): ?>
     <input type="hidden" name="enabled" value="0">
