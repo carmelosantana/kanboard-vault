@@ -21,7 +21,7 @@ function vault_test_migrate(\PDO $pdo): void
 function vault_test_sqlite_only(): void
 {
     if (DB_DRIVER !== 'sqlite') {
-        throw new \PHPUnit\Framework\SkippedTestError('SQLite-specific; this run is '.DB_DRIVER);
+        \PHPUnit\Framework\Assert::markTestSkipped('SQLite-specific; this run is '.DB_DRIVER); // PHPUnit 9 and 12 alike
     }
 }
 
