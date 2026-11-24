@@ -14,6 +14,7 @@ use Kanboard\Plugin\Vault\Model\VaultLock;
 use Kanboard\Plugin\Vault\Model\VaultSettings;
 use Kanboard\Plugin\Vault\Test\Support\Fixtures;
 use KanboardTests\units\Base;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 // Spec: Audit. vault_audit is append-only with a per-action allowlist of columns; record() throws on an unknown
 // action or a non-null value in a column the action may not use, and never drops a value. Who sees what, retention,
@@ -132,6 +133,7 @@ class AuditTest extends Base
     // disallowed column throws and writes nothing. Kills: the disallowed-column check removed or reduced to a
     // silent drop (the row would be written, or the value lost without a throw), a stored value altered.
     /** @dataProvider actions */
+    #[DataProvider('actions')]
     public function testAllowlistTableDriven(string $action, array $allowed): void
     {
         $cols = [];

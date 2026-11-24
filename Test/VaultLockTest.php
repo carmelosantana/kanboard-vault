@@ -4,6 +4,7 @@ require_once __DIR__.'/Support/FileDb.php';
 
 use Kanboard\Plugin\Vault\Model\VaultLock;
 use KanboardTests\units\Base;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 // Pretends to be a MySQL or Postgres PDO and records every statement; the lock row query answers from SQLite.
 class VaultLockRecordingPdo extends \PDO
@@ -232,6 +233,7 @@ class VaultLockTest extends Base
     }
 
     /** @dataProvider serverDrivers */
+    #[DataProvider('serverDrivers')]
     public function testServerDatabasesLockTheMetaRow(string $driver, string $mode, string $sql): void
     {
         $pdo = new VaultLockRecordingPdo($driver);
