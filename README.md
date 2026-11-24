@@ -254,9 +254,10 @@ function cveHunterApiKey($container, string $ref): ?string
 ```
 
 - `read(string $consumer, string $ref, ?string $jobRef = null): SecretValue`. The job ref is optional, 1 to 64 of
-  `A-Z a-z 0-9 _ . : -`, and lands in the audit row. An invalid job ref is a programming error, not a refusal: it
-  throws `InvalidArgumentException` before anything is checked or audited, which the example above doesn't catch.
-  Pass a constant, or check it against that pattern first.
+  `A-Z a-z 0-9 _ . : -`, and lands in the audit row. An invalid job ref is a programming error: once the ref parses,
+  it throws `InvalidArgumentException` (not a `ServiceSecretException`, which the example above doesn't catch) before
+  Server, the share or a rate token are looked at, and writes `server_read_denied` with reason `payload_invalid` and no
+  job ref. Pass a constant, or check it against that pattern first.
 - `SecretValue::reveal()` is the only way to the bytes. The value can't be printed, dumped, serialised, cloned or
   cast to a string, so a wrapper can't leak it by accident. The string `reveal()` returns is ordinary PHP data.
 - `describe(string $ref): RefStatus` tells a settings page whether a ref would read: `ok` or the refusal reason. It
@@ -290,7 +291,7 @@ It carries no title, value, path or previous exception.
 | `orphaned` | The entry's owner, or the owner of a group above it, was deleted. See [Orphans](#orphans-quarantine-claim-destroy). |
 | `rate_limited` | The bucket `srvread:<consumer>:<entry_id>` is empty. |
 
-Vault checks in this order and reports the first step that fails: the ref parses, Server is on, the entry exists, a live Server share (`revoked` or `not_shared`), the
+Vault checks in this order and reports the first step that fails: the ref parses, the job ref is valid (see above), Server is on, the entry exists, a live Server share (`revoked` or `not_shared`), the
 consumer, the field, no owner gone (`orphaned`), a rate token, Server's key row at the entry's key epoch
 (`not_shared`), the key opens (`server_key_unavailable`), the entry decrypts and has the field (`not_found`).
 
@@ -298,8 +299,8 @@ consumer, the field, no owner gone (`orphaned`), a rate token, Server's key row 
 
 Every read writes `server_read` with the consumer, entry id, field, entry version, job ref and correlation id. Every
 refusal writes `server_read_denied` with its reason. A refusal from the checks inside the vault lock is written in that
-lock's transaction, with the spent token when there is one; the first two (the ref doesn't parse, Server is off) are
-written on their own, before the lock; and `rate_limited` refusals are aggregated (below). A custom field is recorded
+lock's transaction, with the spent token when there is one; the first ones (the ref doesn't parse, an invalid job
+ref, Server is off) are written on their own, before the lock; and `rate_limited` refusals are aggregated (below). A custom field is recorded
 only as its keyed hash. The entry's owner sees these rows in their Vault activity.
 
 `rate_limited` refusals are aggregated so a runaway job can't flood the log. The first refusal per bucket and

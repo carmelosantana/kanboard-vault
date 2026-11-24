@@ -514,6 +514,45 @@ class ShareGrantControllerTest extends Base
         $this->assertNull($this->serverGrantRow($e));
     }
 
+    // Codex R3-01 (requirement 18): a Server grant or revoke refused before GrantModel runs (a locked session, the
+    // controller's own type and payload checks) still writes its denied row, once, with a fixed reason; a refusal the
+    // model makes is written once by the model, never twice. A request failing CSRF writes nothing (as for orphans).
+    // Kills: locked or pre-model refusals unaudited; a model refusal recorded twice; a forged request audited.
+    public function testServerRefusalsBeforeTheModelAreAudited(): void
+    {
+        $e = $this->serverOn();
+        $g = $this->group(null, 'G');
+        $body = ['id' => $e, 'consumers' => 'CveHunter', 'fields' => ['password']];
+        $rows = fn (string $action): array => array_map(static fn (array $r): array => [
+            $r['actor_user_id'] === null ? null : (int) $r['actor_user_id'], $r['object_type'],
+            $r['object_id'] === null ? null : (int) $r['object_id'], $r['reason'],
+        ], $this->auditRows($action));
+
+        $this->sid = 'php-session-locked';
+        $this->assertFailure($this->post('grantServer', $body), 401, 'locked', 'grant locked');
+        $this->assertFailure($this->post('revoke', ['type' => 'entry', 'id' => $e, 'grantee_id' => '-1']), 401, 'locked', 'revoke locked');
+        $this->assertFailure($this->post('revoke', ['type' => 'entry', 'id' => $e, 'grantee_id' => $this->bob]), 401, 'locked', 'a human revoke locked');
+        $this->unlock($this->alice, Fixtures::PASSPHRASE);
+        $this->call(ShareGrantController::class, 'grantServer', 'POST', $body);
+        $this->call(ShareGrantController::class, 'revoke', 'POST', ['type' => 'entry', 'id' => $e, 'grantee_id' => '-1']);
+        $this->post('grantServer', ['type' => 'group', 'id' => $g] + $body);
+        $this->post('grantServer', ['fields' => 'password'] + $body);
+        $this->post('revoke', ['type' => 'bogus', 'id' => $e, 'grantee_id' => '-1']);
+        $this->post('grantServer', ['consumers' => 'not valid!'] + $body); // the model's own refusal
+
+        $this->assertSame([
+            [$this->alice, 'entry', $e, 'locked'],
+            [$this->alice, null, null, 'not_found'],
+            [$this->alice, 'entry', $e, 'payload_invalid'],
+            [$this->alice, 'entry', $e, 'payload_invalid'],
+        ], $rows('server_grant_denied'));
+        $this->assertSame([
+            [$this->alice, 'entry', $e, 'locked'],
+            [$this->alice, null, $e, 'payload_invalid'],
+        ], $rows('server_revoke_denied'));
+        $this->assertNull($this->serverGrantRow($e));
+    }
+
     // Spec amendment: revoking the Server grant removes it and the UI says to rotate the secret at its provider (Server
     // could have read it). Revoke needs no directory check for -1. Kills: revoke of -1 refused; no suggest_rotate.
     public function testServerRevokeSuggestsRotation(): void

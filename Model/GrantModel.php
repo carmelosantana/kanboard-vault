@@ -530,11 +530,22 @@ class GrantModel extends Base
     // refusal is recorded (requirement 18): a code the audit doesn't list goes in as 'failed' (AuditModel::deniedReason).
     private function recordDenied(string $action, int $actorId, string $type, int $id, VaultException $e): void
     {
+        $this->recordServerDenied($action, $actorId, $type, $id, $e);
+    }
+
+    // Requirement 18 (Codex R3-01): a Server grant or revoke refused before this model runs (ShareGrantController: a
+    // locked session, its own type and payload checks) is recorded here too, in its own transaction. The reason is the
+    // code when AuditModel::REASONS lists it, else 'failed'. A null type records no object.
+    public function recordServerDenied(string $action, int $actorId, ?string $type, int $id, VaultException|string $code): void
+    {
+        if (! in_array($action, ['server_grant_denied', 'server_revoke_denied'], true)) {
+            throw new \LogicException('Vault: not a Server grant denial');
+        }
         $this->lock()->exclusive(fn () => AuditModel::of($this->container, $this->clock)->record($action, [
             'actor_user_id' => $actorId > 0 ? $actorId : null,
             'object_type' => $type,
             'object_id' => $id > 0 ? $id : null,
-            'reason' => AuditModel::deniedReason($e->errorCode()),
+            'reason' => AuditModel::deniedReason($code instanceof VaultException ? $code->errorCode() : $code),
         ]));
     }
 

@@ -332,16 +332,34 @@ class ServerSecretsTest extends Base
         $this->assertFalse($this->serverSecrets()->available(), 'off again');
     }
 
-    // A job ref the audit can't hold is a caller error, refused before anything runs.
-    public function testMalformedJobRefIsRefused(): void
+    // A job ref the audit can't hold is a caller error (InvalidArgumentException), refused right after the ref parses
+    // and before Server, the grant or the bucket are looked at. Codex R3-01: it is still a refusal, so it is audited as
+    // server_read_denied with reason payload_invalid and no job_ref (the audit can't hold it).
+    // Kills: the refusal unaudited; the bad job ref written; a token spent.
+    public function testMalformedJobRefIsRefusedAndAudited(): void
     {
         $e = $this->serverShare(['CveHunter'], ['password']);
-        $this->expectException(InvalidArgumentException::class);
         try {
             $this->serverSecrets()->read('CveHunter', "vault://$e/password", 'bad job ref with spaces');
-        } finally {
-            $this->assertSame([], $this->auditRows('server_read'));
-            $this->assertNull($this->bucketRow($e));
+            $this->fail('expected InvalidArgumentException');
+        } catch (InvalidArgumentException) {
         }
+        $this->assertSame([], $this->auditRows('server_read'));
+        $this->assertNull($this->bucketRow($e));
+        $rows = $this->auditRows('server_read_denied');
+        $this->assertCount(1, $rows);
+        $row = $rows[0];
+        $this->assertSame(['payload_invalid', 'server', 'entry', (string) $e, 'password', 'CveHunter', null],
+            [$row['reason'], $row['actor_kind'], $row['object_type'], (string) $row['object_id'], $row['field_name'], $row['consumer'], $row['job_ref']]);
+    }
+
+    // The documented order: the ref is step 1, so a bad ref with a bad job ref is not_found (audited), not a job-ref
+    // error. Kills: the job ref checked before the ref parses.
+    public function testBadRefWinsOverBadJobRef(): void
+    {
+        $this->refused('not_found', fn () => $this->serverSecrets()->read('CveHunter', 'not a ref', 'bad job ref with spaces'));
+        $rows = $this->auditRows('server_read_denied');
+        $this->assertCount(1, $rows);
+        $this->assertSame(['not_found', null], [$rows[0]['reason'], $rows[0]['job_ref']]);
     }
 }

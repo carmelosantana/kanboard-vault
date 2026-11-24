@@ -4,6 +4,7 @@ namespace Kanboard\Plugin\Vault\Controller;
 use Kanboard\Plugin\Vault\Model\AuditModel;
 use Kanboard\Plugin\Vault\Model\GranteeDirectory;
 use Kanboard\Plugin\Vault\Model\GrantModel;
+use Kanboard\Plugin\Vault\Model\ObjectStore;
 use Kanboard\Plugin\Vault\Model\ServerGrant;
 use Kanboard\Plugin\Vault\Model\ServerPrincipal;
 use Kanboard\Plugin\Vault\Model\VaultException;
@@ -76,31 +77,47 @@ class ShareGrantController extends BaseVaultController
     // id only (any other type is not_found). Consumers are split on commas and whitespace, the fields are the checked
     // top-level keys (fields[]) plus the comma-separated custom field names, and the rates are optional decimal ints.
     // GrantModel::grantServer validates all of it (payload_invalid), checks the owner (not_found) and Server (server_off).
+    // Requirement 18 (Codex R3-01): every refusal after CSRF is a server_grant_denied row: GrantModel's own, and here a
+    // locked session (serverKey) and this endpoint's type and shape checks.
     public function grantServer(): void
     {
-        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
+        $this->handle(function (): void {
+            $this->requirePostCsrf();
             $type = $this->request->getRawValue('type');
-            if ($type !== null && $type !== 'entry') {
-                throw new VaultException('not_found');
+            $entryId = $type === null || $type === 'entry' ? ($this->intParam('id') ?? 0) : 0;
+            $deny = fn (VaultException|string $code) => $this->grants()->recordServerDenied('server_grant_denied', $this->userId(), $entryId > 0 ? 'entry' : null, $entryId, $code);
+            $sk = $this->serverKey($deny);
+            try {
+                try {
+                    if ($type !== null && $type !== 'entry') {
+                        throw new VaultException('not_found');
+                    }
+                    $consumers = $this->request->getRawValue('consumers');
+                    $fields = $this->request->getRawValue('fields') ?? [];
+                    $custom = $this->request->getRawValue('custom_fields') ?? '';
+                    if (! is_string($consumers) || ! is_array($fields) || ! array_is_list($fields) || ! is_string($custom)) {
+                        throw new VaultException('payload_invalid');
+                    }
+                } catch (VaultException $e) {
+                    $deny($e);
+                    throw $e;
+                }
+                $custom = array_values(array_filter(array_map('trim', explode(',', $custom)), static fn (string $f): bool => $f !== ''));
+                // GrantModel records its own refusals.
+                $this->grants()->grantServer(
+                    $this->userId(),
+                    $entryId,
+                    preg_split('/[\s,]+/', $consumers, -1, PREG_SPLIT_NO_EMPTY),
+                    [...$fields, ...$custom],
+                    $this->intParam('rate_per_hour'),
+                    $this->intParam('rate_burst'),
+                    $sk
+                );
+                $this->housekeeping()->afterWrite($this->userId(), $sk);
+                $this->answer([]);
+            } finally {
+                sodium_memzero($sk);
             }
-            $consumers = $this->request->getRawValue('consumers');
-            $fields = $this->request->getRawValue('fields') ?? [];
-            $custom = $this->request->getRawValue('custom_fields') ?? '';
-            if (! is_string($consumers) || ! is_array($fields) || ! array_is_list($fields) || ! is_string($custom)) {
-                throw new VaultException('payload_invalid');
-            }
-            $custom = array_values(array_filter(array_map('trim', explode(',', $custom)), static fn (string $f): bool => $f !== ''));
-            $this->grants()->grantServer(
-                $userId,
-                $this->intParam('id') ?? 0,
-                preg_split('/[\s,]+/', $consumers, -1, PREG_SPLIT_NO_EMPTY),
-                [...$fields, ...$custom],
-                $this->intParam('rate_per_hour'),
-                $this->intParam('rate_burst'),
-                $sk
-            );
-            $this->housekeeping()->afterWrite($userId, $sk);
-            $this->answer([]);
         });
     }
 
@@ -129,16 +146,32 @@ class ShareGrantController extends BaseVaultController
         });
     }
 
-    // Spec, Revocation: "Afterwards the UI suggests rotating the secrets themselves."
+    // Spec, Revocation: "Afterwards the UI suggests rotating the secrets themselves." A refused revoke of the Server
+    // grant (grantee -1) is audited: GrantModel records its own refusals, serverKey() and the type check here the rest.
     public function revoke(): void
     {
-        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
+        $this->handle(function (): void {
+            $this->requirePostCsrf();
             // intParam reads only non-negative ids; -1 is the Server grant.
             $raw = $this->request->getRawValue('grantee_id');
             $granteeId = $raw === (string) ServerPrincipal::ID || $raw === ServerPrincipal::ID ? ServerPrincipal::ID : ($this->intParam('grantee_id') ?? 0);
-            $this->grants()->revoke($userId, $this->type(), $this->intParam('id') ?? 0, $granteeId, $sk);
-            $this->housekeeping()->afterWrite($userId, $sk);
-            $this->answer(['suggest_rotate' => true]);
+            $id = $this->intParam('id') ?? 0;
+            $rawType = $this->request->getRawValue('type');
+            $knownType = is_string($rawType) && in_array($rawType, ObjectStore::TYPES, true) ? $rawType : null;
+            $deny = $granteeId !== ServerPrincipal::ID ? static function (): void {
+            } : fn (VaultException|string $code) => $this->grants()->recordServerDenied('server_revoke_denied', $this->userId(), $knownType, $id, $code);
+            $sk = $this->serverKey($deny);
+            try {
+                if ($knownType === null) {
+                    $deny('payload_invalid');
+                }
+                $type = $this->type();
+                $this->grants()->revoke($this->userId(), $type, $id, $granteeId, $sk);
+                $this->housekeeping()->afterWrite($this->userId(), $sk);
+                $this->answer(['suggest_rotate' => true]);
+            } finally {
+                sodium_memzero($sk);
+            }
         });
     }
 
@@ -242,5 +275,21 @@ class ShareGrantController extends BaseVaultController
     private function directory(): GranteeDirectory
     {
         return new GranteeDirectory($this->container);
+    }
+
+    // withKey()'s unlocked key for the Server grant and revoke endpoints (after CSRF, which the caller has checked: a
+    // forged request writes nothing), with a refusal recorded through $deny first (requirement 18, Codex R3-01): a
+    // locked session (or one that must enrol hardware keys) as locked, any other refusal by its code.
+    private function serverKey(callable $deny): string
+    {
+        try {
+            return $this->requireUnlocked();
+        } catch (ResponseSent $e) {
+            $deny('locked');
+            throw $e;
+        } catch (VaultException $e) {
+            $deny($e);
+            throw $e;
+        }
     }
 }

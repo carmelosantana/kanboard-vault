@@ -19,6 +19,9 @@ use ValueError;
 // in this order; the first failing step is the refusal:
 //
 //    1  the ref parses (SecretRef)                                          not_found
+//   1b  the job ref, if given, is one the audit can hold (AuditModel::JOB_REF)  payload_invalid, thrown as
+//                                                                          InvalidArgumentException (a caller error;
+//                                                                          ServiceSecretException::REASONS stay frozen)
 //    2  Server is on                                                       server_off
 //    3  the entry exists                                                   not_found
 //    4  a live Server grant on it                                          revoked if the newest server_grant/
@@ -35,7 +38,7 @@ use ValueError;
 //
 // Steps 3–11 run in one exclusive transaction that also holds the audit row (server_read, or server_read_denied with
 // its reason) and the spent token: the locked step returns a refusal instead of throwing, so both commit, and a failed
-// audit write rolls the token back. Steps 1–2 are audited outside any lock. A rate_limited refusal is aggregated (R3,
+// audit write rolls the token back. Steps 1–2 (and 1b) are audited outside any lock. A rate_limited refusal is aggregated (R3,
 // RateLimitAudit::noteServerRead). After the commit a refusal is thrown as ServiceSecretException, which carries the
 // reason and nothing else. No title, value or payload reaches an exception, a log or an audit column; a custom field
 // name is audited only as its MAC. The key file is read before the lock is taken.
@@ -61,10 +64,9 @@ class ServerSecrets extends Base implements ServiceSecrets
 
     public function read(string $consumer, #[\SensitiveParameter] string $ref, ?string $jobRef = null): SecretValue
     {
-        if ($jobRef !== null && preg_match(AuditModel::JOB_REF, $jobRef) !== 1) {
-            throw new InvalidArgumentException('Vault: a job ref is 1 to 64 of A-Z a-z 0-9 _ . : -');
-        }
-        $cols = ['consumer' => ServerGrant::validConsumer($consumer) ? $consumer : null, 'job_ref' => $jobRef];
+        // A job ref the audit can't hold is never written; the row goes without it.
+        $jobRefValid = $jobRef === null || preg_match(AuditModel::JOB_REF, $jobRef) === 1;
+        $cols = ['consumer' => ServerGrant::validConsumer($consumer) ? $consumer : null, 'job_ref' => $jobRefValid ? $jobRef : null];
         $parsed = SecretRef::parse($ref);
         if ($parsed === null) {
             $this->denied($cols, 'not_found');
@@ -72,6 +74,10 @@ class ServerSecrets extends Base implements ServiceSecrets
         }
         // A custom field is audited only as its MAC, known from step 6 on.
         $cols += ['object_type' => 'entry', 'object_id' => $parsed->entryId, 'field_name' => $parsed->isTopLevel() ? $parsed->field : null];
+        if (! $jobRefValid) {
+            $this->denied($cols, 'payload_invalid');
+            throw new InvalidArgumentException('Vault: a job ref is 1 to 64 of A-Z a-z 0-9 _ . : -');
+        }
         if (! ServerPrincipal::of($this->container)->isOn()) {
             $this->denied($cols, 'server_off');
             throw new ServiceSecretException('server_off');
