@@ -4,6 +4,7 @@ require_once __DIR__.'/Support/ServiceFixture.php';
 
 use Kanboard\Plugin\Vault\Console\OrgKeygenCommand;
 use Kanboard\Plugin\Vault\Model\AuditModel;
+use Kanboard\Plugin\Vault\Model\Correlation;
 use Kanboard\Plugin\Vault\Model\Purger;
 use Kanboard\Plugin\Vault\Model\RotationService;
 use Kanboard\Plugin\Vault\Model\ShareModel;
@@ -22,7 +23,8 @@ class AuditTest extends Base
 {
     use ServiceFixture;
 
-    private const COLUMNS = ['actor_user_id', 'object_type', 'object_id', 'share_hash', 'target_user_id', 'ip_trunc', 'ua_family', 'count'];
+    private const COLUMNS = ['actor_user_id', 'object_type', 'object_id', 'share_hash', 'target_user_id', 'ip_trunc', 'ua_family', 'count',
+        'consumer', 'field_name', 'entry_version', 'job_ref', 'correlation_id', 'reason', 'consumers', 'fields', 'old_owner_id', 'new_owner_id', 'key_epoch'];
 
     protected function setUp(): void
     {
@@ -53,6 +55,14 @@ class AuditTest extends Base
             'ip_trunc' => '203.0.113.0/24',
             'ua_family' => 'Firefox 140 / Linux',
             'count' => 3,
+            'consumer' => 'CveHunter',
+            'field_name' => 'password',
+            'entry_version', 'key_epoch', 'old_owner_id', 'new_owner_id' => 2,
+            'job_ref' => 'scan:2026-11-22',
+            'correlation_id' => str_repeat('ab', 16),
+            'reason' => 'rate_limited',
+            'consumers' => '["CveHunter"]',
+            'fields' => '["password"]',
             default => 1, // user and object ids: user 1 is Kanboard's admin
         };
     }
@@ -62,6 +72,9 @@ class AuditTest extends Base
     {
         $sessionCols = ['actor_user_id', 'ip_trunc', 'ua_family'];
         $objectCols = ['actor_user_id', 'object_type', 'object_id'];
+        $serverRead = ['object_type', 'object_id', 'field_name', 'entry_version', 'consumer', 'job_ref', 'correlation_id'];
+        $serverGrant = ['actor_user_id', 'object_type', 'object_id', 'consumers', 'fields', 'correlation_id'];
+        $denied = ['actor_user_id', 'object_type', 'object_id', 'reason', 'correlation_id'];
         $expected = [
             'enroll' => ['actor_user_id'], 'lock' => ['actor_user_id'], 'hw_key_add' => ['actor_user_id'],
             'hw_key_remove' => ['actor_user_id'], 'recovery_code_create' => ['actor_user_id'],
@@ -83,14 +96,28 @@ class AuditTest extends Base
             'unlock_refused' => $sessionCols,
             // Codex security round 1: an agent enrolment refused while the principal owns objects outside its group.
             'enroll_refused' => ['actor_user_id', 'target_user_id', 'count'],
+            // The spec's Server and orphan actions and their denied variants (P1). R3: a rate_limited read denial is
+            // one row per bucket and window with its count, like R39, so server_read_denied also takes count.
+            'server_read' => $serverRead,
+            'server_read_denied' => [...$serverRead, 'reason', 'count'],
+            'server_grant' => $serverGrant,
+            'server_grant_denied' => $denied,
+            'server_revoke' => $serverGrant,
+            'server_revoke_denied' => $denied,
+            'orphan_quarantine' => ['object_type', 'object_id', 'old_owner_id', 'correlation_id'],
+            'orphan_claim' => ['actor_user_id', 'object_type', 'object_id', 'old_owner_id', 'new_owner_id', 'key_epoch', 'correlation_id'],
+            'orphan_claim_denied' => $denied,
+            'orphan_destroy' => ['actor_user_id', 'object_type', 'object_id', 'old_owner_id', 'correlation_id'],
+            'orphan_destroy_denied' => $denied,
         ];
         $norm = static function (array $t): array {
             ksort($t);
             return array_map(static function (array $c): array { sort($c); return $c; }, $t);
         };
         $this->assertSame($norm($expected), $norm(AuditModel::ALLOW));
-        // The spec's Actions table lists these 27, plus integrity_error (R37), unlock_refused (R72) and enroll_refused.
-        $this->assertCount(30, AuditModel::ALLOW);
+        // The spec's Actions table lists these 27, plus integrity_error (R37), unlock_refused (R72) and enroll_refused,
+        // plus the spec's Server and orphan actions and their denied variants (11).
+        $this->assertCount(41, AuditModel::ALLOW);
     }
 
     public static function actions(): array
@@ -131,7 +158,16 @@ class AuditTest extends Base
                 $this->audit()->record($action, $cols + [$bad => self::sample($bad)]);
                 $this->fail("$action accepted $bad");
             } catch (LogicException $e) {
-                $this->assertStringNotContainsString((string) self::sample($bad), $e->getMessage(), 'the refused value is not echoed');
+                // The message names the action, so the action name is cut before looking for the value: reason's
+                // sample is 'rate_limited', which is also an action.
+                $this->assertStringNotContainsString((string) self::sample($bad), str_replace($action, '', $e->getMessage()), 'the refused value is not echoed');
+            }
+        }
+        if (! in_array('correlation_id', $allowed, true)) {
+            try {
+                $this->audit()->record($action, $cols + ['correlation_id' => self::sample('correlation_id')]);
+                $this->fail("$action accepted correlation_id");
+            } catch (LogicException) {
             }
         }
         $this->assertCount(1, $this->auditRows(), 'a refused record writes nothing');
@@ -231,6 +267,9 @@ class AuditTest extends Base
         $alice = $this->alice;
         $bob = $this->bob;
         $carol = (int) $this->container['userModel']->create(['username' => 'carol', 'password' => 'carol login password 1']);
+        foreach ([$alice, $bob] as $owner) { // v5: an object's owner is a principal
+            $this->pdo()->prepare("INSERT INTO vault_principals (user_id, kind, public_key, created_at, live_user_id) VALUES (?, 'human', 'cGs=', 0, ?)")->execute([$owner, $owner]);
+        }
         $group = fn (int $owner): int => $this->insertId("INSERT INTO vault_groups (owner_id, parent_id, kind, key_epoch, nonce, ciphertext, crypto_v, position, created_at, updated_at) VALUES (?, NULL, 'normal', 1, '', '', 1, 0, 0, 0)", [$owner]);
         $bobGroup = $group($bob);
         $aliceGroup = $group($alice);
@@ -536,5 +575,144 @@ class AuditTest extends Base
             }
         }
         $this->assertCount(2, $this->auditRows());
+    }
+
+    // ---- Server reads, grants and orphans (P1) ----
+
+    public static function malformedServerColumns(): array
+    {
+        $read = ['object_type' => 'entry', 'object_id' => 1, 'consumer' => 'CveHunter', 'field_name' => 'password', 'entry_version' => 1];
+        $grant = ['actor_user_id' => 1, 'object_type' => 'entry', 'object_id' => 1, 'consumers' => '["CveHunter"]', 'fields' => '["password"]'];
+        $denied = ['actor_user_id' => 1, 'object_type' => 'entry', 'object_id' => 1, 'reason' => 'not_shared'];
+        $orphan = ['actor_user_id' => 1, 'object_type' => 'entry', 'object_id' => 1, 'old_owner_id' => 2, 'new_owner_id' => 3, 'key_epoch' => 2];
+        return [
+            'consumer leading digit' => ['server_read', $read, 'consumer', '9bad'],
+            'consumer space' => ['server_read', $read, 'consumer', 'a b'],
+            'consumer 65 chars' => ['server_read', $read, 'consumer', 'C'.str_repeat('x', 64)],
+            'consumer int' => ['server_read', $read, 'consumer', 7],
+            'reason unknown' => ['server_grant_denied', $denied, 'reason', 'nope'],
+            'consumers not sorted' => ['server_grant', $grant, 'consumers', '["b","a"]'],
+            'consumers empty' => ['server_grant', $grant, 'consumers', '[]'],
+            'consumers duplicate' => ['server_grant', $grant, 'consumers', '["a","a"]'],
+            'consumers spaced json' => ['server_grant', $grant, 'consumers', '["a", "b"]'],
+            'consumers invalid name' => ['server_grant', $grant, 'consumers', '["9bad"]'],
+            'consumers not json' => ['server_grant', $grant, 'consumers', 'CveHunter'],
+            'fields plain custom name' => ['server_grant', $grant, 'fields', '["api_token"]'],
+            'fields not a list' => ['server_grant', $grant, 'fields', '{"a":"password"}'],
+            'correlation_id short' => ['server_read', $read, 'correlation_id', 'XYZ'],
+            'correlation_id upper hex' => ['server_read', $read, 'correlation_id', str_repeat('AB', 16)],
+            'field_name plain custom' => ['server_read', $read, 'field_name', 'api_token'],
+            'field_name MAC lower' => ['server_read', $read, 'field_name', 'c:'.str_repeat('a', 26)],
+            'field_name MAC short' => ['server_read', $read, 'field_name', 'c:'.str_repeat('A', 25)],
+            'field_name MAC non-canonical tail' => ['server_read', $read, 'field_name', 'c:'.str_repeat('A', 25).'B'],
+            'entry_version zero' => ['server_read', $read, 'entry_version', 0],
+            'entry_version string' => ['server_read', $read, 'entry_version', '1'],
+            'job_ref space' => ['server_read', $read, 'job_ref', 'scan 1'],
+            'job_ref 65 chars' => ['server_read', $read, 'job_ref', str_repeat('j', 65)],
+            'key_epoch zero' => ['orphan_claim', $orphan, 'key_epoch', 0],
+            'old_owner_id zero' => ['orphan_claim', $orphan, 'old_owner_id', 0],
+            'new_owner_id negative' => ['orphan_claim', $orphan, 'new_owner_id', -1],
+            // R3: count on a read denial is a rate_limited window's tally only.
+            'count without rate_limited' => ['server_read_denied', $read + ['reason' => 'not_shared'], 'count', 3],
+        ];
+    }
+
+    // Kills: each column check removed or loosened (any of these would be stored).
+    /** @dataProvider malformedServerColumns */
+    #[DataProvider('malformedServerColumns')]
+    public function testServerColumnsRefuseMalformedValues(string $action, array $cols, string $column, int|string $bad): void
+    {
+        $this->audit()->record($action, $cols); // the base row is valid
+        try {
+            $this->audit()->record($action, array_merge($cols, [$column => $bad]));
+            $this->fail("accepted $column");
+        } catch (LogicException $e) {
+            $this->assertStringContainsString($column, $e->getMessage());
+            $this->assertStringNotContainsString((string) $bad, str_replace([$action, $column], '', $e->getMessage()), 'the value is not echoed');
+        }
+        $this->assertCount(1, $this->auditRows());
+    }
+
+    // The valid edges: a MACed custom name (R1), title as a top-level name, the 64-character consumer and job_ref,
+    // and R3's rate_limited window row. Kills: a check tightened past the spec.
+    public function testServerColumnsAcceptTheirEdges(): void
+    {
+        $a = $this->audit();
+        $a->record('server_read', ['object_type' => 'entry', 'object_id' => 1, 'field_name' => 'c:'.str_repeat('A', 25).'Q', 'consumer' => 'C'.str_repeat('x', 63), 'job_ref' => str_repeat('j', 64)]);
+        $a->record('server_read', ['object_type' => 'entry', 'object_id' => 1, 'field_name' => 'title']);
+        $a->record('server_grant', ['actor_user_id' => 1, 'consumers' => '["Agents","CveHunter"]', 'fields' => '["c:'.str_repeat('7', 25).'4","password","url"]']);
+        $a->record('server_read_denied', ['object_type' => 'entry', 'object_id' => 1, 'consumer' => 'CveHunter', 'reason' => 'rate_limited', 'count' => 12]);
+        foreach (AuditModel::REASONS as $reason) {
+            $a->record('server_revoke_denied', ['actor_user_id' => 1, 'reason' => $reason]);
+        }
+        $rows = $this->auditRows();
+        $this->assertCount(4 + count(AuditModel::REASONS), $rows);
+        $this->assertSame('["Agents","CveHunter"]', $rows[2]['consumers']);
+        $this->assertEquals(12, $rows[3]['count']);
+    }
+
+    // The frozen reason list. Kills: a reason dropped or added.
+    public function testReasonsAreTheRefusalsAndTheGrantFailures(): void
+    {
+        $this->assertSame(['server_off', 'server_key_unavailable', 'not_shared', 'consumer_not_allowed', 'field_not_allowed',
+            'rate_limited', 'revoked', 'not_found', 'orphaned', 'not_allowed', 'payload_invalid', 'not_enrolled',
+            'integrity_error', 'conflict', 'locked', 'unlock_failed', 'busy', 'https_required', 'failed'], AuditModel::REASONS);
+    }
+
+    // Requirement 18: every refusal writes its row, so a code outside REASONS is recorded as the generic 'failed',
+    // never dropped. Kills: an unknown code passed through (record() throws) or skipped.
+    public function testDeniedReasonNeverDropsARefusal(): void
+    {
+        foreach (AuditModel::REASONS as $reason) {
+            $this->assertSame($reason, AuditModel::deniedReason($reason));
+        }
+        foreach (['hw_assertion_required', 'rotation_in_progress', 'busy_global', 'anything'] as $code) {
+            $this->assertSame('failed', AuditModel::deniedReason($code), $code);
+        }
+    }
+
+    // Kills: no auto-fill of correlation_id; a new id per row; the id not following Correlation::begin().
+    public function testCorrelationIsFilledAndStable(): void
+    {
+        $read = ['object_type' => 'entry', 'object_id' => 1, 'consumer' => 'CveHunter', 'field_name' => 'password', 'entry_version' => 1];
+        $a = $this->audit();
+        $a->record('server_read', $read);
+        $a->record('server_read', $read);
+        $first = Correlation::id();
+        Correlation::begin();
+        $a->record('server_read', $read);
+        $a->record('lock', ['actor_user_id' => $this->alice]);
+        $ids = array_column($this->auditRows(), 'correlation_id');
+        $this->assertSame([$first, $first, Correlation::id(), null], $ids);
+        $this->assertNotSame($first, Correlation::id());
+        $this->assertMatchesRegularExpression(Correlation::PATTERN, $first);
+    }
+
+    // Kills: 'server' refused as an actor_kind.
+    public function testServerActorKindIsAccepted(): void
+    {
+        $this->audit(null, 'cli')->record('server_read', ['object_type' => 'entry', 'object_id' => 1, 'consumer' => 'CveHunter', 'actor_kind' => 'server']);
+        (new AuditModel($this->container, 'server', 'api', $this->clock()))->record('server_read', ['object_type' => 'entry', 'object_id' => 1]);
+        $this->assertSame(['server', 'server'], array_column($this->auditRows(), 'actor_kind'));
+    }
+
+    // Spec "Who sees what": the owner sees Server reads of their entries; admins see orphan rows. Kills: orphan
+    // actions not in ADMIN_ACTIONS; the Server read hidden from its owner or shown to someone else.
+    public function testOwnerSeesServerRowsOnTheirEntriesAndAdminsSeeOrphanRows(): void
+    {
+        $alice = $this->alice;
+        $this->pdo()->prepare("INSERT INTO vault_principals (user_id, kind, public_key, created_at, live_user_id) VALUES (?, 'human', 'cGs=', 0, ?)")->execute([$alice, $alice]);
+        $group = $this->insertId("INSERT INTO vault_groups (owner_id, parent_id, kind, key_epoch, nonce, ciphertext, crypto_v, position, created_at, updated_at) VALUES (?, NULL, 'normal', 1, '', '', 1, 0, 0, 0)", [$alice]);
+        $entry = $this->insertId("INSERT INTO vault_entries (group_id, owner_id, created_by, version, key_epoch, nonce, ciphertext, crypto_v, created_at, updated_at) VALUES (?, ?, ?, 1, 1, '', '', 1, 0, 0)", [$group, $alice, $alice]);
+        $a = $this->audit();
+        $a->record('server_read', ['object_type' => 'entry', 'object_id' => $entry, 'consumer' => 'CveHunter', 'field_name' => 'password', 'actor_kind' => 'server']); // 1
+        $a->record('orphan_destroy', ['actor_user_id' => self::ADMIN, 'object_type' => 'entry', 'object_id' => $entry + 50, 'old_owner_id' => 7]);          // 2
+        $a->record('orphan_quarantine', ['object_type' => 'entry', 'object_id' => $entry + 51, 'old_owner_id' => 7, 'actor_kind' => 'system']);              // 3
+        $ids = fn (int $viewer): array => array_map('intval', array_column($a->visibleTo($viewer, 0, 50), 'id'));
+        $this->assertSame([1], $ids($alice));
+        $this->assertSame([], $ids($this->bob));
+        $this->assertSame([3, 2], $ids(self::ADMIN));
+        $this->assertSame(['orphan_quarantine', 'orphan_claim', 'orphan_claim_denied', 'orphan_destroy', 'orphan_destroy_denied'],
+            array_values(array_filter(AuditModel::ADMIN_ACTIONS, static fn (string $x): bool => str_starts_with($x, 'orphan_'))));
     }
 }

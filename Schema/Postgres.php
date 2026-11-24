@@ -1,7 +1,7 @@
 <?php
 namespace Kanboard\Plugin\Vault\Schema;
 
-const VERSION = 4;
+const VERSION = 5;
 
 // Binary values are base64 TEXT; timestamps are Unix seconds.
 // Ownership references to users(id) cascade; provenance columns (created_by, granted_by, audit actor/target) are SET NULL.
@@ -250,6 +250,38 @@ function version_4($pdo)
     $pdo->exec('ALTER TABLE vault_shares ADD COLUMN crypto_v INTEGER NOT NULL DEFAULT 1');
 }
 
+// Server reader (P1); see Sqlite.php version_5 for the why. Kind and state lists are v1 column CHECKs with Postgres's
+// default names; no IF EXISTS, so a mismatch fails the migration loudly, as in v3. The owner FKs to users are found in
+// the catalogue (drop_user_fk) and re-pointed to vault_principals, still cascading.
+function version_5($pdo)
+{
+    $pdo->exec('ALTER TABLE vault_meta ADD COLUMN server_provider VARCHAR(16), ADD COLUMN server_wrap_id INTEGER NOT NULL DEFAULT 0,
+        ADD COLUMN server_wrap_nonce TEXT, ADD COLUMN server_wrapped_sk TEXT, ADD COLUMN server_field_mac_sealed TEXT');
+    $pdo->exec("ALTER TABLE vault_meta ADD CONSTRAINT vault_meta_server_provider_check CHECK (server_provider IN ('file', 'migrating', 'joist'))");
+
+    $pdo->exec('ALTER TABLE vault_principals DROP CONSTRAINT vault_principals_kind_check');
+    $pdo->exec("ALTER TABLE vault_principals ADD CONSTRAINT vault_principals_kind_check CHECK (kind IN ('human', 'agent', 'server', 'host'))");
+    $pdo->exec('ALTER TABLE vault_principals DROP CONSTRAINT vault_principals_state_check');
+    $pdo->exec("ALTER TABLE vault_principals ADD CONSTRAINT vault_principals_state_check CHECK (state IN ('active', 'rotating', 'orphaned'))");
+    $pdo->exec("ALTER TABLE vault_principals ADD CONSTRAINT vault_principals_identity_check CHECK ((kind IN ('server', 'host')) = (user_id < 0 AND live_user_id IS NULL))");
+
+    drop_user_fk($pdo, 'vault_groups', 'owner_id');
+    $pdo->exec('ALTER TABLE vault_groups ADD CONSTRAINT vault_groups_owner_fk FOREIGN KEY(owner_id) REFERENCES vault_principals(user_id) ON DELETE CASCADE');
+    drop_user_fk($pdo, 'vault_entries', 'owner_id');
+    $pdo->exec('ALTER TABLE vault_entries ADD CONSTRAINT vault_entries_owner_fk FOREIGN KEY(owner_id) REFERENCES vault_principals(user_id) ON DELETE CASCADE');
+
+    $pdo->exec('ALTER TABLE vault_grants ADD COLUMN consumers TEXT, ADD COLUMN fields TEXT, ADD COLUMN rate_per_hour INTEGER, ADD COLUMN rate_burst INTEGER');
+    $pdo->exec('ALTER TABLE vault_grants ADD CONSTRAINT vault_grants_server_check CHECK ((grantee_id = -1) = (consumers IS NOT NULL AND fields IS NOT NULL AND rate_per_hour IS NOT NULL AND rate_burst IS NOT NULL))');
+    $pdo->exec("ALTER TABLE vault_grants ADD CONSTRAINT vault_grants_negative_check CHECK (grantee_id >= 0 OR (subject_type = 'entry' AND permission = 'read' AND expires_at IS NULL))");
+
+    $pdo->exec('ALTER TABLE vault_audit DROP CONSTRAINT vault_audit_actor_kind_check');
+    $pdo->exec("ALTER TABLE vault_audit ADD CONSTRAINT vault_audit_actor_kind_check CHECK (actor_kind IN ('human', 'agent', 'public', 'cli', 'system', 'server'))");
+    $pdo->exec('ALTER TABLE vault_audit ADD COLUMN consumer VARCHAR(64), ADD COLUMN field_name VARCHAR(128), ADD COLUMN entry_version INTEGER,
+        ADD COLUMN job_ref VARCHAR(64), ADD COLUMN correlation_id VARCHAR(64), ADD COLUMN reason VARCHAR(32), ADD COLUMN consumers TEXT,
+        ADD COLUMN fields TEXT, ADD COLUMN old_owner_id INTEGER, ADD COLUMN new_owner_id INTEGER, ADD COLUMN key_epoch INTEGER');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS vault_audit_object_idx ON vault_audit(object_id)');
+}
+
 // The names of the FKs from $table.$column to users, in the current schema.
 function user_fks($pdo, string $table, string $column): array
 {
@@ -275,6 +307,6 @@ function drop_user_fk($pdo, string $table, string $column): void
 function assert_no_user_fk($pdo, string $table, string $column): void
 {
     if (user_fks($pdo, $table, $column) !== []) {
-        throw new \PDOException('Vault schema v2: '.$table.'.'.$column.' still has a foreign key to users');
+        throw new \PDOException('Vault schema: '.$table.'.'.$column.' still has a foreign key to users');
     }
 }

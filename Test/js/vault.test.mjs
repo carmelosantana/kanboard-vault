@@ -93,3 +93,11 @@ test('the unlocked shell arms the idle lock from data-idle-ms; the locked page d
   assert.equal(load({ state: 'unlocked', idleMs: 600000 }).timers[0].ms, 600000);
   assert.equal(load({ state: 'locked', idleMs: 600000 }).timers.length, 0);
 });
+
+test('api() sends an array under a key ending in [] as repeated values', async () => {
+  const { KBVault, calls } = load();
+  await KBVault.api('unlock', { 'fields[]': ['password', 'url'], other: 'x' });
+  const body = new URLSearchParams(calls[0].opts.body);
+  assert.deepEqual(body.getAll('fields[]'), ['password', 'url']);
+  assert.equal(body.get('other'), 'x');
+});

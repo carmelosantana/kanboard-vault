@@ -1,6 +1,7 @@
 <?php
 namespace Kanboard\Plugin\Vault\Controller;
 
+use Kanboard\Plugin\Vault\Model\OrphanService;
 use Kanboard\Plugin\Vault\Model\RotationService;
 use Kanboard\Plugin\Vault\Model\VaultException;
 use Kanboard\Plugin\Vault\Model\VaultFailure;
@@ -9,7 +10,8 @@ use Kanboard\Plugin\Vault\Model\VaultSettings;
 // "My vault security" (R40), for the logged-in user with an unlocked vault (spec: Key rotation, Recovery).
 //
 //   GET  vault/security        the page: change passphrase, Rotate my keys, and (when the policy allows codes) a
-//                              personal recovery code. Locked: back to the Vault page.
+//                              personal recovery code; the user's own entries at risk of becoming an orphan
+//                              (OrphanService::atRisk), by id with a link. Locked: back to the Vault page.
 //   POST vault/passphrase      {current, passphrase, confirm}: PrincipalModel::changePassphrase.
 //   POST vault/rotate          {passphrase}: RotationService::requestManual (same passphrase, new keypair).
 //   POST vault/recovery-code   {passphrase[, assertion]}: re-proves the passphrase (R54; with hardware keys, together
@@ -53,12 +55,13 @@ class SecurityController extends BaseVaultController
             'codes_allowed' => $policy !== VaultSettings::POLICY_NONE,
             'hw_keys' => $this->hardwareKeys()->count($this->userId()),
             'code' => (string) ($extra['code'] ?? ''),
+            'at_risk' => (new OrphanService($this->container))->atRisk($this->userId()),
         ]));
     }
 
     public function passphrase(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             $this->requireTransport();
             $new = (string) $this->request->getRawValue('passphrase');
             if (! hash_equals($new, (string) $this->request->getRawValue('confirm'))) {
@@ -71,7 +74,7 @@ class SecurityController extends BaseVaultController
 
     public function rotate(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             $this->requireTransport();
             $result = $this->rotationService()->requestManual($userId, $sk, (string) $this->request->getRawValue('passphrase'), $this->clientIp());
             $this->ceremonyDone($result, 'keys');
@@ -85,7 +88,7 @@ class SecurityController extends BaseVaultController
     // vault.js gets {ok, code}; a native form POST gets this page with the code shown once (no-store, never in a URL).
     public function recoveryCode(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             $this->requireTransport();
             if ((string) (new VaultSettings($this->container))->get(VaultSettings::POLICY) === VaultSettings::POLICY_NONE) {
                 throw new VaultException('policy_forbids');

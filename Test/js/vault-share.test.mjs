@@ -202,3 +202,115 @@ test('rename group sends the new name through save', async () => {
     assert.equal(shareButton(ro.doc).hidden, true, permission + ' can\'t share');
   }
 });
+
+// ---- Server (spec amendment: The sharing dialog shares with Server) -------------------------------------------------
+
+const ENTRY = { ok: true, entry: { id: 11, group_id: 7, permission: 'owner', title: 'E', secrets: {}, fields: [] } };
+const plain = (o) => JSON.parse(JSON.stringify(o));
+
+async function openEntryShare(sharing, more = {}, opts = {}) {
+  const p = page({ sharing, entry: ENTRY, ...more }, opts);
+  await flush();
+  p.window.KBVaultShare.open('entry', '11', 'E');
+  await flush(10);
+  return { p, dialog: q(p.doc, '[data-vault-share]') };
+}
+
+test('the Server section is hidden unless sharing says Server is available', async () => {
+  for (const server of [undefined, { available: false }]) {
+    const { dialog } = await openEntryShare({ ok: true, candidates: [], grants: [], ...(server ? { server } : {}) });
+    assert.equal(q(dialog, '[data-vault-share-server]').hidden, true, JSON.stringify(server));
+  }
+  const { p, dialog } = await openEntryShare((body) => ({ ok: true, candidates: [], grants: [], server: { available: body.type === 'entry' } }));
+  assert.equal(q(dialog, '[data-vault-share-server]').hidden, false);
+  // Opened again for a group, where the answer says no: hidden again.
+  p.window.KBVaultShare.open('group', '7', 'Infra');
+  await flush(10);
+  assert.equal(q(dialog, '[data-vault-share-server]').hidden, true);
+});
+
+test('sharing with Server posts the consumers, the checked fields and the custom fields', async () => {
+  const posts = [];
+  const { p, dialog } = await openEntryShare(
+    { ok: true, candidates: [], grants: [], server: { available: true } },
+    { grant_server: (body) => { posts.push(plain(body)); return { ok: true }; } },
+  );
+  const server = q(dialog, '[data-vault-share-server]');
+  q(server, '[data-vault-server-consumers]').value = 'CveHunter, Lifeboat';
+  q(server, '[data-vault-server-field][value="password"]').checked = true;
+  q(server, '[data-vault-server-custom]').value = 'API_TOKEN';
+  q(server, 'form').dispatch('submit');
+  await flush(10);
+  assert.deepEqual(posts, [{ id: '11', consumers: 'CveHunter, Lifeboat', 'fields[]': ['password'], custom_fields: 'API_TOKEN' }]);
+  assert.equal(p.calls.filter((c) => c.action === 'sharing').length, 2, 'the dialog reloads');
+
+  // Rates go only when given.
+  q(server, '[data-vault-server-rate]').value = '30';
+  q(server, '[data-vault-server-burst]').value = '5';
+  q(server, 'form').dispatch('submit');
+  await flush(10);
+  assert.deepEqual(posts[1], { id: '11', consumers: 'CveHunter, Lifeboat', 'fields[]': ['password'], custom_fields: 'API_TOKEN', rate_per_hour: '30', rate_burst: '5' });
+});
+
+test('a refused Server share shows the reason', async () => {
+  const { p, dialog } = await openEntryShare(
+    { ok: true, candidates: [], grants: [], server: { available: true } },
+    { grant_server: () => ({ ok: false, reason: 'server_off' }) },
+  );
+  q(dialog, '[data-vault-server-consumers]').value = 'CveHunter';
+  q(q(dialog, '[data-vault-share-server]'), 'form').dispatch('submit');
+  await flush(10);
+  assert.equal(q(dialog, '[data-vault-share-status]').textContent, 'Something went wrong.');
+  assert.equal(p.calls.filter((c) => c.action === 'sharing').length, 1, 'no reload');
+});
+
+test('a Server grant renders its consumers and fields as text only', async () => {
+  const { dialog } = await openEntryShare({
+    ok: true, candidates: [], server: { available: true },
+    grants: [{ grantee_id: -1, name: 'Server', kind: 'server', permission: 'read', consumers: [XSS, 'Lifeboat'], fields: ['password', XSS, null], rate_per_hour: 60, rate_burst: 10 }],
+  });
+  const grants = q(dialog, '[data-vault-share-grants]');
+  assert.equal(grants.querySelectorAll('img').length, 0);
+  const text = grants.textContent;
+  assert.ok(text.includes(XSS + ', Lifeboat'), 'the consumers');
+  assert.ok(text.includes('password, ' + XSS + ', ' + dialog.getAttribute('data-msg-field-hidden')), 'the fields; an unknown one by label');
+  assert.ok(text.includes(dialog.getAttribute('data-msg-server')));
+  assert.ok(q(grants, '[data-vault-revoke="-1"]'), 'a revoke button for Server');
+});
+
+test('revoking the Server grant says to rotate the secret at its provider', async () => {
+  const revokes = [];
+  const confirms = [];
+  const { dialog } = await openEntryShare({
+    ok: true, candidates: [], server: { available: true },
+    grants: [{ grantee_id: -1, name: 'Server', kind: 'server', permission: 'read', consumers: ['CveHunter'], fields: ['password'], rate_per_hour: 60, rate_burst: 10 }],
+  }, { revoke: (body) => { revokes.push(plain(body)); return { ok: true, suggest_rotate: true }; } }, { confirm: (m) => { confirms.push(m); return true; } });
+  const notice = q(dialog, '[data-vault-share-server-rotate]');
+  assert.equal(notice.hidden, true);
+  q(dialog, '[data-vault-revoke="-1"]').click();
+  await flush(10);
+  assert.deepEqual(revokes, [{ type: 'entry', id: '11', grantee_id: '-1' }]);
+  assert.deepEqual(confirms, [dialog.getAttribute('data-msg-confirm-revoke-server')]);
+  assert.equal(notice.hidden, false, 'the rotate-at-provider notice shows');
+  assert.match(notice.textContent, /provider/);
+  assert.equal(q(dialog, '[data-vault-share-rotate]').hidden, true, 'not the person notice');
+});
+
+test('the activity view shows Server reads as Server · consumer · field, with the reason', async () => {
+  const rows = [
+    { id: 4, created_at: 1800000000, action: 'server_read_denied', actor_kind: 'server', via: 'api', actor: null, target: null, object_type: 'entry', object_id: 11, title: 'E', count: null, ip_trunc: null, ua_family: null, consumer: XSS, field_name: 'password', entry_version: null, reason: 'consumer_not_allowed' },
+    { id: 3, created_at: 1800000000, action: 'server_read', actor_kind: 'server', via: 'api', actor: null, target: null, object_type: 'entry', object_id: 11, title: 'E', count: null, ip_trunc: null, ua_family: null, consumer: 'CveHunter', field_name: 'api key', entry_version: 2, reason: null },
+  ];
+  const p = page({ activity: () => ({ ok: true, rows, next_offset: null }) });
+  await flush();
+  q(p.doc, '[data-vault-action="activity"]').click();
+  await flush(10);
+  const body = q(p.doc, '[data-vault-activity-rows]');
+  const server = q(p.doc, '[data-vault-share]').getAttribute('data-msg-server');
+  const trs = body.querySelectorAll('tr');
+  assert.equal(trs.length, 2);
+  assert.equal(body.querySelectorAll('img').length, 0);
+  assert.ok(trs[0].textContent.includes(server + ' · ' + XSS + ' · password'));
+  assert.ok(trs[0].textContent.includes('consumer_not_allowed'));
+  assert.ok(trs[1].textContent.includes(server + ' · CveHunter · api key'));
+});

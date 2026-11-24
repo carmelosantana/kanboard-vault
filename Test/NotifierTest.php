@@ -1,11 +1,12 @@
 <?php
 require_once 'tests/units/Base.php';
-require_once __DIR__.'/Support/ServiceFixture.php';
+require_once __DIR__.'/Support/ServerFixture.php';
 
 use Kanboard\ServiceProvider\MailProvider;
 use Kanboard\Plugin\Vault\Crypto\RecoveryCode;
 use Kanboard\Plugin\Vault\Model\Notifier;
 use Kanboard\Plugin\Vault\Model\RotationService;
+use Kanboard\Plugin\Vault\Secrets\ServiceSecretException;
 use Kanboard\Plugin\Vault\Model\VaultSettings;
 use Kanboard\Plugin\Vault\Test\Support\Fixtures;
 use KanboardTests\units\Base;
@@ -16,10 +17,11 @@ use KanboardTests\units\Base;
 // No secret ever appears in an email.
 class NotifierTest extends Base
 {
-    use ServiceFixture;
+    use ServerFixture;
 
     /** @var list<array{0:string,1:string,2:string,3:string}> */
     private array $sent = [];
+    private bool $mailFails = false;
 
     protected function setUp(): void
     {
@@ -28,14 +30,19 @@ class NotifierTest extends Base
         $this->pdo()->prepare('UPDATE users SET email = ?, name = ? WHERE id = ?')->execute(['alice@example.test', 'Alice A', $this->alice]);
         $this->pdo()->prepare('UPDATE users SET email = ? WHERE id = ?')->execute(['bob@example.test', $this->bob]);
         $this->container['emailClient']->method('send')->willReturnCallback(function (...$args) {
+            if ($this->mailFails) {
+                throw new \RuntimeException('smtp down');
+            }
             $this->sent[] = array_slice($args, 0, 4);
             return $this->container['emailClient'];
         });
         $this->principals()->enrolHuman($this->alice, Fixtures::PASSPHRASE);
+        $this->setUpServer();
     }
 
     protected function tearDown(): void
     {
+        $this->tearDownServer();
         $this->tearDownVault();
         parent::tearDown();
     }
@@ -334,5 +341,75 @@ class NotifierTest extends Base
         foreach ($this->sent as $mail) {
             $this->assertNoSecretIn($mail);
         }
+    }
+
+    // Spec amendment: Audit → the first read by a new consumer emails the entry's owner, after the read commits. The
+    // mail names the consumer and the entry id only. Kills: no notice; a notice on every read; one per entry rather than
+    // per consumer; the title, a field or the value in the mail.
+    public function testFirstServerReadPerConsumerEmailsTheOwnerOnce(): void
+    {
+        $this->configureEmail();
+        $e = $this->serverShare(['CveHunter', 'Lifeboat'], ['password']);
+        $this->sent = [];
+        $this->serverSecrets()->read('CveHunter', "vault://$e/password");
+        $this->assertCount(1, $this->sent);
+        [$to, , $subject, $html] = $this->sent[0];
+        $this->assertSame('alice@example.test', $to);
+        $this->assertStringContainsString('CveHunter', $html);
+        $this->assertStringContainsString("#$e", $html);
+        $this->assertStringNotContainsString('password', $subject.$html);
+        $this->assertNoSecretIn($this->sent[0]);
+
+        $this->serverSecrets()->read('CveHunter', "vault://$e/password");
+        $this->assertCount(1, $this->sent, 'a second read by the same consumer sends nothing');
+        $this->serverSecrets()->read('Lifeboat', "vault://$e/password");
+        $this->assertCount(2, $this->sent, 'a new consumer is a first read');
+        $this->assertStringContainsString('Lifeboat', $this->sent[1][3]);
+        $this->assertNoSecretIn($this->sent[1]);
+    }
+
+    // Kills: the notice sent from a refusal (it is in the allowed branch only), or a refusal counted as the first read.
+    public function testDeniedServerReadSendsNothing(): void
+    {
+        $this->configureEmail();
+        $e = $this->serverShare(['CveHunter'], ['password']);
+        $this->sent = [];
+        foreach (['Lifeboat' => "vault://$e/password", 'CveHunter' => "vault://$e/notes"] as $consumer => $ref) {
+            try {
+                $this->serverSecrets()->read($consumer, $ref);
+                $this->fail('expected a refusal');
+            } catch (ServiceSecretException) {
+            }
+        }
+        $this->assertSame([], $this->sent);
+        $this->serverSecrets()->read('CveHunter', "vault://$e/password");
+        $this->assertCount(1, $this->sent);
+    }
+
+    // Best effort: no email, no address or a failing mailer never fails the read. Kills: the read made to depend on it.
+    public function testServerReadSucceedsWithoutMail(): void
+    {
+        $e = $this->serverShare(['CveHunter', 'Lifeboat', 'Patrol'], ['password']);
+        $this->assertSame(Fixtures::ENTRY_PASSWORD, $this->serverSecrets()->read('CveHunter', "vault://$e/password")->reveal());
+        $this->assertSame([], $this->sent);
+
+        $this->configureEmail();
+        $this->pdo()->prepare("UPDATE users SET email = '' WHERE id = ?")->execute([$this->alice]);
+        $this->assertSame(Fixtures::ENTRY_PASSWORD, $this->serverSecrets()->read('Lifeboat', "vault://$e/password")->reveal());
+        $this->assertSame([], $this->sent);
+
+        $this->pdo()->prepare('UPDATE users SET email = ? WHERE id = ?')->execute(['alice@example.test', $this->alice]);
+        $this->container['logger'] = $this->createMock(\Psr\Log\LoggerInterface::class);
+        $this->mailFails = true;
+        $this->assertSame(Fixtures::ENTRY_PASSWORD, $this->serverSecrets()->read('Patrol', "vault://$e/password")->reveal());
+        $this->assertCount(3, $this->auditRows('server_read'));
+    }
+
+    // Ruling 2: an owner with no live Kanboard user gets nothing and the notice reports false.
+    public function testServerFirstReadForAGoneUserSendsNothing(): void
+    {
+        $this->configureEmail();
+        $this->assertFalse((new Notifier($this->container))->serverFirstRead(987654, 'CveHunter', 1));
+        $this->assertSame([], $this->sent);
     }
 }

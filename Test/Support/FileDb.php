@@ -32,6 +32,9 @@ class VaultTestFileDb
             public function __construct(private \PDO $pdo) {}
             public function getConnection(): \PDO { return $this->pdo; }
         };
+        // What VaultLock's after-commit work (ServerEvents, its failure log) reaches for, as on a real install.
+        $c['dispatcher'] = new \Symfony\Component\EventDispatcher\EventDispatcher();
+        $c['logger'] = new \Psr\Log\NullLogger();
         return $c;
     }
 

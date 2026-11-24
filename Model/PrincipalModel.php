@@ -17,6 +17,17 @@ class PrincipalModel extends Base
     // Consecutive failed unlocks after which the user is told at the next unlock (banner; email later).
     public const NOTIFY_AFTER = 5;
 
+    // Schema v5: kind 'server' or 'host' exactly when user_id < 0 and live_user_id is NULL (Server is -1, hosts -2 and
+    // below; neither is ever a Kanboard user). SQLite and Postgres also hold it as a CHECK; MySQL and MariaDB may hold
+    // only the user_id half (they refuse a CHECK on live_user_id, an FK SET NULL column), so every principal insert or
+    // kind change calls this first. A LogicException: a caller bug, never user input.
+    public static function assertIdentity(string $kind, int $userId, ?int $liveUserId): void
+    {
+        if (in_array($kind, ['server', 'host'], true) !== ($userId < 0 && $liveUserId === null)) {
+            throw new \LogicException('Vault principal identity: kind '.$kind.' does not match user_id '.$userId.' and its live user');
+        }
+    }
+
     private ArgonSlots $slots;
     private Closure $argon2;
     private Closure $clock;
@@ -81,6 +92,16 @@ class PrincipalModel extends Base
             throw new VaultException('enrol_refused');
         }
         $this->checkPassphrase($passphrase, (string) $user['username'], (string) ($user['password'] ?? ''));
+        // Important 4: a deleted user's principal can still hold this id (SQLite reuses the newest deleted user id). The
+        // sweep releases one the purge hasn't reached yet; a tombstone (its orphans not yet claimed or destroyed) stays
+        // and the answer says so, rather than already_enrolled.
+        $existing = (new VaultDb($this->container))->fetchOne('SELECT live_user_id FROM vault_principals WHERE user_id = ?', [$userId]);
+        if ($existing !== null && $existing['live_user_id'] === null) {
+            (new Purger($this->container))->sweepOrphans($this->now());
+            if ($this->get($userId) !== null) {
+                throw new VaultException('id_held_by_orphans');
+            }
+        }
         if ($this->get($userId) !== null) {
             throw new VaultException('already_enrolled');
         }
@@ -100,6 +121,7 @@ class PrincipalModel extends Base
             $now = $this->now();
             (new VaultLock($this->container))->exclusive(function () use ($userId, $pk, $sk, $kek, $salt, $now): void {
                 $db = new VaultDb($this->container);
+                self::assertIdentity('human', $userId, $userId);
                 try {
                     $db->insert('vault_principals', [
                         'user_id' => $userId,

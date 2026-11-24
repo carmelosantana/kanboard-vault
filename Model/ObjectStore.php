@@ -202,6 +202,7 @@ class ObjectStore extends Base
                         throw new VaultException('conflict');
                     }
                     $this->audit('update', $actorId, 'entry', $entryId);
+                    ServerEvents::changed($this->container, $entryId, $expectedVersion + 1);
                     return $expectedVersion + 1;
                 } finally {
                     sodium_memzero($dek);
@@ -493,13 +494,13 @@ class ObjectStore extends Base
             $this->requireCurrentKey($db, $actorId, $sk);
             $this->audit('delete', $actorId, $type, $id);
             if ($type === 'entry') {
-                $this->purgeRefs($db, 'entry', [$id]);
-                $db->execute('DELETE FROM vault_entries WHERE id = ?', [$id]);
+                $this->purgeEntry($db, $id, $actorId);
                 return;
             }
             $levels = $this->resolver()->subtreeLevels($id);
             $groupIds = array_merge(...$levels);
             $entryIds = $this->resolver()->entriesIn($groupIds);
+            $this->revokeServerShares($db, $entryIds, $actorId);
             $this->purgeRefs($db, 'entry', $entryIds);
             $this->purgeRefs($db, 'group', $groupIds);
             foreach (array_chunk($entryIds, self::CHUNK) as $chunk) {
@@ -511,6 +512,68 @@ class ObjectStore extends Base
                 }
             }
         });
+    }
+
+    // One entry with its key, grant and re-key queue rows, inside the caller's exclusive lock; if it was shared with
+    // Server, server_revoke (actor $actorId) and vault.secret.revoked after the commit. The caller audits its own action.
+    public function purgeEntry(VaultDb $db, int $entryId, ?int $actorId = null): void
+    {
+        $this->revokeServerShares($db, [$entryId], $actorId);
+        $this->purgeRefs($db, 'entry', [$entryId]);
+        $db->execute('DELETE FROM vault_entries WHERE id = ?', [$entryId]);
+    }
+
+    // v5 owner deletion: every object the principal owns goes, inside the caller's exclusive lock (the purge's orphan
+    // sweep). Owned entries, and every owned group with its whole subtree, entries included, as the old users and
+    // group_id cascades took them. Key, grant and re-key queue rows go with them; groups are deleted bottom-up, as in
+    // deleteObject. Not audited, the same as the cascade. Returns how many objects were deleted.
+    // Task 11: $keepEntries (the quarantined orphans) and $keepGroups (their ancestor groups the principal owns) stay with
+    // their rows. A kept group's own subtree is not taken through it; owned objects inside it still go one by one.
+    /** @param list<int> $keepEntries @param list<int> $keepGroups */
+    public function deleteOwnedBy(VaultDb $db, int $principalId, array $keepEntries = [], array $keepGroups = []): int
+    {
+        $resolver = $this->resolver();
+        $keepEntry = array_fill_keys($keepEntries, true);
+        $seen = array_fill_keys($keepGroups, true);
+        $levelSets = [];
+        foreach ($db->fetchAll('SELECT id FROM vault_groups WHERE owner_id = ? ORDER BY id', [$principalId]) as $g) {
+            if (isset($seen[(int) $g['id']])) {
+                continue;
+            }
+            $levels = [];
+            foreach ($resolver->subtreeLevels((int) $g['id']) as $level) {
+                $level = array_values(array_filter($level, static fn (int $id): bool => ! isset($seen[$id])));
+                foreach ($level as $id) {
+                    $seen[$id] = true;
+                }
+                if ($level !== []) {
+                    $levels[] = $level;
+                }
+            }
+            $levelSets[] = $levels;
+        }
+        $groupIds = array_values(array_diff(array_map('intval', array_keys($seen)), $keepGroups));
+        $entryIds = $resolver->entriesIn($groupIds);
+        foreach ($db->fetchAll('SELECT id FROM vault_entries WHERE owner_id = ? ORDER BY id', [$principalId]) as $e) {
+            $entryIds[] = (int) $e['id'];
+        }
+        $entryIds = array_values(array_filter(array_unique($entryIds), static fn (int $id): bool => ! isset($keepEntry[$id])));
+        $this->revokeServerShares($db, $entryIds, null);
+        $this->purgeRefs($db, 'entry', $entryIds);
+        $this->purgeRefs($db, 'group', $groupIds);
+        foreach (array_chunk($entryIds, self::CHUNK) as $chunk) {
+            $db->execute('DELETE FROM vault_entries WHERE id IN ('.RecipientResolver::marks($chunk).')', $chunk);
+        }
+        // Each subtree deepest level first, in the order found. A later subtree skips the groups an earlier one took,
+        // and an earlier one holds every descendant of its groups, so a child always goes before its parent.
+        foreach ($levelSets as $levels) {
+            foreach (array_reverse($levels) as $level) {
+                foreach (array_chunk($level, self::CHUNK) as $chunk) {
+                    $db->execute('DELETE FROM vault_groups WHERE id IN ('.RecipientResolver::marks($chunk).')', $chunk);
+                }
+            }
+        }
+        return count($entryIds) + count($groupIds);
     }
 
     // Spec "Expiry reconciliation on write" and "Write barrier", for a payload write of an existing object.
@@ -629,9 +692,10 @@ class ObjectStore extends Base
         return $this->rekeyer()->currentPrincipal($db, $actorId, $sk) ?? throw new VaultException('not_found');
     }
 
+    // Server and host never own an object: only a holder (human or agent) creates one.
     private function requirePrincipal(VaultDb $db, int $userId): array
     {
-        return $this->rekeyer()->principal($db, $userId) ?? throw new VaultException('not_enrolled');
+        return $this->rekeyer()->holder($db, $userId) ?? throw new VaultException('not_enrolled');
     }
 
     private function fetchObject(VaultDb $db, string $type, int $id): ?array
@@ -650,6 +714,31 @@ class ObjectStore extends Base
             'created_at' => (int) ($row['created_at'] ?? 0),
             'updated_at' => (int) ($row['updated_at'] ?? 0),
         ];
+    }
+
+    // For each of these entries that has a Server grant (about to go with purgeRefs, which doesn't pass through
+    // removeSource): server_revoke in the caller's transaction (actor $actorId, or the system for the purge; Minor 5)
+    // and vault.secret.revoked after the commit. This is the only record and dispatch for these removals.
+    /** @param list<int> $entryIds */
+    private function revokeServerShares(VaultDb $db, array $entryIds, ?int $actorId): void
+    {
+        $audit = AuditModel::of($this->container, $this->clock);
+        foreach (array_chunk($entryIds, self::CHUNK) as $chunk) {
+            $rows = $db->fetchAll(
+                "SELECT subject_id, consumers, fields FROM vault_grants WHERE subject_type = 'entry' AND grantee_id = ? AND subject_id IN (".RecipientResolver::marks($chunk).') ORDER BY subject_id',
+                array_merge([ServerPrincipal::ID], $chunk)
+            );
+            foreach ($rows as $r) {
+                $audit->record('server_revoke', [
+                    'actor_user_id' => $actorId !== null && $actorId > 0 ? $actorId : null,
+                    'object_type' => 'entry',
+                    'object_id' => (int) $r['subject_id'],
+                    'consumers' => $r['consumers'],
+                    'fields' => $r['fields'],
+                ] + ($actorId === null ? ['actor_kind' => 'system'] : []));
+                ServerEvents::revoked($this->container, (int) $r['subject_id']);
+            }
+        }
     }
 
     /** @param list<int> $ids */

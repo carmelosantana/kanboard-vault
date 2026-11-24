@@ -1,7 +1,7 @@
 <?php
 namespace Kanboard\Plugin\Vault\Schema;
 
-const VERSION = 4;
+const VERSION = 5;
 
 // Binary values are base64 TEXT; timestamps are Unix seconds.
 // Ownership references to users(id) cascade; provenance columns (created_by, granted_by, audit actor/target) are SET NULL.
@@ -311,6 +311,163 @@ function version_4($pdo)
     $pdo->exec('ALTER TABLE vault_shares ADD COLUMN crypto_v INTEGER NOT NULL DEFAULT 1');
 }
 
+// Server reader (P1). Principals gain the kinds 'server' (user_id -1) and 'host' (-2 and below), which are never
+// Kanboard users: kind server/host ⇔ user_id < 0 and live_user_id NULL. A principal whose user is gone and whose entry
+// keeps a live Server grant stays as a tombstone, state 'orphaned'. Groups and entries now cascade off their owner
+// principal, not the users row (the v2/R26 pattern grants and key rows already follow), so the purge decides what a
+// deleted owner's objects become; owner_id keeps its value, so the AD that binds it still opens. Server grants carry
+// consumers, fields and a rate, and only Server holds them (entry-only, read, no expiry). The audit gains actor kind
+// 'server' and the Server/orphan columns; the vault_meta lock row holds the Server wrap and the sealed field-MAC key.
+//
+// The trap: Kanboard's SchemaHandler runs this inside its transaction, where its PRAGMA foreign_keys = OFF is a no-op,
+// so FKs stay on. DROP TABLE on a parent runs an implicit DELETE, which cascades into its children. So the new tables
+// are built beside the old ones (each referencing the new parents), filled parents first, and the old ones dropped
+// children first. An object whose owner isn't a principal fails its copy (FKs on) and with it the migration, loudly;
+// nothing is deleted silently. RENAME (SQLite >= 3.26) rewrites the other tables' REFERENCES to the final names.
+function version_5($pdo)
+{
+    $pdo->exec("ALTER TABLE vault_meta ADD COLUMN server_provider TEXT CHECK (server_provider IN ('file', 'migrating', 'joist'))");
+    $pdo->exec('ALTER TABLE vault_meta ADD COLUMN server_wrap_id INTEGER NOT NULL DEFAULT 0');
+    $pdo->exec('ALTER TABLE vault_meta ADD COLUMN server_wrap_nonce TEXT');
+    $pdo->exec('ALTER TABLE vault_meta ADD COLUMN server_wrapped_sk TEXT');
+    $pdo->exec('ALTER TABLE vault_meta ADD COLUMN server_field_mac_sealed TEXT');
+
+    $seq = [];
+    foreach (['vault_grants', 'vault_groups', 'vault_entries', 'vault_audit'] as $table) {
+        $seq[$table] = $pdo->query("SELECT seq FROM sqlite_sequence WHERE name = '".$table."'")->fetchColumn();
+    }
+
+    $pdo->exec("CREATE TABLE vault_principals_v5 (
+        user_id INTEGER PRIMARY KEY,
+        kind TEXT NOT NULL CHECK (kind IN ('human', 'agent', 'server', 'host')),
+        public_key TEXT NOT NULL,
+        key_gen INTEGER NOT NULL DEFAULT 1,
+        state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'rotating', 'orphaned')),
+        created_at INTEGER NOT NULL,
+        live_user_id INTEGER,
+        rotate_requested INTEGER NOT NULL DEFAULT 0,
+        notices INTEGER NOT NULL DEFAULT 0,
+        CHECK ((kind IN ('server', 'host')) = (user_id < 0 AND live_user_id IS NULL)),
+        FOREIGN KEY(live_user_id) REFERENCES users(id) ON DELETE SET NULL
+    )");
+    $pdo->exec("CREATE TABLE vault_groups_v5 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner_id INTEGER NOT NULL,
+        parent_id INTEGER,
+        kind TEXT NOT NULL DEFAULT 'normal' CHECK (kind IN ('normal', 'agent_created', 'import')),
+        key_epoch INTEGER NOT NULL DEFAULT 1,
+        nonce TEXT NOT NULL,
+        ciphertext TEXT NOT NULL,
+        crypto_v INTEGER NOT NULL,
+        position INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY(owner_id) REFERENCES vault_principals_v5(user_id) ON DELETE CASCADE,
+        FOREIGN KEY(parent_id) REFERENCES vault_groups_v5(id) ON DELETE CASCADE
+    )");
+    $pdo->exec('CREATE TABLE vault_entries_v5 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id INTEGER NOT NULL,
+        owner_id INTEGER NOT NULL,
+        created_by INTEGER,
+        version INTEGER NOT NULL DEFAULT 1,
+        key_epoch INTEGER NOT NULL DEFAULT 1,
+        nonce TEXT NOT NULL,
+        ciphertext TEXT NOT NULL,
+        crypto_v INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY(group_id) REFERENCES vault_groups_v5(id) ON DELETE CASCADE,
+        FOREIGN KEY(owner_id) REFERENCES vault_principals_v5(user_id) ON DELETE CASCADE,
+        FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE SET NULL
+    )');
+    $pdo->exec("CREATE TABLE vault_grants_v5 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        subject_type TEXT NOT NULL,
+        subject_id INTEGER NOT NULL,
+        grantee_id INTEGER NOT NULL,
+        permission TEXT NOT NULL,
+        granted_by INTEGER,
+        expires_at INTEGER,
+        created_at INTEGER NOT NULL,
+        consumers TEXT,
+        fields TEXT,
+        rate_per_hour INTEGER,
+        rate_burst INTEGER,
+        UNIQUE(subject_type, subject_id, grantee_id),
+        CHECK ((grantee_id = -1) = (consumers IS NOT NULL AND fields IS NOT NULL AND rate_per_hour IS NOT NULL AND rate_burst IS NOT NULL)),
+        CHECK (grantee_id >= 0 OR (subject_type = 'entry' AND permission = 'read' AND expires_at IS NULL)),
+        FOREIGN KEY(grantee_id) REFERENCES vault_principals_v5(user_id) ON DELETE CASCADE,
+        FOREIGN KEY(granted_by) REFERENCES users(id) ON DELETE SET NULL
+    )");
+    $pdo->exec('CREATE TABLE vault_keys_v5 (
+        object_type TEXT NOT NULL,
+        object_id INTEGER NOT NULL,
+        principal_id INTEGER NOT NULL,
+        principal_key_gen INTEGER NOT NULL,
+        key_epoch INTEGER NOT NULL,
+        sealed_dek TEXT NOT NULL,
+        PRIMARY KEY(object_type, object_id, principal_id, principal_key_gen),
+        FOREIGN KEY(principal_id) REFERENCES vault_principals_v5(user_id) ON DELETE CASCADE
+    )');
+
+    $copy = [
+        'vault_principals' => 'user_id, kind, public_key, key_gen, state, created_at, live_user_id, rotate_requested, notices',
+        'vault_groups' => 'id, owner_id, parent_id, kind, key_epoch, nonce, ciphertext, crypto_v, position, created_at, updated_at',
+        'vault_entries' => 'id, group_id, owner_id, created_by, version, key_epoch, nonce, ciphertext, crypto_v, created_at, updated_at',
+        'vault_grants' => 'id, subject_type, subject_id, grantee_id, permission, granted_by, expires_at, created_at',
+        'vault_keys' => 'object_type, object_id, principal_id, principal_key_gen, key_epoch, sealed_dek',
+    ];
+    foreach ($copy as $table => $columns) { // parents first
+        $pdo->exec('INSERT INTO '.$table.'_v5 ('.$columns.') SELECT '.$columns.' FROM '.$table);
+    }
+    foreach (array_reverse(array_keys($copy)) as $table) { // children first: a parent's DROP would cascade
+        $pdo->exec('DROP TABLE '.$table);
+    }
+    foreach (array_keys($copy) as $table) {
+        $pdo->exec('ALTER TABLE '.$table.'_v5 RENAME TO '.$table);
+    }
+
+    // Nothing references vault_audit, so it is rebuilt on its own, like version_3.
+    $pdo->exec("CREATE TABLE vault_audit_v5 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at INTEGER NOT NULL,
+        actor_user_id INTEGER,
+        actor_kind TEXT NOT NULL CHECK (actor_kind IN ('human', 'agent', 'public', 'cli', 'system', 'server')),
+        action TEXT NOT NULL,
+        object_type TEXT,
+        object_id INTEGER,
+        share_hash TEXT,
+        target_user_id INTEGER,
+        ip_trunc TEXT,
+        ua_family TEXT,
+        via TEXT NOT NULL CHECK (via IN ('ui', 'api', 'cli')),
+        count INTEGER,
+        consumer TEXT,
+        field_name TEXT,
+        entry_version INTEGER,
+        job_ref TEXT,
+        correlation_id TEXT,
+        reason TEXT,
+        consumers TEXT,
+        fields TEXT,
+        old_owner_id INTEGER,
+        new_owner_id INTEGER,
+        key_epoch INTEGER,
+        FOREIGN KEY(actor_user_id) REFERENCES users(id) ON DELETE SET NULL,
+        FOREIGN KEY(target_user_id) REFERENCES users(id) ON DELETE SET NULL
+    )");
+    $columns = 'id, created_at, actor_user_id, actor_kind, action, object_type, object_id, share_hash, target_user_id, ip_trunc, ua_family, via, count';
+    $pdo->exec('INSERT INTO vault_audit_v5 ('.$columns.') SELECT '.$columns.' FROM vault_audit');
+    $pdo->exec('DROP TABLE vault_audit');
+    $pdo->exec('ALTER TABLE vault_audit_v5 RENAME TO vault_audit');
+
+    foreach ($seq as $table => $value) {
+        restore_sequence($pdo, $table, $value);
+    }
+    $pdo->exec('CREATE INDEX IF NOT EXISTS vault_audit_object_idx ON vault_audit(object_id)');
+}
+
 // Copies $table into "<table>_v2" (created by $createSql) for rows whose $principalColumn names a principal,
 // swaps it in, and carries the AUTOINCREMENT counter over so ids are never reused.
 function rebuild_keeping_sequence($pdo, string $table, string $createSql, string $principalColumn): void
@@ -320,11 +477,20 @@ function rebuild_keeping_sequence($pdo, string $table, string $createSql, string
     $pdo->exec('INSERT INTO '.$table.'_v2 SELECT * FROM '.$table.' WHERE '.$principalColumn.' IN (SELECT user_id FROM vault_principals)');
     $pdo->exec('DROP TABLE '.$table);
     $pdo->exec('ALTER TABLE '.$table.'_v2 RENAME TO '.$table);
-    if ($seq !== false && $seq !== null) {
-        $stmt = $pdo->prepare('UPDATE sqlite_sequence SET seq = ? WHERE name = ? AND seq < ?');
-        $stmt->execute([(int) $seq, $table, (int) $seq]);
-        if ($pdo->query("SELECT COUNT(*) FROM sqlite_sequence WHERE name = '".$table."'")->fetchColumn() == 0) {
-            $pdo->prepare('INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)')->execute([$table, (int) $seq]);
-        }
+    restore_sequence($pdo, $table, $seq);
+}
+
+// Raises $table's AUTOINCREMENT counter back to $seq (as read from sqlite_sequence before a rebuild; false or null
+// when the table never had a row), inserting the counter row if the rebuilt table has none yet.
+function restore_sequence($pdo, string $table, $seq): void
+{
+    if ($seq === false || $seq === null) {
+        return;
+    }
+    $pdo->prepare('UPDATE sqlite_sequence SET seq = ? WHERE name = ? AND seq < ?')->execute([(int) $seq, $table, (int) $seq]);
+    $count = $pdo->prepare('SELECT COUNT(*) FROM sqlite_sequence WHERE name = ?');
+    $count->execute([$table]);
+    if ((int) $count->fetchColumn() === 0) {
+        $pdo->prepare('INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)')->execute([$table, (int) $seq]);
     }
 }

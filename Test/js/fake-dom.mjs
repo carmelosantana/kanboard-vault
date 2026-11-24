@@ -192,7 +192,7 @@ export const WORDLIST_URL = '/plugins/Vault/Assets/vendor/eff_large_wordlist.txt
 // The unlocked Vault page. api(action, body) answers each KBVault.api call; return a Promise to hold it. fetch, confirm
 // and prompt stand in for the window's. onetime: {Worker, scriptSrc} also loads the one-time link dialog and
 // vault-onetime.js (T18), with that Worker class and document.currentScript.src.
-export function loadPage({ api, crypto, wordlist = '', math = Math, fetch, confirm = () => true, prompt = () => null, onetime = null } = {}) {
+export function loadPage({ api, crypto, wordlist = '', math = Math, fetch, confirm = () => true, prompt = () => null, onetime = null, href = 'https://kb.test/?controller=VaultController&action=index&plugin=Vault' } = {}) {
   const doc = new Doc();
   const calls = [];
   const fetches = [];
@@ -223,7 +223,7 @@ export function loadPage({ api, crypto, wordlist = '', math = Math, fetch, confi
     navigator: { clipboard: { writeText: () => Promise.resolve() } },
     setTimeout: () => 0,
     clearTimeout: () => {},
-    location: { reload: () => {}, href: 'https://kb.test/?controller=VaultController&action=index&plugin=Vault' },
+    location: { reload: () => {}, href },
     Worker: onetime ? onetime.Worker : undefined,
     TextEncoder,
     TextDecoder,

@@ -225,6 +225,7 @@ abstract class BaseVaultController extends BaseController
         foreach (['sharing', 'grant', 'revoke', 'activity'] as $action) {
             $endpoints[$action] = $url($action, 'ShareGrantController');
         }
+        $endpoints['grant_server'] = $url('grantServer', 'ShareGrantController');
         $endpoints += ['passphrase' => $url('passphrase', 'SecurityController'), 'rotate' => $url('rotate', 'SecurityController'), 'recovery_code' => $url('recoveryCode', 'SecurityController')];
         foreach (['reserve', 'create', 'revoke', 'mine'] as $action) {
             $endpoints['share_'.$action] = $url($action, 'VaultShareController');
@@ -256,10 +257,12 @@ abstract class BaseVaultController extends BaseController
             'passphrase_weak' => t('Use at least %d characters, and not your username.', PrincipalModel::MIN_PASSPHRASE_CHARS),
             'passphrase_reuse' => t('Don\'t reuse your Kanboard login password.'),
             'already_enrolled' => t('Your vault is already set up. Reload the page.'),
+            'id_held_by_orphans' => t('Your vault can\'t be set up yet: your account reuses the user number of a deleted user whose entries are waiting for an administrator. Ask an administrator to claim or delete them in Settings → Vault.'),
             'forbidden' => t('The page expired. Reload it and try again.'),
             'failed' => t('Something went wrong. Try again.'),
             'locked' => t('Your vault is locked.'),
             'not_found' => t('Not found, or you no longer have access.'),
+            'not_allowed' => t('Only an administrator who was given access to this entry can claim it.'),
             'conflict' => t('This entry was changed elsewhere. Reload it, then edit again.'),
             'payload_invalid' => t('Some values are not valid.'),
             'payload_too_large' => t('This entry is too large.'),
@@ -299,6 +302,8 @@ abstract class BaseVaultController extends BaseController
             'hw_key_limit' => t('You have the most hardware keys allowed.'),
             'hw_enrolment_required' => t('Add two hardware keys before you use your vault.'),
             'hw_assertion_required' => t('Touch one of your hardware keys to confirm.'),
+            'server_off' => t('Server sharing is off. An administrator can turn it on in Settings → Vault.'),
+            'server_key_unavailable' => t('The Server key file is missing or not safe to use. See the deployment checks.'),
             'hw_unsupported' => t('This browser can\'t use hardware keys.'),
             'hw_prf_unsupported' => t('This key can\'t be used: it doesn\'t support the PRF extension.'),
             'hw_cancelled' => t('The hardware key request was cancelled or timed out.'),

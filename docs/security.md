@@ -11,7 +11,7 @@ reasoning, is the specification:
 
 | Threat | What holds |
 |---|---|
-| **A stolen database backup, with `config.php` and the environment.** | Nothing in a *current* backup decrypts without a user's vault passphrase (and hardware key, if enrolled). There is no app-wide master key: every user's private key is wrapped by a key derived from their own passphrase, and the session table holds the unlocked key only under a random key that lives in the user's cookie. A test dumps a populated database and checks that no fixture plaintext appears in it. |
+| **A stolen database backup, with `config.php` and the environment.** | Nothing in a *current* backup decrypts without a user's vault passphrase (and hardware key, if enrolled), except entries shared with Server when the backup also holds the Server key file (see *Server sharing* below). There is no app-wide master key: every user's private key is wrapped by a key derived from their own passphrase, and the session table holds the unlocked key only under a random key that lives in the user's cookie. A test dumps a populated database and checks that no fixture plaintext appears in it. |
 | **A leaked agent API token.** | On its own it opens nothing. Each agent also needs its vault key (header `X-Kanboard-Vault-Key`), which Vault never stores. Vault requires the Basic-auth password to be the API token, not a login password. Failed vault keys are throttled per agent and client IP, so a leaked token used from another address can't lock out the real agent's vault key. |
 | **Curious authenticated users, Kanboard admins included.** | They can't read entries that weren't shared with them, or whose share was revoked or expired. Resetting a user's login password or minting their API token gains nothing. There is no admin vault viewer. The org recovery key, when the admin enables it, is the stated exception. |
 | **Interception of a one-time link after use.** | A burned or expired link yields nothing. Knowing only the link's id (from an access log, say) can't burn it, and link previews can't either: revealing needs a click and a capability that lives only in the URL fragment. |
@@ -27,13 +27,66 @@ reasoning, is the specification:
   Vault pages. For strict isolation, run Vault on a dedicated install.
 - **Historical backups.** A backup taken before a passphrase change, a hardware-key enrolment or a revocation stays
   decryptable with the credentials valid at the time. Rotation protects later data only.
-- **Metadata.** Row counts, sizes, timestamps, who holds a grant on which object id, and the audit columns (actor ids,
-  actions, object ids, truncated IPs, browser and OS family) are stored in plaintext.
+- **Metadata.** Some of it is stored in plaintext by design. See *Metadata leakage* below.
 - **A recipient who keeps what they read.** Revocation can't un-show a secret.
 - **Malware on the user's device.**
 - **Availability.** Starving the Argon2 slots, the install-wide vault lock that one-time-link reveals also take, and
   the Kanboard core lockout of agents after failed API logins (see the README) are denial-of-service concerns, not
   confidentiality ones.
+
+### Server sharing
+
+Server sharing (off by default) lets a plugin read one field of an entry with nobody unlocked, through the install's
+Server principal. It narrows the backup promise by one deliberate act: an unlocked owner sharing one entry with
+Server. Server's secret key is wrapped on the `vault_meta` row under a 32-byte key file (`VAULT_SERVER_KEY_FILE`)
+that the database never holds.
+
+| Threat | What holds |
+|---|---|
+| **A stolen backup without the Server key file.** | Nothing decrypts, as before. |
+| **A stolen backup with the Server key file** (a data-directory backup on a plain install). | Only entries shared with Server decrypt. Entries shared only with people or agents stay closed. The deployment check stays red while the key file sits under `DATA_DIR`. |
+| **A buggy plugin reading the wrong secret.** | Each Server share names its consumers and fields. Another name gets `consumer_not_allowed` or `field_not_allowed`. |
+| **Silent or runaway use.** | Every read is audited as `server_read`, every refusal as `server_read_denied` with its reason. Reads are rate-limited per consumer and entry. The owner is emailed the first time each consumer reads each entry. |
+| **A tampered key file.** | A key file with a looser mode, another owner, a symbolic link anywhere in its path, a hard link or the wrong size fails closed. Vault never repairs, creates on read or replaces it. PHP can't open a path by walking directory descriptors (no `openat`/`O_NOFOLLOW`), so Vault checks each component, opens by path and checks again: a different local user who can rename a directory above the key file can race a substitution between the two. The inode and wrap checks make that a denial of service, not key injection (Codex R3-02, accepted). Keep every directory above the key file root-owned and not group- or world-writable. |
+| **A departed owner.** | Kanboard has no hook that can stop a user's deletion. Before it, the settings page and the owner's security page list entries at risk. After it, each Server-shared entry is an orphan, quarantined at once (`orphaned`) until an admin with a grant claims it (a full re-key) or an admin destroys it with step-up (the vault passphrase again). A deleted owner's entry that isn't shared with Server is never an orphan: claim and destroy run the purge's sweep first. |
+
+What Server sharing does not defend against:
+
+- **A compromised PHP process, or a malicious plugin.** It can read every entry shared with Server, as it can already
+  read any unlocked user's entries. Every plugin runs in the same process and can claim any consumer name, so the
+  consumer list, the rate buckets and the audit are **not** a boundary against it. This is an accepted risk (Codex
+  SEC-02/03): plugins are trusted. An out-of-process broker is a follow-up on Floorboard.
+- **Plaintext in PHP memory.** Every Server read puts the value in PHP memory. Vault zeroes its own copies where PHP
+  allows, but it can't reach the copies a consumer makes.
+- **A backup that contains the key file.** Keep the key file outside `DATA_DIR` and out of database backups.
+- **Root on the box.**
+
+`SecretValue`, what a read returns, makes a narrow claim. Its bytes live in a private static `WeakMap`, not a
+property, so `var_dump`, `print_r`, `var_export`, `json_encode` and a printed trace show nothing, and it can't be
+serialised, cloned or cast to a string. That stops a **wrapper** from leaking by accident. Vault's own copy is a
+buffer nothing else shares, and it is zeroed (`sodium_memzero`) when the `SecretValue` is collected. The string
+`reveal()` returns is a separate copy: ordinary PHP data, and Vault can't control its copies.
+
+The key file is stricter than Matinee's `KeyStore`, which follows path components and repairs a loose mode with
+`chmod`. Dropping that repair is a follow-up in Matinee.
+
+### Metadata leakage
+
+These are stored in plaintext, by design:
+
+- row counts, sizes and timestamps;
+- who holds a grant on which object id, with its permission and expiry;
+- on every audit row: its time, the action, the actor kind (`human`, `agent`, `public`, `cli`, `system`, `server`) and
+  the channel (`ui`, `api`, `cli`);
+- per audit action: actor ids, target user ids, object types and ids, one-time-link id hashes, truncated IPs, browser
+  and OS family, and counts (objects rotated, imported or exported, objects behind a refused agent enrolment,
+  aggregated rate-limit refusals);
+- with Server sharing: consumer names (on each share and each read), field names (top-level names in plaintext,
+  custom field names (as MACs): keyed hashes under a key sealed to Server), rates, read times (each `server_read`
+  row's time), entry versions, job refs, correlation ids, refusal reasons and counts (on `server_read_denied` and the
+  other `*_denied` rows: a reason such as `orphaned`, `revoked` or `rate_limited` shows share state and consumer
+  behaviour), old and new owner ids (old on quarantine, claim and destroy rows; new on claims), and key epochs of
+  claimed orphans.
 
 ### Deployment preconditions
 
@@ -70,6 +123,10 @@ Everything uses libsodium (ext-sodium) on the server, and WebCrypto plus vendore
 - **One-time links** encrypt in the browser with AES-256-GCM. The key, and the burn capability, live only in the URL
   fragment; an optional passphrase adds Argon2id (3 passes, 64 MiB, 1 lane) in a module worker.
 - **KeePassXC import and export** run in the browser. Export is checked in CI by two independent readers.
+- **Server** is a principal with the reserved id -1 and no Kanboard user. It never unlocks, owns or re-keys. Its
+  secret key is wrapped under the key file, and each shared entry's key is sealed to it like to any reader. A read
+  re-checks the live share, the consumer, the field, the owner and the rate inside one exclusive transaction that
+  also writes the audit row.
 
 ## Security review gates
 

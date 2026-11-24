@@ -1,22 +1,25 @@
 <?php
 require_once 'tests/units/Base.php';
-require_once __DIR__.'/Support/ServiceFixture.php';
+require_once __DIR__.'/Support/ServerFixture.php';
 require_once __DIR__.'/Support/VaultTestResponse.php';
 
 use Kanboard\Core\Http\Request;
 use Kanboard\Core\Security\Role;
 use Kanboard\Plugin\Vault\Controller\SettingsController;
 use Kanboard\Plugin\Vault\Model\AuditModel;
+use Kanboard\Plugin\Vault\Model\FailedGuess;
+use Kanboard\Plugin\Vault\Model\VaultDb;
 use Kanboard\Plugin\Vault\Model\VaultSession;
 use Kanboard\Plugin\Vault\Model\VaultSettings;
 use Kanboard\Plugin\Vault\Plugin;
+use Kanboard\Plugin\Vault\Test\Support\Fixtures;
 use KanboardTests\units\Base;
 
 // Spec: Admin settings, Audit (policy_change), Hardware keys (the bound rp_id is read-only), Unlocked sessions (the
 // effective idle cap); carries T9 (the policy only through setPolicy), R37 (integrity faults shown to the admin).
 class SettingsTest extends Base
 {
-    use ServiceFixture;
+    use ServerFixture;
 
     private array $cookies = [];
 
@@ -40,6 +43,7 @@ class SettingsTest extends Base
                 return $this->t->lifetime ?? parent::sessionLifetimeSeconds();
             }
         };
+        $this->setUpServer();
         $this->loginAs(self::ADMIN);
     }
 
@@ -47,6 +51,7 @@ class SettingsTest extends Base
 
     protected function tearDown(): void
     {
+        $this->tearDownServer();
         $this->tearDownVault();
         parent::tearDown();
     }
@@ -63,7 +68,10 @@ class SettingsTest extends Base
         if ($ajax ?? $method === 'POST') {
             $server['HTTP_X_REQUESTED_WITH'] = 'XMLHttpRequest';
         }
-        $this->container['request'] = new Request($this->container, $server, $get, $post, [], []);
+        // The cookie the last unlock set, if any (the vault session).
+        $last = $this->jar->last();
+        $cookies = $last === null || $last['value'] === '' ? [] : [$last['name'] => $last['value']];
+        $this->container['request'] = new Request($this->container, $server, $get, $post, [], $cookies);
         $response = new VaultTestResponse($this->container);
         $this->container['response'] = $response;
         (new SettingsController($this->container))->$action();
@@ -263,5 +271,281 @@ class SettingsTest extends Base
         $this->assertSame(1, $x->query('//*[@data-vault-mapped-cidr]')->length, 'the mapped CIDR is flagged');
         $this->assertStringContainsString('Vault/Assets/css/vault.css', $body);
         $this->assertStringNotContainsString('<script', preg_replace('~<script[^>]*src="[^"]*"[^>]*></script>~', '', $body), 'no inline script');
+    }
+
+    private function server_(array $post, bool $csrf = true, ?bool $ajax = null): VaultTestResponse
+    {
+        return $this->call('server', 'POST', $post + ($csrf ? ['csrf_token' => $this->token()] : []), $ajax);
+    }
+
+    // Spec amendment, Server sharing on and off; R2 (step-up). On: admin, CSRF, an unlocked vault and the admin's vault
+    // passphrase re-entered, checked by the throttled passphrase check (a wrong one is a failed guess and changes
+    // nothing). Off: admin and CSRF only, with the "off deletes every Server share" confirm.
+    // Kills: no admin check; no CSRF check; on without unlock or without the passphrase; a wrong passphrase not counted;
+    // off without the confirm; off demanding an unlocked vault.
+    public function testServerToggle(): void
+    {
+        unset($this->container['vaultRotation']);
+        $this->container['vaultRotation'] = fn () => $this->rotation();
+        $this->principals()->enrolHuman(self::ADMIN, Fixtures::PASSPHRASE);
+        $this->principals()->enrolHuman($this->bob, Fixtures::BOB_PASSPHRASE);
+        $on = fn (): bool => $this->server()->isOn();
+
+        $this->unlockAs($this->bob, Fixtures::BOB_PASSPHRASE, 'sid-bob');
+        $r = $this->server_(['enabled' => '1', 'passphrase' => Fixtures::BOB_PASSPHRASE]);
+        $this->assertHardened($r, 'non-admin');
+        $this->assertSame([403, ['ok' => false, 'reason' => 'forbidden']], [$r->status, $r->json_()], 'non-admin');
+        $this->assertFalse($on());
+
+        $this->jar->sets = [];
+        $this->loginAs(self::ADMIN);
+        $r = $this->server_(['enabled' => '1', 'passphrase' => Fixtures::PASSPHRASE]);
+        $this->assertSame([401, ['ok' => false, 'reason' => 'locked']], [$r->status, $r->json_()], 'admin, vault locked');
+        $this->assertFalse($on());
+
+        $this->unlockAs(self::ADMIN, Fixtures::PASSPHRASE, 'sid-admin');
+        $this->assertSame(403, $this->server_(['enabled' => '1', 'passphrase' => Fixtures::PASSPHRASE], false)->status, 'no CSRF token');
+        $this->assertSame(403, $this->call('server', 'GET', [], false, ['enabled' => '1', 'passphrase' => Fixtures::PASSPHRASE, 'csrf_token' => $this->token()])->status, 'GET');
+        $this->assertFalse($on());
+
+        $streak = fn (): int => FailedGuess::streak(new VaultDb($this->container), self::ADMIN);
+        foreach (['no passphrase' => [], 'wrong passphrase' => ['passphrase' => Fixtures::WRONG_PASSPHRASE]] as $what => $body) {
+            $s0 = $streak();
+            $failed = count($this->auditRows('unlock_failed'));
+            $r = $this->server_(['enabled' => '1'] + $body);
+            $this->assertSame([401, ['ok' => false, 'reason' => 'unlock_failed']], [$r->status, $r->json_()], $what);
+            $this->assertSame($s0 + 1, $streak(), "$what: a failed guess on the streak");
+            $this->assertCount($failed + 1, $this->auditRows('unlock_failed'), "$what: audited");
+            $this->assertFalse($on(), $what);
+            $this->assertFileDoesNotExist($this->keyPath, "$what: nothing created");
+        }
+        $this->assertSame([], $this->auditRows('policy_change'));
+
+        $r = $this->server_(['enabled' => '1', 'passphrase' => Fixtures::PASSPHRASE]);
+        $this->assertHardened($r, 'on');
+        $this->assertSame(['ok' => true], $r->json_());
+        $this->assertTrue($on());
+        $this->assertSame(0, $streak(), 'the right passphrase resets the streak');
+        $this->assertCount(1, $this->auditRows('policy_change'));
+        foreach ([$r->body, implode('', $r->headers)] as $out) {
+            $this->assertStringNotContainsString(Fixtures::PASSPHRASE, $out);
+        }
+
+        // The page: on, the configured key path read-only, the off form with its confirm.
+        $x = $this->dom($this->call('index')->body);
+        $this->assertSame('on', $x->query('//*[@data-vault-server-state]')->item(0)?->getAttribute('data-vault-server-state'));
+        $path = $x->query('//input[@data-vault-server-key-path]')->item(0);
+        $this->assertSame([$this->keyPath, true], [$path?->getAttribute('value'), $path?->hasAttribute('readonly')]);
+        $off = $x->query('//form[@data-vault-form="server"]')->item(0);
+        $this->assertStringContainsString('action=server', $off?->getAttribute('action'));
+        $this->assertSame(1, $x->query('.//input[@name="confirm"][@value="1"][@required]', $off)->length, 'the off confirm');
+        $this->assertSame(1, $x->query('.//input[@name="enabled"][@value="0"]', $off)->length);
+
+        // Off: the confirm is required; admin and CSRF only, so it works with the vault locked.
+        $this->jar->sets = [];
+        $r = $this->server_(['enabled' => '0']);
+        $this->assertSame([400, ['ok' => false, 'reason' => 'payload_invalid']], [$r->status, $r->json_()], 'off without confirm');
+        $this->assertTrue($on());
+        $this->assertSame(403, $this->server_(['enabled' => '0', 'confirm' => '1'], false)->status, 'off without CSRF');
+        $this->assertTrue($on());
+        $this->loginAs($this->bob);
+        $this->assertSame(403, $this->server_(['enabled' => '0', 'confirm' => '1'])->status, 'off as a non-admin');
+        $this->assertTrue($on());
+        $this->loginAs(self::ADMIN);
+        $r = $this->server_(['enabled' => '0', 'confirm' => '1'], true, false);
+        $this->assertStringEndsWith('vault_notice=saved', $r->headers['Location'] ?? '', 'native off: back to the page');
+        $this->assertFalse($on());
+        $this->assertCount(2, $this->auditRows('policy_change'));
+
+        // Off, the page offers the on form with the passphrase field.
+        $x = $this->dom($this->call('index')->body);
+        $this->assertSame('off', $x->query('//*[@data-vault-server-state]')->item(0)?->getAttribute('data-vault-server-state'));
+        $form = $x->query('//form[@data-vault-form="server"]')->item(0);
+        $this->assertSame(1, $x->query('.//input[@name="enabled"][@value="1"]', $form)->length);
+        $in = $x->query('.//input[@name="passphrase"]', $form)->item(0);
+        $this->assertSame(['password', 'off'], [$in?->getAttribute('type'), $in?->getAttribute('autocomplete')]);
+        $this->assertTrue($this->container['token']->validateReusableCSRFToken($x->query('.//input[@name="csrf_token"]/@value', $form)->item(0)?->nodeValue));
+    }
+
+    // Task 7: the admin maximum of a Server grant's rate and burst. Each validates its range, saves from the form
+    // (one policy_change per change) and the page shows it with its bounds. Kills: a missing FIELDS entry; a wrong
+    // range; no input on the page.
+    public function testServerRateMaximums(): void
+    {
+        $this->assertSame([60, 10], [$this->settings()->get('vault_server_rate_max'), $this->settings()->get('vault_server_burst_max')]);
+        foreach (['vault_server_rate_max' => [1, 10000], 'vault_server_burst_max' => [1, 1000]] as $key => [$min, $max]) {
+            foreach ([$min - 1, $max + 1, 'x', '1.5'] as $bad) {
+                $r = $this->save([$key => (string) $bad]);
+                $this->assertSame([400, ['ok' => false, 'reason' => 'payload_invalid']], [$r->status, $r->json_()], "$key = $bad");
+            }
+            $x = $this->dom($this->call('index')->body);
+            $this->assertSame([(string) $min, (string) $max], [$x->query('//input[@name="'.$key.'"]/@min')->item(0)?->nodeValue, $x->query('//input[@name="'.$key.'"]/@max')->item(0)?->nodeValue], $key);
+        }
+        $this->assertSame([], $this->auditRows('policy_change'));
+        $this->assertSame(['ok' => true], $this->save(['vault_server_rate_max' => '10000', 'vault_server_burst_max' => '1'])->json_());
+        $this->assertSame([10000, 1], [$this->settings()->get('vault_server_rate_max'), $this->settings()->get('vault_server_burst_max')]);
+        $this->assertCount(2, $this->auditRows('policy_change'));
+        $x = $this->dom($this->call('index')->body);
+        $this->assertSame('10000', $x->query('//input[@name="vault_server_rate_max"]/@value')->item(0)?->nodeValue);
+        $this->assertSame('1', $x->query('//input[@name="vault_server_burst_max"]/@value')->item(0)?->nodeValue);
+    }
+
+    // Spec amendment, requirement 14 (orphans) and the at-risk warning: Settings → Vault lists the quarantined orphans
+    // and the entries at risk by entry id only (no title, no group name of another user), with a claim form whose group
+    // <select> is filled only while the admin's vault is unlocked (their own groups, decrypted) and a step-up destroy form.
+    // Kills: the lists missing; a title or group name of the owner in the page; the select filled while locked; the
+    // destroy passphrase input without the password-manager opt-outs.
+    public function testPageListsOrphansAndEntriesAtRisk(): void
+    {
+        $this->principals()->enrolHuman($this->alice, $this->alicePassphrase);
+        $this->principals()->enrolHuman($this->bob, Fixtures::BOB_PASSPHRASE);
+        $this->principals()->enrolHuman(self::ADMIN, Fixtures::PASSPHRASE);
+        $this->enableServer();
+        $share = function (int $owner, string $sk): int {
+            $g = $this->store()->createGroup($owner, null, ['name' => Fixtures::GROUP_NAME]);
+            $e = $this->store()->createEntry($owner, $g, Fixtures::entry(Fixtures::ENTRY_TITLE));
+            $this->grants()->grantServer($owner, $e, ['CveHunter'], ['password'], null, null, $sk);
+            return $e;
+        };
+        $orphan = $share($this->alice, $this->skFor($this->alice, $this->alicePassphrase));
+        $this->grants()->grant($this->alice, 'entry', $orphan, self::ADMIN, 'read', null, $this->skFor($this->alice, $this->alicePassphrase));
+        $atRisk = $share($this->bob, $this->skFor($this->bob, Fixtures::BOB_PASSPHRASE));
+        $this->assertTrue($this->container['userModel']->remove($this->alice));
+        (new \Kanboard\Plugin\Vault\Model\Purger($this->container))->run($this->now, true);
+        $adminGroup = $this->store()->createGroup(self::ADMIN, null, ['name' => 'AdminOwnClaimTarget']);
+
+        $ids = fn (\DOMXPath $x, string $attr): array => array_map(static fn ($n): int => (int) $n->getAttribute($attr), iterator_to_array($x->query('//*[@'.$attr.']')));
+
+        // Locked: the lists, no group select.
+        $body = $this->call('index')->body;
+        $x = $this->dom($body);
+        $this->assertSame([$orphan], $ids($x, 'data-vault-orphan'));
+        $this->assertSame([$atRisk], $ids($x, 'data-vault-at-risk'));
+        $this->assertSame(0, $x->query('//select[@name="group_id"]')->length, 'no select while locked');
+        $this->assertStringContainsString('Unlock your vault to claim', $body);
+        $this->assertSame(0, $x->query('//*[@data-vault-check="entries_at_risk"][contains(@class, "vault-check-ok")]')->length, 'the at-risk check warns');
+        foreach (['server_sharing', 'key_provider', 'entries_at_risk'] as $key) {
+            $this->assertSame(1, $x->query('//*[@data-vault-check="'.$key.'"]')->length, "check $key listed");
+        }
+        foreach ([Fixtures::ENTRY_TITLE, Fixtures::GROUP_NAME, Fixtures::ENTRY_PASSWORD, 'AdminOwnClaimTarget'] as $secret) {
+            $this->assertStringNotContainsString($secret, $body);
+        }
+
+        // The destroy form: POST to orphans/destroy with the CSRF token, the entry id and a step-up passphrase input.
+        $destroy = $x->query('//form[@data-vault-form="orphan-destroy"]')->item(0);
+        $this->assertSame('post', $destroy?->getAttribute('method'));
+        $this->assertStringContainsString('action=destroy', $destroy->getAttribute('action'));
+        $this->assertStringContainsString('controller=OrphanController', $destroy->getAttribute('action'));
+        $this->assertSame((string) $orphan, $x->query('.//input[@name="entry_id"]/@value', $destroy)->item(0)?->nodeValue);
+        $this->assertTrue($this->container['token']->validateReusableCSRFToken($x->query('.//input[@name="csrf_token"]/@value', $destroy)->item(0)?->nodeValue));
+        $in = $x->query('.//input[@name="passphrase"]', $destroy)->item(0);
+        $this->assertSame(['password', 'off', 'true'], [$in?->getAttribute('type'), $in?->getAttribute('autocomplete'), $in?->getAttribute('data-lpignore')]);
+        $this->assertTrue($in->hasAttribute('data-1p-ignore') && $in->hasAttribute('data-bwignore'), 'A9');
+
+        // Unlocked: the claim form offers the admin's own groups by their decrypted names.
+        $this->unlockAs(self::ADMIN, Fixtures::PASSPHRASE, 'sid-admin');
+        $body = $this->call('index')->body;
+        $x = $this->dom($body);
+        $claim = $x->query('//form[@data-vault-form="orphan-claim"]')->item(0);
+        $this->assertStringContainsString('action=claim', $claim?->getAttribute('action'));
+        $this->assertSame((string) $orphan, $x->query('.//input[@name="entry_id"]/@value', $claim)->item(0)?->nodeValue);
+        $options = [];
+        foreach ($x->query('.//select[@name="group_id"]/option', $claim) as $o) {
+            $options[(int) $o->getAttribute('value')] = trim($o->textContent);
+        }
+        $this->assertSame([$adminGroup => 'AdminOwnClaimTarget'], $options);
+        $this->assertStringNotContainsString('Unlock your vault to claim', $body);
+        foreach ([Fixtures::ENTRY_TITLE, Fixtures::GROUP_NAME] as $secret) {
+            $this->assertStringNotContainsString($secret, $body);
+        }
+
+        // A native claim or destroy comes back here with its notice.
+        $x = $this->dom($this->call('index', 'GET', [], null, ['vault_notice' => 'orphan_claimed'])->body);
+        $this->assertSame(1, $x->query('//*[@data-vault-orphan-notice]')->length);
+    }
+
+    // Alice's entry, shared with Server and read-shared with the admin; alice deleted and purged (a tombstone). The
+    // admin owns the group AdminOwnClaimTarget.
+    /** @return array{0:int, 1:int} [orphan entry, admin group] */
+    private function orphanFixture(): array
+    {
+        $this->principals()->enrolHuman($this->alice, $this->alicePassphrase);
+        $this->principals()->enrolHuman(self::ADMIN, Fixtures::PASSPHRASE);
+        $this->enableServer();
+        $aliceSk = $this->skFor($this->alice, $this->alicePassphrase);
+        $g = $this->store()->createGroup($this->alice, null, ['name' => Fixtures::GROUP_NAME]);
+        $e = $this->store()->createEntry($this->alice, $g, Fixtures::entry(Fixtures::ENTRY_TITLE));
+        $this->grants()->grantServer($this->alice, $e, ['CveHunter'], ['password'], null, null, $aliceSk);
+        $this->grants()->grant($this->alice, 'entry', $e, self::ADMIN, 'read', null, $aliceSk);
+        $this->assertTrue($this->container['userModel']->remove($this->alice));
+        (new \Kanboard\Plugin\Vault\Model\Purger($this->container))->run($this->now, true);
+        return [$e, $this->store()->createGroup(self::ADMIN, null, ['name' => 'AdminOwnClaimTarget'])];
+    }
+
+    // Important 4: a user who now holds a tombstoned id (SQLite reuses the newest deleted id) is named on the page,
+    // since they can't enrol until the orphans are resolved. Kills: no flag.
+    public function testPageFlagsAUserIdHeldByATombstone(): void
+    {
+        $this->orphanFixture();
+        $x = $this->dom($this->call('index')->body);
+        $this->assertSame(0, $x->query('//*[@data-vault-blocked-id]')->length, 'nobody holds the id yet');
+        $this->container['userModel']->create(['id' => $this->alice, 'username' => 'reuses-alices-id', 'password' => 'reuser login password 1']);
+        $x = $this->dom($this->call('index')->body);
+        $this->assertSame([(string) $this->alice], array_map(static fn ($n): string => $n->getAttribute('data-vault-blocked-id'), iterator_to_array($x->query('//*[@data-vault-blocked-id]'))));
+    }
+
+    // Important 2: an admin who must still enrol hardware keys is locked on every other page, so Settings → Vault
+    // doesn't decrypt their vault either (requireUnlocked's predicate). Kills: the tree decrypted from the bare session key.
+    public function testAnAdminWhoMustEnrolHardwareKeysIsTreatedAsLocked(): void
+    {
+        $this->orphanFixture();
+        $this->unlockAs(self::ADMIN, Fixtures::PASSPHRASE, 'sid-admin');
+        $this->assertSame(1, $this->dom($this->call('index')->body)->query('//select[@name="group_id"]')->length, 'unlocked: the select');
+        $this->settings()->set('vault_hw_required', '1', self::ADMIN);
+        $body = $this->call('index')->body;
+        $this->assertSame(0, $this->dom($body)->query('//select[@name="group_id"]')->length);
+        $this->assertStringContainsString('Unlock your vault to claim', $body);
+        $this->assertStringNotContainsString('AdminOwnClaimTarget', $body);
+    }
+
+    // Important 2: the admin's tree is decrypted only when there is an orphan to claim. Kills: tree() on every load.
+    public function testTheTreeIsDecryptedOnlyWhenThereAreOrphans(): void
+    {
+        $calls = 0;
+        unset($this->container['vaultStore']);
+        $this->container['vaultStore'] = function ($c) use (&$calls) {
+            return new class($c, $calls) extends \Kanboard\Plugin\Vault\Model\ObjectStore {
+            public function __construct($c, private int &$calls)
+            {
+                parent::__construct($c);
+            }
+
+            public function tree(int $actorId, #[\SensitiveParameter] string $sk): array
+            {
+                $this->calls++;
+                return parent::tree($actorId, $sk);
+            }
+        };
+        };
+        $this->principals()->enrolHuman(self::ADMIN, Fixtures::PASSPHRASE);
+        $this->unlockAs(self::ADMIN, Fixtures::PASSPHRASE, 'sid-admin');
+        $this->call('index');
+        $this->assertSame(0, $calls, 'no orphans, no decrypt');
+        $this->call('index');
+        $this->assertSame(0, $calls);
+    }
+
+    // Minor 2: Claim is offered only to an admin who holds a grant on the orphan; another admin sees why not, and the
+    // delete form. Kills: the claim form for every admin.
+    public function testClaimIsOfferedOnlyToAGrantHolder(): void
+    {
+        [$e] = $this->orphanFixture();
+        $this->unlockAs(self::ADMIN, Fixtures::PASSPHRASE, 'sid-admin');
+        $this->pdo()->prepare("DELETE FROM vault_grants WHERE subject_type = 'entry' AND subject_id = ? AND grantee_id = ?")->execute([$e, self::ADMIN]);
+        $body = $this->call('index')->body;
+        $x = $this->dom($body);
+        $this->assertSame(0, $x->query('//form[@data-vault-form="orphan-claim"]')->length);
+        $this->assertSame(1, $x->query('//*[@data-vault-no-claim="'.$e.'"]')->length);
+        $this->assertSame(1, $x->query('//form[@data-vault-form="orphan-destroy"]')->length);
     }
 }

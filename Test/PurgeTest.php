@@ -254,6 +254,107 @@ class PurgeTest extends Base
         $this->assertVaultError('not_enrolled', fn () => $this->grants()->grant($this->alice, 'entry', $this->e3, $this->bob, 'read', null, $this->sk[$this->alice]));
     }
 
+    // v5: objects reference the owner's principal, so deleting the owner's Kanboard user cascades nothing. Until the
+    // sweep runs, nobody reads them (the old cascade removed them at once); the sweep then deletes them and their grant,
+    // key and queue rows, then the principal. Kills: the resolver still serving a gone owner's objects; the sweep
+    // leaving owned objects or their rows behind (relying on orphanRows, which the bare sweep doesn't run).
+    public function testDeletedOwnersObjectsAreUnreadableThenSwept(): void
+    {
+        $this->grants()->grant($this->alice, 'group', $this->g1, $this->bob, 'read', null, $this->sk[$this->alice]);
+        $this->store()->readEntry($this->bob, $this->e1, $this->sk[$this->bob]); // control: bob can read
+        $this->assertTrue($this->container['userModel']->remove($this->alice));
+        $this->assertSame(1, $this->countRows('SELECT COUNT(*) FROM vault_entries WHERE id = ?', [$this->e1]));
+        $this->assertVaultError('not_found', fn () => $this->store()->readEntry($this->bob, $this->e1, $this->sk[$this->bob]));
+
+        $this->assertSame(1, $this->purger()->sweepOrphans($this->now));
+        $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_entries WHERE owner_id = ?', [$this->alice]));
+        $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_groups WHERE owner_id = ?', [$this->alice]));
+        foreach ([['entry', [$this->e1, $this->e3]], ['group', [$this->g1, $this->g2, $this->g3]]] as [$type, $ids]) {
+            foreach ($ids as $id) {
+                $this->assertSame(0, $this->countRows("SELECT COUNT(*) FROM vault_grants WHERE subject_type = ? AND subject_id = ?", [$type, $id]));
+                $this->assertSame(0, $this->countRows("SELECT COUNT(*) FROM vault_keys WHERE object_type = ? AND object_id = ?", [$type, $id]));
+                $this->assertSame(0, $this->countRows("SELECT COUNT(*) FROM vault_rekey_queue WHERE object_type = ? AND object_id = ?", [$type, $id]));
+            }
+        }
+        $this->assertNull($this->row('SELECT user_id FROM vault_principals WHERE user_id = ?', [$this->alice]));
+    }
+
+    // Before v5 the group_id and parent_id cascades took other users' objects inside a deleted owner's groups at once.
+    // So an object under a group whose owner is gone is readable by nobody, its own live owner included, until the
+    // sweep deletes it. The API never nests one owner's objects under another's (an entry takes its group's owner, a
+    // subgroup needs the parent's owner), so the fixture moves bob's group under alice's g1 directly. Kills: ownerGone
+    // checking only the object's own owner.
+    public function testObjectsUnderADeletedOwnersGroupAreUnreadableThenSwept(): void
+    {
+        $gb = $this->store()->createGroup($this->bob, null, ['name' => 'gb']);
+        $eb = $this->store()->createEntry($this->bob, $gb, ['title' => 'eb', 'password' => 'pw-eb']);
+        $this->grants()->grant($this->bob, 'entry', $eb, $this->carol, 'read', null, $this->sk[$this->bob]);
+        $this->pdo()->prepare('UPDATE vault_groups SET parent_id = ? WHERE id = ?')->execute([$this->g1, $gb]);
+        $this->store()->readEntry($this->bob, $eb, $this->sk[$this->bob]); // control: both can read
+        $this->store()->readEntry($this->carol, $eb, $this->sk[$this->carol]);
+        $this->assertTrue($this->container['userModel']->remove($this->alice));
+
+        $this->assertSame(1, $this->countRows('SELECT COUNT(*) FROM vault_entries WHERE id = ?', [$eb]));
+        $this->assertVaultError('not_found', fn () => $this->store()->readEntry($this->bob, $eb, $this->sk[$this->bob]));
+        $this->assertVaultError('not_found', fn () => $this->store()->readEntry($this->carol, $eb, $this->sk[$this->carol]));
+        $this->assertVaultError('not_found', fn () => $this->store()->readGroup($this->bob, $gb, $this->sk[$this->bob]));
+
+        $this->assertSame(1, $this->purger()->sweepOrphans($this->now));
+        $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_entries WHERE id = ?', [$eb]));
+        $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_groups WHERE id = ?', [$gb]));
+        foreach ([['entry', $eb], ['group', $gb]] as [$type, $id]) {
+            $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_grants WHERE subject_type = ? AND subject_id = ?', [$type, $id]));
+            $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_keys WHERE object_type = ? AND object_id = ?', [$type, $id]));
+            $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_rekey_queue WHERE object_type = ? AND object_id = ?', [$type, $id]));
+        }
+        $this->assertNotNull($this->row('SELECT user_id FROM vault_principals WHERE user_id = ?', [$this->bob]), 'bob is live');
+    }
+
+    // deleteOwnedBy with several owned roots, nested both ways: alice's g1 (lowest id, found first) is moved under
+    // bob's gy, which sits under alice's gx (found later, so its subtree skips g1..g3). Bob's entry in gy goes with
+    // it; an alice-owned entry in bob's unrelated gz goes alone, and gz stays. Kills: only one root handled, a later root's
+    // subtree counted twice, owned entries outside owned groups left behind, unowned groups outside the subtrees taken.
+    public function testDeleteOwnedByHandlesMultipleAndNestedRoots(): void
+    {
+        $s = $this->store();
+        $gx = $s->createGroup($this->alice, null, ['name' => 'gx']);
+        $gy = $s->createGroup($this->bob, null, ['name' => 'gy']);
+        $gz = $s->createGroup($this->bob, null, ['name' => 'gz']);
+        $eby = $s->createEntry($this->bob, $gy, ['title' => 'eby', 'password' => 'pw']);
+        $this->grants()->grant($this->bob, 'group', $gz, $this->alice, 'edit', null, $this->sk[$this->bob]);
+        $eaz = $s->createEntry($this->alice, $gz, ['title' => 'eaz', 'password' => 'pw']);
+        $ebz = $s->createEntry($this->bob, $gz, ['title' => 'ebz', 'password' => 'pw']);
+        // The API gives an entry its group's owner; an owned entry outside owned groups is made directly.
+        $this->pdo()->prepare('UPDATE vault_entries SET owner_id = ? WHERE id = ?')->execute([$this->alice, $eaz]);
+        $this->pdo()->prepare('UPDATE vault_groups SET parent_id = ? WHERE id = ?')->execute([$gx, $gy]);
+        $this->pdo()->prepare('UPDATE vault_groups SET parent_id = ? WHERE id = ?')->execute([$gy, $this->g1]);
+
+        $n = (new \Kanboard\Plugin\Vault\Model\VaultLock($this->container))->exclusive(
+            fn (): int => $this->store()->deleteOwnedBy(new \Kanboard\Plugin\Vault\Model\VaultDb($this->container), $this->alice)
+        );
+        // groups g1, g2, g3, gx, gy; entries e1, e3, eby, eaz
+        $this->assertSame(9, $n);
+        $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_groups WHERE owner_id = ?', [$this->alice]));
+        $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_entries WHERE owner_id = ?', [$this->alice]));
+        $this->assertSame([$gz], array_map('intval', $this->pdo()->query('SELECT id FROM vault_groups ORDER BY id')->fetchAll(\PDO::FETCH_COLUMN)));
+        $this->assertSame([$ebz], array_map('intval', $this->pdo()->query('SELECT id FROM vault_entries ORDER BY id')->fetchAll(\PDO::FETCH_COLUMN)));
+        foreach ([['entry', [$this->e1, $this->e3, $eby, $eaz]], ['group', [$this->g1, $this->g2, $this->g3, $gx, $gy]]] as [$type, $ids]) {
+            foreach ($ids as $id) {
+                $this->assertSame(0, $this->countRows('SELECT COUNT(*) FROM vault_keys WHERE object_type = ? AND object_id = ?', [$type, $id]));
+            }
+        }
+        $this->assertSame(1, $this->countRows("SELECT COUNT(*) FROM vault_grants WHERE subject_type = 'group' AND subject_id = ?", [$gz]), "gz's own grant stays");
+    }
+
+    // Server and host principals have live_user_id NULL by design. Kills: the sweep's kind filter missing.
+    public function testSweepNeverTakesServerOrHostPrincipals(): void
+    {
+        $this->pdo()->exec("INSERT INTO vault_principals (user_id, kind, public_key, key_gen, state, created_at, live_user_id)
+            VALUES (-1, 'server', 'cGs=', 1, 'active', 1, NULL), (-2, 'host', 'cGs=', 1, 'active', 1, NULL)");
+        $this->purger()->run($this->now, true);
+        $this->assertSame(2, $this->countRows('SELECT COUNT(*) FROM vault_principals WHERE user_id < 0'));
+    }
+
     // R8(b): grant, key and re-key queue rows whose object no longer exists are removed; rows for live objects stay.
     // Kills: leaving orphans, or deleting by type alone.
     public function testPurgeRemovesOrphanedPolymorphicRows(): void

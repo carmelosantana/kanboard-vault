@@ -4,9 +4,10 @@ namespace Kanboard\Plugin\Vault\Model;
 use Kanboard\Core\Base;
 use Throwable;
 
-// Email notices (R19; spec: Throttling, Recovery, One-time shares, Agents), sent through Kanboard's emailClient
-// and skipped when email isn't configured. Each notice is fixed text plus the recipient's own name; none carries a
-// secret, an entry, a share label or an IP.
+// Email notices (R19; spec: Throttling, Recovery, One-time shares, Agents, Server first read), sent through Kanboard's
+// emailClient and skipped when email isn't configured. Each notice is fixed text plus the recipient's own name; none
+// carries a secret, an entry's title or fields, a share label or an IP. The Server first-read notice names the
+// consumer and the entry id only.
 //
 // "Configured" (emailConfigured, mailUsable). Kanboard registers its smtp, sendmail and mail transports on every
 // install and defaults to MAIL_TRANSPORT = mail with MAIL_FROM = notifications@kanboard.local, so registration says
@@ -114,6 +115,13 @@ class Notifier extends Base
     {
         return $this->notice($userId, t('Vault: an agent was re-keyed; re-share?'),
             t('The agent %s was given a new vault key, so what you shared with it was unshared. Share it again if the agent still needs it.', $this->username($agentId)));
+    }
+
+    // To an entry's owner, after the first Server read of it by $consumer (ServerSecrets, after the read commits).
+    public function serverFirstRead(int $ownerUserId, string $consumer, int $entryId): bool
+    {
+        return $this->notice($ownerUserId, t('Vault: a service read one of your entries for the first time'),
+            t('The service %s read entry #%d through the Server principal for the first time. If you did not expect this, revoke its Server share and see your Vault activity.', $consumer, $entryId));
     }
 
     private function notice(int $userId, string $subject, string $text): bool

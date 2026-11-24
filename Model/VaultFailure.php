@@ -27,8 +27,12 @@ final class VaultFailure
         'passphrase_reuse' => [422, 'passphrase_reuse'],
         'passphrase_mismatch' => [422, 'passphrase_mismatch'],
         'already_enrolled' => [409, 'already_enrolled'],
+        // Important 4: this user id still belongs to a deleted user's orphans (SQLite reuses ids).
+        'id_held_by_orphans' => [409, 'id_held_by_orphans'],
         'not_enrolled' => [409, 'not_enrolled'],
         'not_found' => [404, 'not_found'],
+        // An orphan claim by an admin who holds no grant on the entry (Minor 2).
+        'not_allowed' => [403, 'not_allowed'],
         'conflict' => [409, 'conflict'],
         'payload_invalid' => [400, 'payload_invalid'],
         'payload_too_large' => [413, 'payload_too_large'],
@@ -52,6 +56,8 @@ final class VaultFailure
         'hw_key_limit' => [409, 'hw_key_limit'],
         'hw_enrolment_required' => [403, 'hw_enrolment_required'],
         'hw_assertion_required' => [403, 'hw_assertion_required'],
+        // Server sharing (spec amendment): a Server grant while Server is off.
+        'server_off' => [409, 'server_off'],
     ];
 
     /** @return array{0:int,1:string} [status, reason] */
@@ -59,6 +65,10 @@ final class VaultFailure
     {
         if ($e instanceof VaultException && isset(self::MAP[$e->errorCode()])) {
             return self::MAP[$e->errorCode()];
+        }
+        // The Server key file is missing or unsafe (turning Server on); the deployment checks say which, never where.
+        if ($e instanceof ServerKeyUnavailable) {
+            return [409, ServerKeyUnavailable::REASON];
         }
         if ($e instanceof VaultException || $e instanceof InvalidArgumentException || $e instanceof CryptoException) {
             return [400, 'failed'];

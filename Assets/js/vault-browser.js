@@ -16,6 +16,9 @@
  * save at a time (M6), and every open or close of it bumps data-vault-editor-session on the form, which the generator
  * checks before it writes (T13 minor 1). Share buttons carry data-vault-share-type/-id/-label for vault-share.js
  * (owner only); Rename (owner only, R50) sends a group's new name through vault/save (R45).
+ * A page URL with ?entry=<id> (the at-risk link on the security page) opens that entry through vault/entry once the tree
+ * loads, as a click would; anything but a positive decimal id is ignored. A locked vault doesn't load this script; the
+ * unlock reloads the same URL, so the entry opens then.
  */
 (function (win) {
   'use strict';
@@ -774,6 +777,17 @@
     return n;
   }
 
+  // The ?entry= id of the page URL: a positive decimal of at most 15 digits, else null.
+  function deepLinkEntry() {
+    var raw;
+    try {
+      raw = new win.URL(text(win.location && win.location.href)).searchParams.get('entry');
+    } catch (e) {
+      return null;
+    }
+    return raw !== null && /^[1-9][0-9]{0,14}$/.test(raw) ? Number(raw) : null;
+  }
+
   function init() {
     var panes = q('[data-vault-panes]');
     var app = doc.getElementById('vault-app');
@@ -862,7 +876,13 @@
     if (ui.search) {
       ui.search.addEventListener('input', filter);
     }
-    loadTree();
+    var deep = deepLinkEntry();
+    var tree = loadTree();
+    if (deep !== null) {
+      Promise.resolve(tree).then(function () {
+        loadEntry(deep);
+      });
+    }
   }
 
   var api = kb() || (win.KBVault = {});

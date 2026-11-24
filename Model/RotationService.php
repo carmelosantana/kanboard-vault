@@ -182,7 +182,7 @@ class RotationService extends Base
             }
             $db = $this->vdb();
             $rekeyer = $this->rekeyer();
-            $principal = $rekeyer->principal($db, $userId);
+            $principal = $rekeyer->holder($db, $userId);
             if ($principal === null || $rekeyer->currentPrincipal($db, $userId, $sk) === null) {
                 throw new VaultException('not_found');
             }
@@ -273,7 +273,7 @@ class RotationService extends Base
             $this->lock()->exclusive(function () use ($userId, $sk1, $sk2, $pk2, $factors): void {
                 $db = $this->vdb();
                 $rekeyer = $this->rekeyer();
-                $principal = $rekeyer->principal($db, $userId) ?? throw new VaultException('not_found');
+                $principal = $rekeyer->holder($db, $userId) ?? throw new VaultException('not_found');
                 if ($rekeyer->rotation($db, $userId) !== null) {
                     throw new VaultException('rotation_in_progress');
                 }
@@ -406,7 +406,7 @@ class RotationService extends Base
         $incomplete = $this->lock()->exclusive(function () use ($userId): bool {
             $db = $this->vdb();
             $rekeyer = $this->rekeyer();
-            $principal = $rekeyer->principal($db, $userId);
+            $principal = $rekeyer->holder($db, $userId);
             $rotation = $rekeyer->rotation($db, $userId);
             if ($principal === null || $rotation === null) {
                 return false;
@@ -450,7 +450,7 @@ class RotationService extends Base
         return $this->lock()->shared(function () use ($userId, $sk2): array {
             $db = $this->vdb();
             $rekeyer = $this->rekeyer();
-            $principal = $rekeyer->principal($db, $userId);
+            $principal = $rekeyer->holder($db, $userId);
             $rotation = $rekeyer->rotation($db, $userId);
             $pk2 = self::publicKey($sk2);
             if ($principal === null || $rotation === null || $pk2 === null
@@ -492,7 +492,7 @@ class RotationService extends Base
     {
         $db = $this->vdb();
         $rekeyer = $this->rekeyer();
-        $principal = $rekeyer->principal($db, $userId);
+        $principal = $rekeyer->holder($db, $userId);
         $rotation = $rekeyer->rotation($db, $userId);
         if ($principal === null || $rotation === null) {
             return null;
@@ -576,6 +576,13 @@ class RotationService extends Base
         (new GrantModel($this->container, $this->clock))->reconcileExpired($type, $id);
         $row = $resolver->object($type, $id);
         $rekeyer = $this->rekeyer();
+        // Final-wave rotation ruling: on an object whose owner chain is gone (a quarantined orphan) nobody can re-key,
+        // so a principal that still holds a grant there gets the same DEK re-sealed to its new key at the same epoch,
+        // and keeps its claim. A row that opens with neither key falls through to the checks below.
+        if ($resolver->chainGone($db, $type, $row) && isset($resolver->keyHolders($type, $id, $this->now(), $row)[$userId])
+            && $this->resealToNewKey($db, $type, $id, (int) $row['key_epoch'], $userId, $sk2)) {
+            return true;
+        }
         if (! isset($resolver->effective($type, $id, $this->now(), $row)[$userId])) {
             $this->dropKeys($db, $type, $id, $userId);
             $rekeyer->enqueue($db, $type, $id, (int) $row['key_epoch']);
@@ -589,6 +596,24 @@ class RotationService extends Base
         }
         $this->dropKeys($db, $type, $id, $userId);
         $rekeyer->enqueue($db, $type, $id, (int) $row['key_epoch']);
+        return true;
+    }
+
+    // The principal's DEK at $epoch (opened with sk2, which reaches the old generation through the bridge) sealed to its
+    // new key in place of its old-generation row. False, and nothing written, when no row at $epoch opens.
+    private function resealToNewKey(VaultDb $db, string $type, int $id, int $epoch, int $userId, #[\SensitiveParameter] string $sk2): bool
+    {
+        $rekeyer = $this->rekeyer();
+        $dek = $rekeyer->openDek($db, $type, $id, $epoch, $userId, $sk2);
+        if ($dek === null) {
+            return false;
+        }
+        try {
+            $this->dropKeys($db, $type, $id, $userId);
+            $rekeyer->sealTo($db, $type, $id, $epoch, $dek, [$userId], false, true);
+        } finally {
+            sodium_memzero($dek);
+        }
         return true;
     }
 
@@ -651,7 +676,7 @@ class RotationService extends Base
             $method = (string) ($f['method'] ?? '');
             $kek = $f['kek'] ?? null;
             $credentialId = (string) ($f['credential_id'] ?? '');
-            if (! in_array($method, Wraps::METHODS, true) || ! is_string($kek) || strlen($kek) !== 32
+            if (! in_array($method, Wraps::HOLDER_METHODS, true) || ! is_string($kek) || strlen($kek) !== 32
                 || ($method === 'passphrase+prf') !== ($credentialId !== '')) {
                 throw new InvalidArgumentException('Vault rotation: invalid surviving factor');
             }

@@ -334,3 +334,30 @@ test('after a save, the list reloads first, then the entry', async () => {
   await flush();
   assert.deepEqual(held.map((h) => [h.action, h.body.id]), [['entry', 12]], 'then the saved entry');
 });
+
+// Task 12 fix: the owner's at-risk warning links to vault?entry=<id>. The unlocked browser opens that entry through
+// vault/entry, the same path a click takes; anything but a positive decimal id is ignored (no request, no error).
+test('?entry=<id> opens that entry; any other value is ignored', async () => {
+  const base = 'https://kb.test/?controller=VaultController&action=index&plugin=Vault';
+  const entry = { id: 42, title: 'Deep', username: 'u', url: '', tags: [], expires_at: null, updated_at: 0, version: 1,
+    group_id: 1, permission: 'owner', secrets: { password: true, notes: false, otp: false }, fields: [] };
+  const api = (action) => (action === 'tree' ? { ok: true, groups: [], shared_entries: false }
+    : action === 'entry' ? { ok: true, entry } : { ok: true });
+  const p = loadPage({ api, href: base + '&entry=42' });
+  await flush();
+  assert.deepEqual(p.calls.filter((c) => c.action === 'entry').map((c) => c.body), [{ id: 42 }]);
+  const detail = p.doc.querySelector('[data-vault-detail]');
+  assert.equal(detail.hidden, false, 'the entry view is open');
+  assert.equal(detail.querySelector('[data-field="title"]').textContent, 'Deep');
+  assert.equal(detail.getAttribute('data-vault-entry-id'), '42');
+
+  for (const bad of ['0', '-3', '4x', 'x', '1e3', '0x10', ' 5', '5.0', '', '12345678901234567', '%2F1']) {
+    const q = loadPage({ api, href: base + '&entry=' + bad });
+    await flush();
+    assert.equal(q.calls.filter((c) => c.action === 'entry').length, 0, `entry=${bad} is ignored`);
+    assert.equal(q.doc.querySelector('[data-vault-detail]').hidden, true, `entry=${bad}: nothing opens`);
+  }
+  const none = loadPage({ api, href: base });
+  await flush();
+  assert.equal(none.calls.filter((c) => c.action === 'entry').length, 0, 'no parameter, no request');
+});

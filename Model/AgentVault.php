@@ -108,7 +108,11 @@ class AgentVault extends Base
                 $db = $this->vdb();
                 (new Purger($this->container))->sweepOrphans($this->now());
                 $this->requireUnlockedOwner($db, $ownerId, $ownerSk);
-                $existing = $db->fetchOne('SELECT kind FROM vault_principals WHERE user_id = ?', [$agentId]);
+                $existing = $db->fetchOne('SELECT kind, state FROM vault_principals WHERE user_id = ?', [$agentId]);
+                // Important 4: a deleted user's tombstone holds this id (SQLite reuses ids); never take its keys over.
+                if ($existing !== null && $existing['state'] === 'orphaned') {
+                    throw new VaultException('id_held_by_orphans');
+                }
                 if ($existing !== null && $existing['kind'] === 'agent') {
                     throw new VaultException('already_enrolled');
                 }
@@ -473,6 +477,7 @@ class AgentVault extends Base
         $keypair = sodium_crypto_box_keypair();
         $sk = sodium_crypto_box_secretkey($keypair);
         try {
+            PrincipalModel::assertIdentity('agent', $agentId, $agentId);
             $db->insert('vault_principals', [
                 'user_id' => $agentId,
                 'kind' => 'agent',
@@ -501,6 +506,7 @@ class AgentVault extends Base
         $sk = sodium_crypto_box_secretkey($keypair);
         try {
             // 1. The new keypair and wrap. From here the principal is an agent (a human principal is converted, T14).
+            PrincipalModel::assertIdentity('agent', $agentId, $agentId);
             $db->execute(
                 "UPDATE vault_principals SET kind = 'agent', public_key = ?, key_gen = ?, state = 'active', live_user_id = ?, rotate_requested = 0 WHERE user_id = ?",
                 [base64_encode(sodium_crypto_box_publickey($keypair)), $gen, $agentId, $agentId]

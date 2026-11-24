@@ -1,6 +1,6 @@
 <?php
 require_once 'tests/units/Base.php';
-require_once __DIR__.'/Support/ServiceFixture.php';
+require_once __DIR__.'/Support/ServerFixture.php';
 
 use Kanboard\Core\Log\File;
 use Kanboard\Core\Log\Logger;
@@ -9,7 +9,9 @@ use Kanboard\Plugin\Vault\Model\HardwareKeys;
 use Kanboard\Plugin\Vault\Model\PrincipalModel;
 use Kanboard\Plugin\Vault\Model\Purger;
 use Kanboard\Plugin\Vault\Model\RotationService;
+use Kanboard\Plugin\Vault\Model\ServerPrincipal;
 use Kanboard\Plugin\Vault\Model\ShareModel;
+use Kanboard\Plugin\Vault\Secrets\ServiceSecretException;
 use Kanboard\Plugin\Vault\Model\VaultSettings;
 use Kanboard\Plugin\Vault\Test\Support\Fixtures;
 use Kanboard\Plugin\Vault\Test\Support\SoftAuthenticator;
@@ -23,7 +25,7 @@ use KanboardTests\units\Base;
 // email are searched for every fixture secret and for the secrets the run itself generated.
 class LogHygieneTest extends Base
 {
-    use ServiceFixture;
+    use ServerFixture;
 
     private string $kbLog;
     private string $phpLog;
@@ -47,6 +49,7 @@ class LogHygieneTest extends Base
         $this->oldErrorLog = ini_set('error_log', $this->phpLog);
         $this->oldLogErrors = ini_set('log_errors', '1');
         $this->setUpVault();
+        $this->setUpServer();
         $this->pdo()->prepare('UPDATE users SET email = ? WHERE id IN (?, ?)')->execute(['user@example.test', $this->alice, $this->bob]);
         $this->configureEmail();
         $this->container['emailClient']->method('send')->willReturnCallback(function (...$args) {
@@ -61,6 +64,7 @@ class LogHygieneTest extends Base
         ini_set('log_errors', $this->oldLogErrors === false ? '0' : $this->oldLogErrors);
         @unlink($this->kbLog);
         @unlink($this->phpLog);
+        $this->tearDownServer();
         $this->tearDownVault();
         parent::tearDown();
     }
@@ -91,7 +95,7 @@ class LogHygieneTest extends Base
 
         $audit = json_encode($this->auditRows(), JSON_THROW_ON_ERROR);
         $this->assertGreaterThan(20, count($this->auditRows()), 'the run audited its actions');
-        $this->assertCount(3, $this->mails, 'the failure notice, the share-reveal notice and the org recovery notice');
+        $this->assertCount(4, $this->mails, 'the failure notice, the share-reveal notice, the org recovery notice and the Server first-read notice');
         $haystacks = ['Kanboard log' => $kb, 'PHP error log' => $php, 'vault_audit' => $audit, 'emails' => implode("\n", $this->mails)];
         $needles = array_merge(Fixtures::SECRETS, $this->generated);
         $this->assertGreaterThan(count(Fixtures::SECRETS), count($needles));
@@ -111,6 +115,57 @@ class LogHygieneTest extends Base
         $a = $key->get($hw->challenge($this->alice, $purpose), 'https://kb.example', 'kb.example', $salt);
         $this->generated[] = $a['prf'];
         return $a;
+    }
+
+    // Task 9: Server sharing on, one allowed read and one read per refusal. Every refusal is logged as a consumer would
+    // log it, and the value is dumped to the PHP error log the careless ways (print_r, var_export).
+    private function serverReads(string $aliceSk): void
+    {
+        $this->enableServer();
+        $s = $this->store();
+        $g = $s->createGroup($this->alice, null, ['name' => Fixtures::GROUP_NAME]);
+        $e = $s->createEntry($this->alice, $g, Fixtures::fullEntry());
+        $unshared = $s->createEntry($this->alice, $g, Fixtures::fullEntry());
+        $this->grants()->grantServer($this->alice, $e, ['CveHunter'], ['password', Fixtures::FIELD_NAME], null, 1, $aliceSk);
+        $bobSk = $this->skFor($this->bob, Fixtures::BOB_PASSPHRASE);
+        $bobEntry = $s->createEntry($this->bob, $s->createGroup($this->bob, null, ['name' => 'bob group']), Fixtures::fullEntry());
+        $this->grants()->grantServer($this->bob, $bobEntry, ['CveHunter'], ['password'], null, null, $bobSk);
+        $field = 'vault://'.$e.'/'.rawurlencode(Fixtures::FIELD_NAME);
+
+        $value = $this->serverSecrets()->read('CveHunter', $field, 'loghygiene:1');
+        $this->assertSame(Fixtures::FIELD_VALUE, $value->reveal());
+        $this->generated[] = $value->reveal();
+        error_log(print_r($value, true));
+        error_log(var_export($value, true));
+
+        $refused = [];
+        // A fresh provider each time: it reads the key file as it is then.
+        $refuse = function (string $reason, string $consumer, string $ref) use (&$refused): void {
+            try {
+                $this->serverSecrets()->read($consumer, $ref);
+                $this->fail("$reason: read succeeded");
+            } catch (ServiceSecretException $x) {
+                $this->assertSame($reason, $x->reason());
+                $this->container['logger']->error((string) $x);
+                $refused[] = $reason;
+            }
+        };
+        $refuse('rate_limited', 'CveHunter', $field);
+        $refuse('not_found', 'CveHunter', 'vault://'.$e.'/'.rawurlencode(Fixtures::FIELD_NAME).'@2');
+        $refuse('consumer_not_allowed', 'Lifeboat', $field);
+        $refuse('field_not_allowed', 'CveHunter', 'vault://'.$e.'/username');
+        $refuse('not_shared', 'CveHunter', 'vault://'.$unshared.'/password');
+        $key = (string) file_get_contents($this->keyPath);
+        file_put_contents($this->keyPath, random_bytes(32));
+        $refuse('server_key_unavailable', 'CveHunter', 'vault://'.$bobEntry.'/password');
+        file_put_contents($this->keyPath, $key);
+        $this->container['userModel']->remove($this->bob);
+        $refuse('orphaned', 'CveHunter', 'vault://'.$bobEntry.'/password');
+        $this->grants()->revoke($this->alice, 'entry', $e, ServerPrincipal::ID, $aliceSk);
+        $refuse('revoked', 'CveHunter', $field);
+        $this->server()->disable(self::ADMIN);
+        $refuse('server_off', 'CveHunter', $field);
+        $this->assertEqualsCanonicalizing(ServiceSecretException::REASONS, $refused, 'every refusal ran');
     }
 
     private function runEveryService(): void
@@ -168,6 +223,8 @@ class LogHygieneTest extends Base
         $this->grants()->move($this->alice, 'entry', $e, $g1, $sk);
         $this->grants()->revoke($this->alice, 'group', $g1, $this->bob, $sk);
         $this->assertVaultError('not_found', fn () => $s->readField($this->bob, $e, 'password', $bobSk));
+
+        $this->serverReads($sk);
 
         // Recovery code: create, use (with a hardware key it removes).
         $code = $this->recovery()->createCode($this->alice, $sk);

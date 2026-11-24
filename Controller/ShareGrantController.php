@@ -4,6 +4,9 @@ namespace Kanboard\Plugin\Vault\Controller;
 use Kanboard\Plugin\Vault\Model\AuditModel;
 use Kanboard\Plugin\Vault\Model\GranteeDirectory;
 use Kanboard\Plugin\Vault\Model\GrantModel;
+use Kanboard\Plugin\Vault\Model\ObjectStore;
+use Kanboard\Plugin\Vault\Model\ServerGrant;
+use Kanboard\Plugin\Vault\Model\ServerPrincipal;
 use Kanboard\Plugin\Vault\Model\VaultException;
 
 // The sharing dialog, revoke and the activity view (spec: UI → The sharing dialog; Entries, groups and grants; Audit →
@@ -11,11 +14,17 @@ use Kanboard\Plugin\Vault\Model\VaultException;
 // (no-store, XFO DENY, frame-ancestors), with the generic failures of handle().
 //
 //   vault/sharing   {type, id}                       → {grants: [{grantee_id, name, kind, permission, expires_at}],
-//                                                        candidates: [{id, name, kind}], covered_entries (group)}
+//                                                        candidates: [{id, name, kind}], covered_entries (group),
+//                                                        server: {available}}
+//                     the Server grant (grantee -1)   → {grantee_id: -1, name, kind: server, permission, consumers,
+//                                                        fields, rate_per_hour, rate_burst}
+//   vault/grant-server {id, consumers, fields[], custom_fields, rate_per_hour?, rate_burst?}
+//                                                    → {}; then afterWrite
 //   vault/grant     {type, id, grantee_id, perm: read|edit, expires_at?, confirm?}
 //                     a group without confirm         → {confirm_required: true, covered_entries}; nothing granted
 //                     otherwise                       → {covered_entries (group)}; then afterWrite
-//   vault/revoke    {type, id, grantee_id}           → {suggest_rotate: true}; then afterWrite
+//   vault/revoke    {type, id, grantee_id}           → {suggest_rotate: true}; then afterWrite. grantee_id -1 is the
+//                                                        Server grant (no directory check: revoke never has one)
 //   vault/activity  {offset}                         → {rows, next_offset}; ACTIVITY_PAGE rows a page
 //
 // Only the owner may see the sharing view, grant or revoke: that is GrantModel's gate (not_found for anyone else, so an
@@ -25,16 +34,33 @@ use Kanboard\Plugin\Vault\Model\VaultException;
 //
 // The activity view shows exactly AuditModel::visibleTo's rows for the logged-in user, newest first, with names for
 // the actor and target and an object title only when this viewer can decrypt that object now.
+//
+// Server (spec amendment): sharing offers Server only for an entry while Server is on. A Server grant shows its
+// consumers, its fields and its rates. R1: custom field names are stored as MACs; the sharing and activity views map
+// them back to the entry's plain names with the viewer's key, and a MAC that matches no field (renamed or removed, or
+// Server off) is null. A MAC never reaches the browser.
 class ShareGrantController extends BaseVaultController
 {
     public const ACTIVITY_PAGE = 50;
 
     public function sharing(): void
     {
-        $this->withKey(function (int $userId): void {
-            $view = $this->grants()->sharing($userId, $this->type(), $this->intParam('id') ?? 0);
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
+            $type = $this->type();
+            $serverOn = ServerPrincipal::of($this->container)->isOn();
+            // The sk maps a Server grant's MACs back to names; Server off means no Server grant, so no key file read.
+            $view = $this->grants()->sharing($userId, $type, $this->intParam('id') ?? 0, $serverOn ? $sk : null);
             $names = [];
-            $grants = array_map(fn (array $g): array => [
+            $grants = array_map(fn (array $g): array => $g['kind'] === 'server' ? [
+                'grantee_id' => ServerPrincipal::ID,
+                'name' => t('Server'),
+                'kind' => 'server',
+                'permission' => $g['permission'],
+                'consumers' => $g['consumers'],
+                'fields' => array_map(self::shownField(...), $g['fields']),
+                'rate_per_hour' => $g['rate_per_hour'],
+                'rate_burst' => $g['rate_burst'],
+            ] : [
                 'grantee_id' => $g['grantee_id'],
                 'name' => $names[$g['grantee_id']] ??= $this->userName($g['grantee_id']),
                 'kind' => $g['kind'],
@@ -42,13 +68,62 @@ class ShareGrantController extends BaseVaultController
                 'expires_at' => $g['expires_at'],
             ], $view['grants']);
             $this->answer(['grants' => $grants, 'candidates' => $this->directory()->candidates($userId)]
-                + (isset($view['covered_entries']) ? ['covered_entries' => $view['covered_entries']] : []));
+                + (isset($view['covered_entries']) ? ['covered_entries' => $view['covered_entries']] : [])
+                + ['server' => ['available' => $serverOn && $type === 'entry']]);
+        });
+    }
+
+    // Spec amendment, The sharing dialog: the owner (unlocked) shares one entry with Server. The endpoint takes an entry
+    // id only (any other type is not_found). Consumers are split on commas and whitespace, the fields are the checked
+    // top-level keys (fields[]) plus the comma-separated custom field names, and the rates are optional decimal ints.
+    // GrantModel::grantServer validates all of it (payload_invalid), checks the owner (not_found) and Server (server_off).
+    // Requirement 18 (Codex R3-01): every refusal after CSRF is a server_grant_denied row: GrantModel's own, and here a
+    // locked session (serverKey) and this endpoint's type and shape checks.
+    public function grantServer(): void
+    {
+        $this->handle(function (): void {
+            $this->requirePostCsrf();
+            $type = $this->request->getRawValue('type');
+            $entryId = $type === null || $type === 'entry' ? ($this->intParam('id') ?? 0) : 0;
+            $deny = fn (VaultException|string $code) => $this->grants()->recordServerDenied('server_grant_denied', $this->userId(), $entryId > 0 ? 'entry' : null, $entryId, $code);
+            $sk = $this->serverKey($deny);
+            try {
+                try {
+                    if ($type !== null && $type !== 'entry') {
+                        throw new VaultException('not_found');
+                    }
+                    $consumers = $this->request->getRawValue('consumers');
+                    $fields = $this->request->getRawValue('fields') ?? [];
+                    $custom = $this->request->getRawValue('custom_fields') ?? '';
+                    if (! is_string($consumers) || ! is_array($fields) || ! array_is_list($fields) || ! is_string($custom)) {
+                        throw new VaultException('payload_invalid');
+                    }
+                } catch (VaultException $e) {
+                    $deny($e);
+                    throw $e;
+                }
+                $custom = array_values(array_filter(array_map('trim', explode(',', $custom)), static fn (string $f): bool => $f !== ''));
+                // GrantModel records its own refusals.
+                $this->grants()->grantServer(
+                    $this->userId(),
+                    $entryId,
+                    preg_split('/[\s,]+/', $consumers, -1, PREG_SPLIT_NO_EMPTY),
+                    [...$fields, ...$custom],
+                    $this->intParam('rate_per_hour'),
+                    $this->intParam('rate_burst'),
+                    $sk
+                );
+                $this->housekeeping()->afterWrite($this->userId(), $sk);
+                $this->answer([]);
+            } finally {
+                sodium_memzero($sk);
+            }
         });
     }
 
     public function grant(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             $type = $this->type();
             $id = $this->intParam('id') ?? 0;
             $granteeId = $this->intParam('grantee_id') ?? 0;
@@ -71,24 +146,44 @@ class ShareGrantController extends BaseVaultController
         });
     }
 
-    // Spec, Revocation: "Afterwards the UI suggests rotating the secrets themselves."
+    // Spec, Revocation: "Afterwards the UI suggests rotating the secrets themselves." A refused revoke of the Server
+    // grant (grantee -1) is audited: GrantModel records its own refusals, serverKey() and the type check here the rest.
     public function revoke(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
-            $this->grants()->revoke($userId, $this->type(), $this->intParam('id') ?? 0, $this->intParam('grantee_id') ?? 0, $sk);
-            $this->housekeeping()->afterWrite($userId, $sk);
-            $this->answer(['suggest_rotate' => true]);
+        $this->handle(function (): void {
+            $this->requirePostCsrf();
+            // intParam reads only non-negative ids; -1 is the Server grant.
+            $raw = $this->request->getRawValue('grantee_id');
+            $granteeId = $raw === (string) ServerPrincipal::ID || $raw === ServerPrincipal::ID ? ServerPrincipal::ID : ($this->intParam('grantee_id') ?? 0);
+            $id = $this->intParam('id') ?? 0;
+            $rawType = $this->request->getRawValue('type');
+            $knownType = is_string($rawType) && in_array($rawType, ObjectStore::TYPES, true) ? $rawType : null;
+            $deny = $granteeId !== ServerPrincipal::ID ? static function (): void {
+            } : fn (VaultException|string $code) => $this->grants()->recordServerDenied('server_revoke_denied', $this->userId(), $knownType, $id, $code);
+            $sk = $this->serverKey($deny);
+            try {
+                if ($knownType === null) {
+                    $deny('payload_invalid');
+                }
+                $type = $this->type();
+                $this->grants()->revoke($this->userId(), $type, $id, $granteeId, $sk);
+                $this->housekeeping()->afterWrite($this->userId(), $sk);
+                $this->answer(['suggest_rotate' => true]);
+            } finally {
+                sodium_memzero($sk);
+            }
         });
     }
 
     public function activity(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             $offset = $this->intParam('offset') ?? 0;
             $rows = AuditModel::of($this->container)->visibleTo($userId, $offset, self::ACTIVITY_PAGE + 1);
             $more = count($rows) > self::ACTIVITY_PAGE;
             $names = [];
             $titles = [];
+            $fieldNames = [];
             $out = [];
             foreach (array_slice($rows, 0, self::ACTIVITY_PAGE) as $r) {
                 $object = $r['object_type'] === null ? null : $r['object_type'].':'.$r['object_id'];
@@ -109,6 +204,10 @@ class ShareGrantController extends BaseVaultController
                     'count' => $r['count'],
                     'ip_trunc' => $r['ip_trunc'],
                     'ua_family' => $r['ua_family'],
+                    'consumer' => $r['consumer'],
+                    'field_name' => $this->activityField($userId, $r, $sk, $fieldNames),
+                    'entry_version' => $r['entry_version'],
+                    'reason' => $r['reason'],
                 ];
             }
             $this->answer(['rows' => $out, 'next_offset' => $more ? $offset + self::ACTIVITY_PAGE : null]);
@@ -134,6 +233,28 @@ class ShareGrantController extends BaseVaultController
         }
     }
 
+    // A Server read row's field as this viewer may see it: a top-level name as is; a MAC as the entry's plain name,
+    // looked up once per entry, or null when it matches none.
+    private function activityField(int $userId, array $r, #[\SensitiveParameter] string $sk, array &$cache): ?string
+    {
+        $f = $r['field_name'];
+        if (! ServerGrant::isMac($f)) {
+            return $f;
+        }
+        if ($r['object_type'] !== 'entry') {
+            return null;
+        }
+        $id = (int) $r['object_id'];
+        $cache[$id] ??= $this->grants()->fieldNamesByMac($userId, $id, $sk);
+        return $cache[$id][$f] ?? null;
+    }
+
+    // R1: a field the sharing view could not map back is still a MAC; it is shown as unknown (null), never as the MAC.
+    private static function shownField(string $f): ?string
+    {
+        return ServerGrant::isMac($f) ? null : $f;
+    }
+
     // An optional Unix time: absent or empty is no expiry; anything but decimal digits is payload_invalid. GrantModel
     // refuses one that isn't in the future.
     private function expiresAt(): ?int
@@ -154,5 +275,21 @@ class ShareGrantController extends BaseVaultController
     private function directory(): GranteeDirectory
     {
         return new GranteeDirectory($this->container);
+    }
+
+    // withKey()'s unlocked key for the Server grant and revoke endpoints (after CSRF, which the caller has checked: a
+    // forged request writes nothing), with a refusal recorded through $deny first (requirement 18, Codex R3-01): a
+    // locked session (or one that must enrol hardware keys) as locked, any other refusal by its code.
+    private function serverKey(callable $deny): string
+    {
+        try {
+            return $this->requireUnlocked();
+        } catch (ResponseSent $e) {
+            $deny('locked');
+            throw $e;
+        } catch (VaultException $e) {
+            $deny($e);
+            throw $e;
+        }
     }
 }

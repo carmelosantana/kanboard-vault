@@ -1,6 +1,6 @@
 <?php
 require_once 'tests/units/Base.php';
-require_once __DIR__.'/Support/ServiceFixture.php';
+require_once __DIR__.'/Support/ServerFixture.php';
 require_once __DIR__.'/Support/VaultTestResponse.php';
 
 use Kanboard\Core\Http\Request;
@@ -23,7 +23,7 @@ use KanboardTests\units\Base;
 // offered after a passphrase change), T11 M1 (bounded re-key), T13 (the generator for the new passphrase).
 class SecurityControllerTest extends Base
 {
-    use ServiceFixture;
+    use ServerFixture;
 
     protected function setUp(): void
     {
@@ -38,10 +38,12 @@ class SecurityControllerTest extends Base
         $this->container['vaultHousekeeping'] = fn () => new Housekeeping($this->container, $this->clock(), $this->rotation());
         $this->principals()->enrolHuman($this->alice, Fixtures::PASSPHRASE);
         $this->loginAs($this->alice);
+        $this->setUpServer();
     }
 
     protected function tearDown(): void
     {
+        $this->tearDownServer();
         $this->tearDownVault();
         parent::tearDown();
     }
@@ -384,5 +386,37 @@ class SecurityControllerTest extends Base
         $this->assertTrue($this->container['token']->validateReusableCSRFToken($x->query('.//input[@name="csrf_token"]/@value', $f)->item(0)?->nodeValue));
         $in = $x->query('.//input[@name="passphrase"]', $f)->item(0);
         $this->assertSame(['password', 'off', 'true'], [$in?->getAttribute('type'), $in?->getAttribute('autocomplete'), $in?->getAttribute('data-lpignore')]); // R70
+    }
+
+    // The at-risk warning on the owner's own page: alice's Server-shared entry that nobody else could claim is listed by
+    // id with a link to it in her vault; bob, who shares nothing with Server, sees none. No title in the page.
+    // Kills: the warning missing; another owner's entries listed; the title shown.
+    public function testSecurityPageListsTheOwnersEntriesAtRisk(): void
+    {
+        $this->enableServer();
+        $aliceSk = $this->skFor($this->alice, Fixtures::PASSPHRASE);
+        $g = $this->store()->createGroup($this->alice, null, ['name' => Fixtures::GROUP_NAME]);
+        $e = $this->store()->createEntry($this->alice, $g, Fixtures::entry(Fixtures::ENTRY_TITLE));
+        $this->grants()->grantServer($this->alice, $e, ['CveHunter'], ['password'], null, null, $aliceSk);
+
+        $this->unlock();
+        $body = $this->call(SecurityController::class, 'index', 'GET')->body;
+        $x = $this->dom($body);
+        $items = $x->query('//*[@data-vault-at-risk]');
+        $this->assertSame(1, $items->length);
+        $this->assertSame((string) $e, $items->item(0)->getAttribute('data-vault-at-risk'));
+        $link = $x->query('.//a', $items->item(0))->item(0);
+        $this->assertStringContainsString('controller=VaultController', (string) $link?->getAttribute('href'));
+        $this->assertStringContainsString('entry='.$e, (string) $link?->getAttribute('href'));
+        foreach ([Fixtures::ENTRY_TITLE, Fixtures::GROUP_NAME] as $secret) {
+            $this->assertStringNotContainsString($secret, $body);
+        }
+
+        $this->principals()->enrolHuman($this->bob, Fixtures::BOB_PASSPHRASE);
+        $this->jar->sets = [];
+        $this->loginAs($this->bob);
+        $this->unlock(Fixtures::BOB_PASSPHRASE);
+        $x = $this->dom($this->call(SecurityController::class, 'index', 'GET')->body);
+        $this->assertSame(0, $x->query('//*[@data-vault-at-risk]')->length);
     }
 }

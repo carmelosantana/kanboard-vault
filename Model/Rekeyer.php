@@ -30,9 +30,15 @@ use ValueError;
 // next key only, so a re-keyed object never again holds an old-generation row. Either secret key is accepted as
 // the principal's: sk1 opens old-generation rows, and sk2 opens new-generation rows directly and old-generation
 // rows through the bridge (sk1 under a key derived from sk2), with both keys checked against their public keys.
+//
+// Server (and, later, host) principals are seal targets only (spec amendment: security requirement 7): principal()
+// admits a Server principal so DEKs are sealed to it and every re-key re-seals to it while its grant lives, but only
+// HOLDER_KINDS hold a key here: holder(), currentPrincipal() and holderKeypairs() refuse every other kind, so Server
+// never opens a DEK, re-keys or drains the queue through this class.
 class Rekeyer extends Base
 {
     public const MAX_DRAIN = 500;
+    private const HOLDER_KINDS = ['human', 'agent'];
 
     private Closure $clock;
 
@@ -129,46 +135,97 @@ class Rekeyer extends Base
     public function rekeyRow(VaultDb $db, string $type, array $row, int $holderId, #[\SensitiveParameter] string $sk): bool
     {
         $id = (int) $row['id'];
-        $epoch = (int) $row['key_epoch'];
-        $ownerId = (int) $row['owner_id'];
         $recipients = $this->resolver()->effective($type, $id, $this->now(), $row);
-        if (! isset($recipients[$holderId]) || (int) $row['crypto_v'] !== ObjectStore::CRYPTO_V) {
+        if (! isset($recipients[$holderId])) {
             return false;
         }
-        $old = $this->openDek($db, $type, $id, $epoch, $holderId, $sk);
-        if ($old === null) {
+        $json = $this->decryptRow($db, $type, $row, $holderId, $sk);
+        if ($json === null) {
             return false;
         }
-        $new = random_bytes(Sealer::DEK_BYTES);
-        $json = '';
         try {
-            try {
-                $nonce = base64_decode((string) $row['nonce'], true);
-                $ct = base64_decode((string) $row['ciphertext'], true);
-                if ($nonce === false || $ct === false) {
-                    return false;
-                }
-                $json = Aead::open($nonce, $ct, $old, ObjectStore::ad($type, $id, $ownerId, $epoch));
-            } catch (CryptoException|SodiumException|ValueError) {
-                return false;
+            $this->writeFresh($db, $type, $row, $json, (int) $row['owner_id'], [], array_keys($recipients));
+            AuditModel::of($this->container, $this->clock)->record('rekey', ['actor_user_id' => $holderId, 'object_type' => $type, 'object_id' => $id]);
+            return true;
+        } finally {
+            sodium_memzero($json);
+        }
+    }
+
+    // An entry's change of owner (the orphan claim), inside the caller's exclusive lock: the holder opens the current DEK
+    // (a key row is all it takes here; the caller decides who may), the payload is decrypted under the old owner's AD and
+    // re-encrypted under a fresh DEK with key_epoch + 1 and the new owner's AD, owner_id and group_id are set, and every
+    // key row is replaced by the fresh DEK sealed to the recipients effective after the move; the queue row goes. False
+    // and nothing written when the holder can't open the DEK or the ciphertext doesn't open. Not audited here.
+    public function transferRow(VaultDb $db, array $row, int $holderId, #[\SensitiveParameter] string $holderSk, int $newOwnerId, int $newGroupId): bool
+    {
+        $json = $this->decryptRow($db, 'entry', $row, $holderId, $holderSk);
+        if ($json === null) {
+            return false;
+        }
+        try {
+            // Phase 2 (versions) hooks in here: every kept version of the entry is re-encrypted the same way, under the
+            // fresh DEK and the new owner's AD, in this transaction.
+            $this->writeFresh($db, 'entry', $row, $json, $newOwnerId, ['owner_id' => $newOwnerId, 'group_id' => $newGroupId], null);
+            return true;
+        } finally {
+            sodium_memzero($json);
+        }
+    }
+
+    // The object's payload JSON, opened as the holder at the row's key_epoch under its owner's AD, or null when the
+    // holder can't open the DEK or the row doesn't decrypt. Wipes the DEK; the caller wipes the JSON.
+    private function decryptRow(VaultDb $db, string $type, array $row, int $holderId, #[\SensitiveParameter] string $sk): ?string
+    {
+        if ((int) $row['crypto_v'] !== ObjectStore::CRYPTO_V) {
+            return null;
+        }
+        $id = (int) $row['id'];
+        $epoch = (int) $row['key_epoch'];
+        $dek = $this->openDek($db, $type, $id, $epoch, $holderId, $sk);
+        if ($dek === null) {
+            return null;
+        }
+        try {
+            $nonce = base64_decode((string) $row['nonce'], true);
+            $ct = base64_decode((string) $row['ciphertext'], true);
+            if ($nonce === false || $ct === false) {
+                return null;
             }
+            return Aead::open($nonce, $ct, $dek, ObjectStore::ad($type, $id, (int) $row['owner_id'], $epoch));
+        } catch (CryptoException|SodiumException|ValueError) {
+            return null;
+        } finally {
+            sodium_memzero($dek);
+        }
+    }
+
+    // Seals $json under a fresh DEK at key_epoch + 1 with $ownerId in the AD and writes it (with $set's columns) if the
+    // row is still at its epoch, then replaces every key row by the fresh DEK sealed to $recipients (null: the effective
+    // recipients once written) and dequeues the object. Wipes the DEK.
+    /** @param array<string,int> $set @param list<int>|null $recipients */
+    private function writeFresh(VaultDb $db, string $type, array $row, #[\SensitiveParameter] string $json, int $ownerId, array $set, ?array $recipients): void
+    {
+        $id = (int) $row['id'];
+        $epoch = (int) $row['key_epoch'];
+        $new = random_bytes(Sealer::DEK_BYTES);
+        try {
             $box = Aead::seal($json, $new, ObjectStore::ad($type, $id, $ownerId, $epoch + 1));
+            $cols = ['nonce' => base64_encode($box['nonce']), 'ciphertext' => base64_encode($box['ct']), 'key_epoch' => $epoch + 1] + $set;
             $changed = $db->execute(
-                'UPDATE '.RecipientResolver::TABLES[$type].' SET nonce = ?, ciphertext = ?, key_epoch = ? WHERE id = ? AND key_epoch = ?',
-                [base64_encode($box['nonce']), base64_encode($box['ct']), $epoch + 1, $id, $epoch]
+                'UPDATE '.RecipientResolver::TABLES[$type].' SET '.implode(', ', array_map(static fn (string $c): string => $c.' = ?', array_keys($cols)))
+                .' WHERE id = ? AND key_epoch = ?',
+                array_merge(array_values($cols), [$id, $epoch])
             );
             if ($changed !== 1) {
                 throw new RuntimeException('Vault: the object changed under the exclusive lock');
             }
+            $recipients ??= array_keys($this->resolver()->effective($type, $id, $this->now()));
             $db->execute('DELETE FROM vault_keys WHERE object_type = ? AND object_id = ?', [$type, $id]);
-            $this->sealTo($db, $type, $id, $epoch + 1, $new, array_keys($recipients), false, true);
+            $this->sealTo($db, $type, $id, $epoch + 1, $new, $recipients, false, true);
             $this->dequeue($db, $type, $id);
-            AuditModel::of($this->container, $this->clock)->record('rekey', ['actor_user_id' => $holderId, 'object_type' => $type, 'object_id' => $id]);
-            return true;
         } finally {
-            sodium_memzero($old);
             sodium_memzero($new);
-            sodium_memzero($json);
         }
     }
 
@@ -264,10 +321,10 @@ class Rekeyer extends Base
 
     // The principal, provided $sk is its current secret key (pk(sk) equals the stored pk) or, while it is
     // rotating, the next key (pk(sk) equals the rotation's new_pk); otherwise null.
-    /** @return array{public_key:string,key_gen:int}|null  the stored (current) key */
+    /** @return array{public_key:string,key_gen:int,kind:string}|null  the stored (current) key */
     public function currentPrincipal(VaultDb $db, int $userId, #[\SensitiveParameter] string $sk): ?array
     {
-        $principal = $this->principal($db, $userId);
+        $principal = $this->holder($db, $userId);
         if ($principal === null) {
             return null;
         }
@@ -318,7 +375,7 @@ class Rekeyer extends Base
     /** @return array<int,string> */
     private function holderKeypairs(VaultDb $db, int $userId, #[\SensitiveParameter] string $sk): array
     {
-        $principal = $this->principal($db, $userId);
+        $principal = $this->holder($db, $userId);
         if ($principal === null) {
             return [];
         }
@@ -357,11 +414,15 @@ class Rekeyer extends Base
     }
 
     // A principal whose Kanboard user was deleted (live_user_id NULL, R26) counts as not enrolled, so nothing is
-    // ever sealed to it again; the purge (or the next write) sweeps it into re-keys.
-    /** @return array{public_key:string,key_gen:int}|null  public_key as raw bytes */
+    // ever sealed to it again; the purge (or the next write) sweeps it into re-keys. The Server principal has no
+    // Kanboard user (live_user_id is always NULL) and is admitted as a seal target.
+    /** @return array{public_key:string,key_gen:int,kind:string}|null  public_key as raw bytes */
     public function principal(VaultDb $db, int $userId): ?array
     {
-        $row = $db->fetchOne('SELECT public_key, key_gen FROM vault_principals WHERE user_id = ? AND live_user_id IS NOT NULL', [$userId]);
+        $row = $db->fetchOne(
+            "SELECT public_key, key_gen, kind FROM vault_principals WHERE user_id = ? AND (live_user_id IS NOT NULL OR kind = 'server')",
+            [$userId]
+        );
         if ($row === null) {
             return null;
         }
@@ -369,7 +430,15 @@ class Rekeyer extends Base
         if ($pk === false || strlen($pk) !== SODIUM_CRYPTO_BOX_PUBLICKEYBYTES) {
             return null;
         }
-        return ['public_key' => $pk, 'key_gen' => (int) $row['key_gen']];
+        return ['public_key' => $pk, 'key_gen' => (int) $row['key_gen'], 'kind' => (string) $row['kind']];
+    }
+
+    // principal(), for a kind that may hold a key: a live human or agent. Null for Server (a seal target only).
+    /** @return array{public_key:string,key_gen:int,kind:string}|null */
+    public function holder(VaultDb $db, int $userId): ?array
+    {
+        $principal = $this->principal($db, $userId);
+        return $principal !== null && in_array($principal['kind'], self::HOLDER_KINDS, true) ? $principal : null;
     }
 
     private function dequeue(VaultDb $db, string $type, int $id): void

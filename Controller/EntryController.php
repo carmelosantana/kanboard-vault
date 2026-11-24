@@ -31,7 +31,7 @@ class EntryController extends BaseVaultController
 {
     public function tree(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             $tree = $this->store()->tree($userId, $sk);
             $names = [];
             $groups = [];
@@ -51,7 +51,7 @@ class EntryController extends BaseVaultController
 
     public function list(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             $offset = max(0, $this->intParam('offset') ?? 0);
             $groupId = $this->request->getRawValue('shared') ? null : ($this->intParam('group_id') ?? 0);
             $page = $this->store()->listPage($userId, $groupId, $sk, $offset, ObjectStore::LIST_LIMIT);
@@ -61,7 +61,7 @@ class EntryController extends BaseVaultController
 
     public function entry(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             $id = $this->intParam('id') ?? 0;
             $e = $this->store()->readEntry($userId, $id, $sk);
             $p = $e['payload'];
@@ -94,7 +94,7 @@ class EntryController extends BaseVaultController
     // once the value was read, and the value is sent only once the row is written.
     public function field(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             $id = $this->intParam('id') ?? 0;
             $value = $this->store()->readField($userId, $id, (string) $this->request->getRawValue('field'), $sk);
             try {
@@ -114,7 +114,7 @@ class EntryController extends BaseVaultController
 
     public function save(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             $type = $this->type();
             $payload = $this->payload();
             $id = $this->intParam('id');
@@ -137,7 +137,7 @@ class EntryController extends BaseVaultController
 
     public function move(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             $this->grants()->move($userId, $this->type(), $this->intParam('id') ?? 0, $this->intParam('parent_id'), $sk);
             $this->housekeeping()->afterWrite($userId, $sk);
             $this->answer([]);
@@ -146,7 +146,7 @@ class EntryController extends BaseVaultController
 
     public function delete(): void
     {
-        $this->withKey(function (int $userId, string $sk): void {
+        $this->withKey(function (int $userId, #[\SensitiveParameter] string $sk): void {
             $this->store()->deleteObject($userId, $this->type(), $this->intParam('id') ?? 0, $sk);
             $this->housekeeping()->afterWrite($userId, $sk);
             $this->answer([]);
