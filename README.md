@@ -204,7 +204,9 @@ stay closed. Keep the key file out of your database backups.
 
 The key file is 32 random bytes, a regular file owned by the web server's user, mode `0600`, with no symbolic link
 anywhere in its path. Vault never repairs it and never replaces it: a file that breaks any rule fails closed, and
-reads answer `server_key_unavailable`. Back it up on its own, away from the database. Without it, nothing shared with
+reads answer `server_key_unavailable`. PHP can only open by path, so the symbolic-link rule is a check before and
+after the open, not an atomic no-follow open: keep every directory above the key file root-owned and not group- or
+world-writable (see [docs/security.md](docs/security.md)). Back it up on its own, away from the database. Without it, nothing shared with
 Server can be read.
 
 Turning Server sharing off needs an admin and a confirmation, not your passphrase. It deletes every Server share, its
