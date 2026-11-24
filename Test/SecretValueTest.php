@@ -35,6 +35,32 @@ class SecretValueTest extends Base
         $this->assertSame(['one', 'two'], [$a->reveal(), $b->reveal()], 'each instance keeps its own bytes');
     }
 
+    // Codex R3-03: Vault's own copy is wiped when the SecretValue goes. sodium_memzero zeroes only a string nothing else
+    // holds, so the stored bytes must be a buffer of their own: not the caller's string, and not shared with a revealed
+    // copy. debug_zval_dump shows the stored string's refcount (the argument adds one: 2 means sole owner) while the
+    // caller's input and a revealed copy are still alive; the revealed copy and the input outlive the wrapper intact.
+    // Kills: the bytes kept as a plain WeakMap string shared with the caller (no wipe can zero it); reveal() handing out
+    // the stored buffer itself; a wipe that reaches the consumer's copy or the caller's input.
+    public function testStoredBytesAreSoleOwnedAndWipedCopiesSurvive(): void
+    {
+        $input = str_repeat('k', 24).bin2hex(random_bytes(4)); // not interned
+        $v = SecretValue::of($input);
+        $revealed = $v->reveal();
+        $map = (new ReflectionClass(SecretValue::class))->getStaticPropertyValue('bytes');
+        $holder = $map[$v];
+        $this->assertIsObject($holder, 'the bytes sit in a holder that can wipe them');
+        ob_start();
+        (fn () => debug_zval_dump($this->bytes))->call($holder);
+        $dump = (string) ob_get_clean();
+        $this->assertStringContainsString('refcount(2)', $dump, 'sole owner of its buffer: '.trim(preg_replace('/"[^"]*"/', '"…"', $dump)));
+        unset($holder, $map, $v);
+        gc_collect_cycles();
+        $this->assertSame(str_repeat('k', 24), substr($revealed, 0, 24), 'the revealed copy is the consumer\'s');
+        $this->assertSame($input, $revealed);
+        $this->assertSame(str_repeat('k', 24), substr($input, 0, 24), 'the caller\'s input is untouched');
+        $this->assertSame([], (new SecretValueTestShape())->props(SecretValue::of('x')), 'still no properties');
+    }
+
     public function testNothingThatWalksTheObjectShowsTheValue(): void
     {
         $v = SecretValue::of(self::VALUE);
@@ -91,5 +117,14 @@ class SecretValueTest extends Base
         $v = SecretValue::of(self::VALUE);
         $this->expectException(Error::class);
         $s = (string) $v;
+    }
+}
+
+// Reads an object's properties from inside its class scope (get_object_vars bound to the class).
+final class SecretValueTestShape
+{
+    public function props(object $o): array
+    {
+        return (fn () => get_object_vars($this))->call($o);
     }
 }

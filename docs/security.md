@@ -63,8 +63,9 @@ What Server sharing does not defend against:
 
 `SecretValue`, what a read returns, makes a narrow claim. Its bytes live in a private static `WeakMap`, not a
 property, so `var_dump`, `print_r`, `var_export`, `json_encode` and a printed trace show nothing, and it can't be
-serialised, cloned or cast to a string. That stops a **wrapper** from leaking by accident. The string `reveal()`
-returns is ordinary PHP data, and Vault can't control its copies.
+serialised, cloned or cast to a string. That stops a **wrapper** from leaking by accident. Vault's own copy is a
+buffer nothing else shares, and it is zeroed (`sodium_memzero`) when the `SecretValue` is collected. The string
+`reveal()` returns is a separate copy: ordinary PHP data, and Vault can't control its copies.
 
 The key file is stricter than Matinee's `KeyStore`, which follows path components and repairs a loose mode with
 `chmod`. Dropping that repair is a follow-up in Matinee.
