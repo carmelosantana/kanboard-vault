@@ -24,4 +24,20 @@ class SettingsAccessRuleTest extends Base
             $this->assertSame([Role::APP_ADMIN], $map->getRoles('VaultSettingsController', $action), $action);
         }
     }
+
+    /** Without libsodium initialize() returns early; the settings controller is still reachable by URL. */
+    public function testTheRuleHoldsWithoutLibsodium(): void
+    {
+        $this->container['hook'] = new Hook();
+        (new class($this->container) extends Plugin {
+            public function isSupported(): bool
+            {
+                return false;
+            }
+        })->initialize();
+        $map = $this->container['applicationAccessMap'];
+        foreach (['index', 'save', 'server'] as $action) {
+            $this->assertSame([Role::APP_ADMIN], $map->getRoles('VaultSettingsController', $action), $action);
+        }
+    }
 }

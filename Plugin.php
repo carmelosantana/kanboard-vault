@@ -32,6 +32,10 @@ class Plugin extends Base
 {
     public function initialize(): void
     {
+        // Its own rule, set before the libsodium check: the controller stays reachable by URL without routes.
+        // The old shared name SettingsController took core's admin rule; this one would fall to the app-user default (#7337).
+        $this->applicationAccessMap->add('VaultSettingsController', '*', Role::APP_ADMIN);
+
         // Without libsodium there is no safe crypto: register only the admin notice, no routes.
         if (! $this->isSupported()) {
             $this->hook->on('template:layout:top', ['template' => 'Vault:layout/sodium_notice']);
@@ -114,8 +118,6 @@ class Plugin extends Base
         $this->route->addRoute('vault/settings', 'VaultSettingsController', 'index', 'Vault');
         $this->route->addRoute('vault/settings/save', 'VaultSettingsController', 'save', 'Vault');
         $this->route->addRoute('vault/settings/server', 'VaultSettingsController', 'server', 'Vault');
-        // Its own rule: the old shared name SettingsController took core's admin rule; this one would fall to the app-user default (#7337).
-        $this->applicationAccessMap->add('VaultSettingsController', '*', Role::APP_ADMIN);
         $this->route->addRoute('vault/orphans/claim', 'OrphanController', 'claim', 'Vault');
         $this->route->addRoute('vault/orphans/destroy', 'OrphanController', 'destroy', 'Vault');
         $this->hook->on('template:config:sidebar', ['template' => 'Vault:config/sidebar']);
