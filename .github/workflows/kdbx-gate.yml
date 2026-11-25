@@ -20,11 +20,11 @@ jobs:
         with:
           path: Vault
           persist-credentials: false
-      # The throwaway Kanboard image comes from the plugins harness's testing/Dockerfile.sodium, at a pinned commit.
+      # The throwaway Kanboard image comes from kanboard-plugin-ci's testing/Dockerfile.sodium, at a pinned commit.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          repository: carmelosantana/kanboard-plugins
-          ref: e42e6e6b33aa6b71e0c81fa53dc2df08ed91079f
+          repository: carmelosantana/kanboard-plugin-ci
+          ref: 1d719a2084fc2ab6e77cbc99377b2f318f60a638
           path: harness
           sparse-checkout: testing/Dockerfile.sodium
           sparse-checkout-cone-mode: false
