@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           repository: carmelosantana/kanboard-plugin-ci
-          ref: 1d719a2084fc2ab6e77cbc99377b2f318f60a638
+          ref: 21719ae8cc49d656a3644da8ea6c30093f0345be
           path: harness
           sparse-checkout: testing/Dockerfile.sodium
           sparse-checkout-cone-mode: false
